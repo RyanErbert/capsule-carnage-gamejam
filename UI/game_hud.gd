@@ -29,7 +29,7 @@ func _ready() -> void:
 func _on_version_mismatch(server_build: String, client_build: String) -> void:
 	_outdated = true
 	_update_banner.visible = true
-	_update_banner.text = "GAME OUT OF DATE — server is on %s, you are on %s\nPress F9 to update (runs git pull), then restart the game" % [server_build, client_build]
+	_update_banner.text = "VERSION MISMATCH — server: %s, you: %s\nPress F9 to update (runs git pull), then restart.\nIf F9 says already up to date, the SERVER is behind — it's still deploying, wait a minute." % [server_build, client_build]
 
 
 func _input(event: InputEvent) -> void:
@@ -43,7 +43,11 @@ func _run_git_pull() -> void:
 	var output: Array = []
 	var code := OS.execute("git", ["-C", project_dir, "pull", "--ff-only"], output, true)
 	if code == 0:
-		_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % "".join(output).strip_edges().left(200)
+		var result := "".join(output).strip_edges()
+		if result.contains("Already up to date"):
+			_update_banner.text = "You already have the latest — the SERVER is behind.\nIt should finish deploying shortly; restart the game in a minute or two."
+		else:
+			_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % result.left(200)
 	else:
 		_update_banner.text = "Update failed (is git installed / do you have local changes?)\n%s" % "".join(output).strip_edges().left(200)
 
