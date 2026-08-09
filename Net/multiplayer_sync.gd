@@ -28,7 +28,12 @@ func name_of(id: String) -> String:
 	return _remotes[id].player_name if _remotes.has(id) else "???"
 
 
+func remotes() -> Dictionary:
+	return _remotes
+
+
 func _ready() -> void:
+	add_to_group("net_sync")
 	Net.socket_connected.connect(_on_socket_connected)
 	Net.socket_disconnected.connect(_on_socket_disconnected)
 	Net.event_received.connect(_on_event)

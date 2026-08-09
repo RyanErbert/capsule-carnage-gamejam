@@ -15,6 +15,7 @@
 [ext_resource type="Texture2D" uid="uid://cwpt2fyf47my6" path="res://Scenes/TrenchBoomMaps/textures/thumb-concrete_5728.jpg" id="13_wgpmd"]
 [ext_resource type="Script" uid="uid://cxrb2w2g4lugk" path="res://Net/multiplayer_sync.gd" id="14_netsync"]
 [ext_resource type="Script" path="res://Items/world_items.gd" id="16_items"]
+[ext_resource type="Script" path="res://Items/projectiles.gd" id="17_proj"]
 [ext_resource type="PackedScene" path="res://UI/game_hud.tscn" id="15_hud"]
 
 [sub_resource type="Environment" id="Environment_ywrmy"]
@@ -1536,6 +1537,10 @@ shape = SubResource("ConvexPolygonShape3D_ckrex")
 
 [node name="WorldItems" type="Node3D" parent="." node_paths=PackedStringArray("player")]
 script = ExtResource("16_items")
+player = NodePath("../player")
+
+[node name="WorldProjectiles" type="Node3D" parent="." node_paths=PackedStringArray("player")]
+script = ExtResource("17_proj")
 player = NodePath("../player")
 
 [node name="MultiplayerSync" type="Node" parent="." unique_id=203273616 node_paths=PackedStringArray("player")]
