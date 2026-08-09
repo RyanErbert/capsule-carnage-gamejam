@@ -40,6 +40,7 @@ function readGitCommit() {
 }
 const SERVER_BUILD = readGitCommit();
 if (SERVER_BUILD) console.log(`Server build: ${SERVER_BUILD}`);
+const STARTED_AT = Date.now();
 
 app.get('/api/levels', (req, res) => {
   try {
@@ -249,14 +250,24 @@ setInterval(() => {
 }, 30000);
 
 io.on('connection', (socket) => {
-  // Send the current roster (with positions) so a client sitting in the menu can
-  // render a live birdseye spectator view of a game already in progress. Ongoing
-  // movement arrives via the existing broadcast 'playerMoved'/'newPlayer' events.
+  // Send the current game state so a plain connection (the web spectator
+  // dashboard — the game itself is Godot-only now) can render a live birdseye
+  // view of a game in progress. Ongoing movement arrives via the existing
+  // broadcast 'playerMoved'/'newPlayer'/'scores'/'holderChanged' events.
   socket.emit('spectatorPlayers', {
     activeLevel,
     players: Object.fromEntries(
       [...readyIds].filter(id => players[id]).map(id => [id, players[id]])
-    )
+    ),
+    scores,
+    holder: holderID,
+    build: SERVER_BUILD,
+    uptimeMs: Date.now() - STARTED_AT
+  });
+
+  // Latency probe for the spectator dashboard (socket.io ack round-trip).
+  socket.on('pingCheck', (cb) => {
+    if (typeof cb === 'function') cb();
   });
 
   socket.on('selectLevel', (level) => {

@@ -58,7 +58,9 @@ func _physics_process(delta: float) -> void:
 		last_grounded_time = now
 
 	# --- Input (camera-relative, like the web's camera.getWorldDirection) ---
-	var input_dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
+	# Ignore gameplay keys while a Control (chat input) has keyboard focus.
+	var typing := get_viewport().gui_get_focus_owner() != null
+	var input_dir := Vector2.ZERO if typing else Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	var cam_yaw: float = camera_rig.yaw if camera_rig else 0.0
 	var forward := Vector3(-sin(cam_yaw), 0, -cos(cam_yaw))
 	var right := Vector3(-forward.z, 0, forward.x)
@@ -66,7 +68,7 @@ func _physics_process(delta: float) -> void:
 	var input_mag := wish_dir.length()
 
 	# --- Sprint stamina ---
-	var wants_sprint := Input.is_action_pressed("sprint") and input_mag > 0.0
+	var wants_sprint := not typing and Input.is_action_pressed("sprint") and input_mag > 0.0
 	sprinting = wants_sprint and not sprint_exhausted
 	if sprinting:
 		sprint_stamina = maxf(0.0, sprint_stamina - delta)
@@ -112,7 +114,7 @@ func _physics_process(delta: float) -> void:
 	jump_buffer = maxf(0.0, jump_buffer - delta)
 	var can_jump := (now - last_grounded_time) < COYOTE_TIME
 
-	if Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
+	if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
 		if not charging_jump:
 			charging_jump = true
 			jump_charge = 1.0

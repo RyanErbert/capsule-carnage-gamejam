@@ -1,7 +1,8 @@
 extends CanvasLayer
 
 ## In-game HUD (PORT_BLUEPRINT.md §6.3/§6.4): leader display top-center,
-## "YOU'RE IT" banner, hold-Tab scoreboard. Chat/meters/inventory come later.
+## "YOU'RE IT" banner, hold-Tab scoreboard, chat (T to talk, web §6.5).
+## Meters/inventory come later.
 
 @export var sync_node: Node
 
@@ -11,6 +12,11 @@ extends CanvasLayer
 @onready var _scoreboard_text: Label = $Scoreboard/Margin/Rows
 @onready var _version_label: Label = $VersionLabel
 @onready var _update_banner: Label = $UpdateBanner
+@onready var _chat_log: VBoxContainer = $ChatLog
+@onready var _chat_input: LineEdit = $ChatInput
+
+const CHAT_MAX_ROWS := 8  # web: chatLog keeps the last 8 rows
+const CMD_COLOR := Color("#ffd54a")
 
 ## Render deploy hook — kicks a server redeploy (used when the server is the
 ## stale side). Owners consider this key non-sensitive for this project.
@@ -29,6 +35,10 @@ func _ready() -> void:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
 		sync_node.version_mismatch.connect(_on_version_mismatch)
+	_chat_input.text_submitted.connect(_on_chat_submitted)
+	_chat_input.text_changed.connect(_on_chat_text_changed)
+	_chat_input.focus_exited.connect(_close_chat)
+	Net.event_received.connect(_on_net_event)
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -60,10 +70,111 @@ func _diagnose_mismatch(server_build: String) -> void:
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
-		if _offer_pull and event.keycode == KEY_F9:
+		if _chat_input.visible:
+			# LineEdit handles typing + Enter; we only intercept Esc to close.
+			if event.keycode == KEY_ESCAPE:
+				_close_chat()
+				get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_T and not event.echo:
+			_open_chat()
+			get_viewport().set_input_as_handled()  # don't type the opening "t"
+		elif _offer_pull and event.keycode == KEY_F9:
 			_run_git_pull()
 		elif _offer_server_kick and event.keycode == KEY_F10:
 			_trigger_server_deploy()
+
+
+# --- Chat (web §6.5: T to talk, Enter sends, Esc/unfocus closes) ---
+
+func _open_chat() -> void:
+	_chat_input.visible = true
+	_chat_input.text = ""
+	_on_chat_text_changed("")
+	_chat_input.call_deferred("grab_focus")
+
+
+func _close_chat() -> void:
+	if not _chat_input.visible:
+		return
+	_chat_input.visible = false
+	_chat_input.release_focus()
+
+
+func _on_chat_text_changed(text: String) -> void:
+	# Commands render yellow while typing, like the web input.
+	_chat_input.add_theme_color_override("font_color", CMD_COLOR if text.begins_with("/") else Color.WHITE)
+
+
+func _on_chat_submitted(text: String) -> void:
+	var msg := text.strip_edges().left(200)
+	if msg != "":
+		if msg.begins_with("/"):
+			_run_chat_command(msg)
+		else:
+			Net.emit_event("chat", msg)
+	_close_chat()
+
+
+func _run_chat_command(msg: String) -> void:
+	var parts := msg.substr(1).split(" ", false)
+	var cmd := parts[0].to_lower() if parts.size() > 0 else ""
+	var arg := parts[1].to_lower() if parts.size() > 1 else ""
+	match cmd:
+		"vote":
+			if arg == "yes" or arg == "y":
+				Net.emit_event("castVote", true)
+			elif arg == "no" or arg == "n":
+				Net.emit_event("castVote", false)
+			else:
+				Net.emit_event("startEndVote")
+		"end":
+			Net.emit_event("startEndVote")
+		"help":
+			_add_system_row("Commands: /vote yes, /vote no, /end (start end-game vote)")
+		_:
+			_add_system_row("Unknown command: /" + cmd)
+
+
+func _on_net_event(event: String, data: Variant) -> void:
+	match event:
+		"chatMessage":
+			if data is Dictionary and str(data.get("text", "")) != "":
+				_add_chat_row(str(data.get("name", "Player")), str(data.get("color", "#ffffff")), str(data.get("text", "")))
+		"systemMessage":
+			if data is Dictionary and str(data.get("text", "")) != "":
+				_add_system_row(str(data.get("text", "")))
+		"gameEnded":
+			_add_system_row("Game ended.")
+
+
+func _bb_escape(s: String) -> String:
+	return s.replace("[", "[lb]")
+
+
+func _add_chat_row(pname: String, color_hex: String, text: String) -> void:
+	if not color_hex.begins_with("#"):
+		color_hex = "#ffffff"
+	_push_chat_row("[color=%s]%s:[/color] %s" % [color_hex, _bb_escape(pname), _bb_escape(text)])
+
+
+func _add_system_row(text: String) -> void:
+	_push_chat_row("[color=#ffd54a]%s[/color]" % _bb_escape(text))
+
+
+func _push_chat_row(bbcode: String) -> void:
+	var row := RichTextLabel.new()
+	row.bbcode_enabled = true
+	row.fit_content = true
+	row.scroll_active = false
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_theme_font_size_override("normal_font_size", 15)
+	row.add_theme_color_override("font_outline_color", Color.BLACK)
+	row.add_theme_constant_override("outline_size", 6)
+	row.text = "[right]%s[/right]" % bbcode
+	_chat_log.add_child(row)
+	while _chat_log.get_child_count() > CHAT_MAX_ROWS:
+		_chat_log.get_child(0).free()
 
 
 func _run_git_pull() -> void:

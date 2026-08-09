@@ -3,505 +3,319 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cube Fight!</title>
+  <title>Capsule Carnage — Spectator</title>
   <style>
     @font-face {
       font-family: '04b_03';
       src: url('/fonts/04B_03__.TTF') format('truetype');
       font-display: swap;
     }
-    @import url('https://fonts.googleapis.com/css2?family=Lato:wght@400;700&display=swap');
-    * { margin: 0; padding: 0; }
-    body { overflow: hidden; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-    canvas { display: block; touch-action: none; }
-    #name-screen {
-      position: absolute;
-      inset: 0;
-      background: rgba(0,0,0,0.85);
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      background: #0c0e12;
+      color: #dde3ea;
+      font-family: '04b_03', monospace;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      z-index: 10;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      color: white;
-      overflow-y: auto;
-      padding: 10px 0;
     }
-    #menu-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: auto auto;
-      gap: 12px;
-      width: 90%;
-      max-width: 800px;
-      flex: 1;
-      min-height: 0;
-    }
-    .menu-panel {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 10px;
-      padding: 8px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      overflow: hidden;
-    }
-    .menu-panel h2 {
-      font-size: 11px;
-      color: #888;
-      letter-spacing: 2px;
-      margin: 0;
-    }
-    #play-panel {
-      justify-content: space-between;
-    }
-    /* Single-map selector */
-    .single-map {
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-    }
-    .single-map-stage {
-      position: relative;
-      width: 100%;
-      display: flex;
-      justify-content: center;
-    }
-    .single-map-stage .level-card {
-      cursor: default;
-      width: 100%;
-      max-width: 480px;
-    }
-    .single-map-stage .level-card:hover {
-      transform: none;
-      border-color: #4488ff;
-    }
-    .single-map-stage .level-card canvas {
-      width: 100%;
-      height: auto;
-    }
-    .map-nav {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 14px;
-    }
-    .map-name {
-      font-size: 14px;
-      color: #fff;
-      letter-spacing: 1px;
-      text-transform: capitalize;
-      min-width: 110px;
-      text-align: center;
-    }
-    #title-canvas { image-rendering: pixelated; margin-bottom: 4px; }
-    #name-screen label { font-size: 13px; color: #aaa; }
-    #name-input {
-      font-size: 18px;
-      padding: 6px 14px;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      text-align: center;
-      border: 2px solid #fff;
-      background: rgba(255,255,255,0.1);
-      color: white;
-      border-radius: 6px;
-      outline: none;
-      max-width: 200px;
-      width: 200px;
-      -webkit-user-select: text; user-select: text;
-    }
-    #name-input::placeholder { color: rgba(255,255,255,0.4); }
-    .option-row {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      justify-content: center;
-    }
-    .shape-btn {
-      width: 50px; height: 50px;
-      border: 2px solid #555;
-      border-radius: 8px;
-      background: rgba(255,255,255,0.08);
-      color: white;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 10px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: border-color 0.15s;
-    }
-    .shape-btn.selected { border-color: #4488ff; background: rgba(68,136,255,0.2); }
-    .shape-btn:hover { border-color: #88aaff; }
-    #color-picker {
-      width: 50px; height: 40px;
-      border: none; border-radius: 6px;
-      cursor: pointer; background: none;
-    }
-    #join-btn {
-      margin-top: 8px;
-      padding: 10px 32px;
-      font-size: 18px;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-weight: bold;
-      background: #4488ff;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    #join-btn:hover { background: #3366dd; }
-    #hud {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      color: white;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 14px;
-      text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
-    }
-    #leader-display {
-      position: absolute;
-      top: 12px;
-      left: 50%;
-      transform: translateX(-50%);
-      color: white;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 18px;
-      font-weight: bold;
-      text-shadow: 1px 1px 3px rgba(0,0,0,0.9);
-      text-align: center;
-      display: none;
-      pointer-events: none;
-    }
-    #leader-display .crown { font-size: 22px; }
-    #joystick-base {
-      position: absolute;
-      bottom: 30px; left: 30px;
-      width: 120px; height: 120px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.15);
-      border: 3px solid rgba(255,255,255,0.4);
-      touch-action: none;
-      z-index: 30;
-    }
-    #joystick-knob {
-      position: absolute; top: 50%; left: 50%;
-      width: 50px; height: 50px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.5);
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-    }
-    #jump-btn {
-      position: absolute;
-      bottom: 40px; right: 40px;
-      width: 80px; height: 80px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.3);
-      border: 3px solid rgba(255,255,255,0.6);
-      color: white;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 16px; font-weight: bold;
-      display: flex; align-items: center; justify-content: center;
-      user-select: none; -webkit-user-select: none;
-      touch-action: none;
-      text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
-      z-index: 30;
-    }
-    #jump-btn:active { background: rgba(255,255,255,0.5); }
-
-    /* Scoreboard */
-    #scoreboard {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.82);
-      border: 2px solid rgba(255,255,255,0.3);
-      border-radius: 10px;
-      padding: 16px 24px;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      color: white;
-      z-index: 20;
-      display: none;
-      min-width: 260px;
-      pointer-events: none;
-    }
-    #scoreboard h3 {
-      text-align: center;
-      margin: 0 0 10px 0;
-      font-size: 16px;
-      letter-spacing: 2px;
-      color: #aaa;
-      border-bottom: 1px solid rgba(255,255,255,0.2);
-      padding-bottom: 6px;
-    }
-    .sb-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 4px 0;
-      font-size: 14px;
-    }
-    .sb-row.holder { color: #ff6666; }
-    .sb-row.leader { color: #ffd700; }
-    .sb-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .sb-score { font-weight: bold; min-width: 40px; text-align: right; }
-
-    /* Meters */
-    .meter-wrap {
-      position: absolute;
-      bottom: 28px;
-      width: 180px;
-      height: 10px;
-      background: rgba(0,0,0,0.5);
-      border: 1px solid rgba(255,255,255,0.25);
-      border-radius: 5px;
-      overflow: visible;
-      pointer-events: none;
-      z-index: 5;
-    }
-    @media (pointer: coarse) {
-      .meter-wrap { bottom: 170px; }
-    }
-    #sprint-meter { left: calc(50% - 195px); }
-    #jump-meter   { left: calc(50% + 15px); }
-    .meter-fill {
-      height: 100%;
-      width: 100%;
-      border-radius: 4px;
-      transition: background-color 0.15s;
-    }
-    /* Level select */
-    #level-select {
-      display: none;
-      text-align: center;
-      width: 100%;
-    }
-    .level-carousel {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      justify-content: center;
-    }
-    .level-arrow {
-      background: rgba(255,255,255,0.15);
-      border: 2px solid rgba(255,255,255,0.4);
-      color: white;
-      font-size: 22px;
-      width: 36px; height: 36px;
-      border-radius: 50%;
-      cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      user-select: none; -webkit-user-select: none;
-      flex-shrink: 0;
-      transition: background 0.15s;
-    }
-    .level-arrow:hover { background: rgba(255,255,255,0.3); }
-    .level-grid {
-      display: flex;
-      gap: 12px;
-      overflow-x: auto;
-      scroll-snap-type: x mandatory;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: none;
-      flex: 1;
-      min-width: 0;
-    }
-    .level-grid::-webkit-scrollbar { display: none; }
-    .level-card {
-      cursor: pointer;
-      border: 2px solid #555;
-      border-radius: 8px;
-      overflow: hidden;
-      transition: border-color 0.15s, transform 0.15s;
-      background: rgba(0,0,0,0.3);
-      scroll-snap-align: center;
-      flex-shrink: 0;
-    }
-    .level-card:hover {
-      border-color: #88aaff;
-      transform: scale(1.05);
-    }
-    .level-card.selected {
-      border-color: #4488ff;
-      border-width: 3px;
-      box-shadow: 0 0 16px rgba(68,136,255,0.7), inset 0 0 12px rgba(68,136,255,0.15);
-    }
-    .level-card canvas { display: block; }
-    .level-label {
-      padding: 4px 8px;
-      font-size: 12px;
-      text-align: center;
-      color: #ccc;
-      text-transform: capitalize;
-    }
-
-    /* Lobby options */
-    .lobby-option {
-      padding: 6px 14px;
-      border: 2px solid #555;
-      border-radius: 6px;
-      color: #ccc;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 11px;
-      cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-      user-select: none; -webkit-user-select: none;
-      letter-spacing: 1px;
-    }
-    .lobby-option:hover:not(.disabled) { border-color: #88aaff; }
-    .lobby-option.selected {
-      border-color: #4488ff;
-      background: rgba(68,136,255,0.2);
-      color: white;
-    }
-    .lobby-option.disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-    }
-    #infinite-ammo-check {
-      width: 16px; height: 16px;
-      accent-color: #4488ff;
-      cursor: pointer;
-    }
-
-    /* Active game panel */
-    #active-game-info {
-      width: 100%;
-      flex: 1;
-      display: none;
-      overflow-y: auto;
-    }
-    #active-game-info .agi-box {
-      background: rgba(68,136,255,0.08);
-      border: 1px solid rgba(68,136,255,0.4);
-      border-radius: 10px;
+    header {
+      display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
       padding: 10px 16px;
-      text-align: center;
+      background: #12151c;
+      border-bottom: 1px solid #222835;
+      font-size: 13px;
     }
-    #active-game-info .agi-title {
-      font-size: 11px;
-      letter-spacing: 2px;
-      color: #88aaff;
-      margin-bottom: 6px;
+    header h1 { font-size: 18px; color: #ffd54a; letter-spacing: 1px; margin-right: 8px; }
+    header .stat { color: #8b95a5; }
+    header .stat b { color: #dde3ea; font-weight: normal; }
+    #conn { padding: 2px 8px; border-radius: 4px; background: #4a1515; color: #ff8080; }
+    #conn.ok { background: #12401c; color: #7dedb0; }
+    main { flex: 1; display: flex; min-height: 0; }
+    #map-wrap { flex: 1; position: relative; min-width: 0; }
+    #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #empty-note {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #4a5568; font-size: 16px; pointer-events: none; text-align: center; line-height: 1.8;
     }
-    #active-game-info .agi-players {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 10px;
-      justify-content: center;
+    aside {
+      width: 320px; display: flex; flex-direction: column;
+      background: #12151c; border-left: 1px solid #222835; min-height: 0;
     }
-    #active-game-info .agi-player {
-      font-size: 12px;
-      color: #ddd;
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
+    aside h2 {
+      font-size: 12px; color: #8b95a5; letter-spacing: 2px; text-transform: uppercase;
+      padding: 10px 14px 6px;
     }
-    #active-game-info .agi-dot {
-      width: 9px; height: 9px; border-radius: 50%;
-      display: inline-block;
+    #scoreboard { padding: 0 14px 10px; font-size: 14px; max-height: 40%; overflow-y: auto; }
+    #scoreboard .row { display: flex; justify-content: space-between; padding: 3px 0; }
+    #scoreboard .row .name::before { content: '● '; }
+    #scoreboard .row.it .name::after { content: ' [IT]'; color: #ffd54a; }
+    #chat-log {
+      flex: 1; overflow-y: auto; padding: 4px 14px; font-size: 13px; line-height: 1.5;
+      border-top: 1px solid #222835; min-height: 0;
     }
-    #active-game-info .agi-empty {
-      font-size: 12px;
-      color: #888;
+    #chat-log .sys { color: #ffd54a; }
+    #chat-form { display: flex; border-top: 1px solid #222835; }
+    #chat-input {
+      flex: 1; background: #0c0e12; border: none; outline: none; color: #fff;
+      font-family: inherit; font-size: 13px; padding: 10px 14px;
     }
-
-    .meter-label {
-      position: absolute;
-      top: -18px;
-      left: 0;
-      font-family: '04b_03', Lato, LatoExtended, sans-serif;
-      font-size: 12px;
-      color: rgba(255,255,255,0.8);
-      pointer-events: none;
-      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    #chat-form button {
+      background: #222835; border: none; color: #8b95a5; font-family: inherit;
+      padding: 0 16px; cursor: pointer;
     }
+    #chat-form button:hover { color: #fff; }
+    footer {
+      padding: 6px 16px; font-size: 11px; color: #4a5568;
+      background: #12151c; border-top: 1px solid #222835;
+    }
+    footer a { color: #6b7688; }
   </style>
 </head>
 <body>
-  <div id="name-screen">
-    <canvas id="title-canvas" width="200" height="40" style="width:min(400px,70vw);height:auto;image-rendering:pixelated;aspect-ratio:5;"></canvas>
-    <div id="menu-grid">
-      <!-- TOP LEFT: Player Settings -->
-      <div class="menu-panel" id="player-panel">
-        <h2>PLAYER</h2>
-        <input id="name-input" type="text" placeholder="Name" maxlength="16" autofocus>
-        <div id="cube-preview-wrap" style="display:flex;flex-direction:column;align-items:center;gap:4px;">
-          <canvas id="cube-preview" width="120" height="120" style="border-radius:8px;cursor:pointer;width:90px;height:90px;"></canvas>
-          <span style="font-size:10px;color:#aaa;letter-spacing:1px;">CUSTOMIZE COLOR</span>
-          <div class="option-row" style="margin-top:2px;">
-            <input type="color" id="color-picker" value="#4488ff">
-          </div>
-        </div>
-        <div id="model-select" style="text-align:center;">
-          <h2 style="margin-bottom:4px;">CHARACTER</h2>
-          <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
-            <div class="lobby-option model-opt selected" data-model="none">None</div>
-            <div class="lobby-option model-opt" data-model="rat">Rat</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TOP RIGHT: Game Settings -->
-      <div class="menu-panel" id="game-panel">
-        <h2>GAME SETTINGS</h2>
-        <div style="text-align:center;width:100%;">
-          <h2 style="margin-bottom:4px;">GAME TYPE</h2>
-          <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
-            <div class="lobby-option selected" data-gametype="reverse-tag">Reverse Tag</div>
-            <div class="lobby-option disabled" data-gametype="ctf">CTF</div>
-            <div class="lobby-option disabled" data-gametype="deathmatch">Deathmatch</div>
-          </div>
-        </div>
-        <div style="text-align:center;width:100%;">
-          <h2 style="margin-bottom:4px;">SCORE LIMIT</h2>
-          <div style="display:flex;gap:6px;justify-content:center;">
-            <div class="lobby-option selected" data-duration="1000">1000</div>
-          </div>
-        </div>
-        <div style="text-align:center;width:100%;">
-          <h2 style="margin-bottom:4px;">STARTING WEAPON</h2>
-          <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
-            <div class="lobby-option weapon-opt selected" data-weapon="none">None</div>
-            <div class="lobby-option weapon-opt" data-weapon="machinegun">MG</div>
-            <div class="lobby-option weapon-opt" data-weapon="rocket">Rocket</div>
-            <div class="lobby-option weapon-opt" data-weapon="mines">Mines</div>
-            <div class="lobby-option weapon-opt" data-weapon="grapple">Grapple</div>
-          </div>
-        </div>
-        <div style="text-align:center;">
-          <label style="color:#ccc;font-size:11px;letter-spacing:1px;cursor:pointer;display:flex;align-items:center;gap:6px;">
-            <input type="checkbox" id="infinite-ammo-check"> INFINITE AMMO
-          </label>
-        </div>
-      </div>
-
-      <!-- BOTTOM LEFT: Map Selection -->
-      <div class="menu-panel" id="map-panel">
-        <h2>MAP</h2>
-        <div id="level-select" style="width:100%;"></div>
-      </div>
-
-      <!-- BOTTOM RIGHT: Players + Play -->
-      <div class="menu-panel" id="play-panel">
-        <h2>PLAYERS</h2>
-        <div id="active-game-info"></div>
-        <button id="join-btn">PLAY</button>
-      </div>
+  <header>
+    <h1>CAPSULE CARNAGE</h1>
+    <span id="conn">connecting…</span>
+    <span class="stat">players <b id="d-players">0</b></span>
+    <span class="stat">holder <b id="d-holder">—</b></span>
+    <span class="stat">build <b id="d-build">?</b></span>
+    <span class="stat">uptime <b id="d-uptime">—</b></span>
+    <span class="stat">ping <b id="d-ping">—</b></span>
+    <span class="stat">msgs/s <b id="d-rate">0</b></span>
+    <span class="stat">level <b id="d-level">—</b></span>
+  </header>
+  <main>
+    <div id="map-wrap">
+      <canvas id="map"></canvas>
+      <div id="empty-note">no players in game<br>overhead view appears when someone joins</div>
     </div>
-  </div>
-  <div id="hud" style="display:none;">WASD to move &middot; Space to jump &middot; Shift to sprint</div>
-  <div id="leader-display"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <aside>
+      <h2>Scoreboard</h2>
+      <div id="scoreboard"></div>
+      <h2>Chat</h2>
+      <div id="chat-log"></div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" maxlength="200" placeholder="chat as Spectator…">
+        <button type="submit">send</button>
+      </form>
+    </aside>
+  </main>
+  <footer>
+    spectator &amp; diagnostics view — the game itself runs in Godot
+    (<a href="https://github.com/RyanErbert/friendslop-godot">friendslop-godot</a>)
+  </footer>
+
   <script src="/socket.io/socket.io.js"></script>
-  <script src="game.js"></script>
+  <script>
+    const socket = io();
+
+    // --- State ---
+    const players = {};        // id -> {x,y,z,name,skinColor,...}
+    const trails = {};         // id -> [{x,z}] (recent positions)
+    let scores = {};
+    let holder = null;
+    let serverStart = null;    // Date.now()-based estimate from uptimeMs
+    let msgCount = 0;
+
+    const $ = (id) => document.getElementById(id);
+
+    // --- Socket wiring ---
+    socket.on('connect', () => { $('conn').textContent = 'connected'; $('conn').classList.add('ok'); });
+    socket.on('disconnect', () => {
+      $('conn').textContent = 'disconnected'; $('conn').classList.remove('ok');
+      for (const id of Object.keys(players)) delete players[id];
+      for (const id of Object.keys(trails)) delete trails[id];
+      scores = {}; holder = null;
+      refreshPanels();
+    });
+    socket.onAny(() => { msgCount++; });
+
+    socket.on('spectatorPlayers', (data) => {
+      for (const id of Object.keys(players)) delete players[id];
+      Object.assign(players, data.players || {});
+      scores = data.scores || {};
+      holder = data.holder || null;
+      if (data.build) $('d-build').textContent = data.build;
+      if (typeof data.uptimeMs === 'number') serverStart = Date.now() - data.uptimeMs;
+      if (data.activeLevel) $('d-level').textContent = data.activeLevel;
+      refreshPanels();
+    });
+    socket.on('newPlayer', (p) => { if (p && p.id) { players[p.id] = p; refreshPanels(); } });
+    socket.on('playerMoved', (d) => {
+      if (!d || !players[d.id]) return;
+      const p = players[d.id];
+      p.x = d.x; p.y = d.y; p.z = d.z;
+      const t = trails[d.id] || (trails[d.id] = []);
+      t.push({ x: d.x, z: d.z });
+      if (t.length > 150) t.shift();
+    });
+    socket.on('playerDisconnected', (id) => { delete players[id]; delete trails[id]; refreshPanels(); });
+    socket.on('scores', (s) => { scores = s || {}; refreshPanels(); });
+    socket.on('holderChanged', (h) => { holder = h; refreshPanels(); });
+    socket.on('levelChanged', (l) => { $('d-level').textContent = l; });
+    socket.on('gameEnded', () => addChatRow(null, null, 'Game ended.', true));
+    socket.on('chatMessage', (m) => { if (m && m.text) addChatRow(m.name || 'Player', m.color, m.text, false); });
+    socket.on('systemMessage', (m) => { if (m && m.text) addChatRow(null, null, m.text, true); });
+
+    // --- Diagnostics ticks ---
+    setInterval(() => {
+      const start = Date.now();
+      socket.timeout(3000).emit('pingCheck', (err) => {
+        $('d-ping').textContent = err ? '—' : (Date.now() - start) + 'ms';
+      });
+    }, 2000);
+    setInterval(() => {
+      $('d-rate').textContent = msgCount; msgCount = 0;
+      if (serverStart) {
+        let s = Math.floor((Date.now() - serverStart) / 1000);
+        const h = Math.floor(s / 3600); s %= 3600;
+        const m = Math.floor(s / 60); s %= 60;
+        $('d-uptime').textContent = (h ? h + 'h ' : '') + (m ? m + 'm ' : '') + s + 's';
+      }
+    }, 1000);
+
+    // --- Sidebar panels ---
+    function nameOf(id) { return players[id] ? players[id].name : '???'; }
+    function refreshPanels() {
+      $('d-players').textContent = Object.keys(players).length;
+      $('d-holder').textContent = holder && players[holder] ? nameOf(holder) : '—';
+      const rows = Object.keys(scores)
+        .filter((id) => players[id])
+        .sort((a, b) => (scores[b] || 0) - (scores[a] || 0))
+        .map((id) => {
+          const c = players[id].skinColor || '#fff';
+          return `<div class="row ${id === holder ? 'it' : ''}">` +
+            `<span class="name" style="color:${c}">${esc(nameOf(id))}</span>` +
+            `<span>${scores[id] || 0}</span></div>`;
+        });
+      $('scoreboard').innerHTML = rows.join('') || '<div class="row" style="color:#4a5568">nobody in game</div>';
+      $('empty-note').style.display = Object.keys(players).length ? 'none' : 'flex';
+    }
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+    // --- Chat ---
+    function addChatRow(name, color, text, sys) {
+      const log = $('chat-log');
+      const div = document.createElement('div');
+      if (sys) { div.className = 'sys'; div.textContent = text; }
+      else {
+        const b = document.createElement('span');
+        b.style.color = /^#[0-9a-fA-F]{3,8}$/.test(color || '') ? color : '#fff';
+        b.textContent = name + ': ';
+        div.appendChild(b);
+        div.appendChild(document.createTextNode(text));
+      }
+      log.appendChild(div);
+      while (log.children.length > 60) log.removeChild(log.firstChild);
+      log.scrollTop = log.scrollHeight;
+    }
+    $('chat-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const msg = $('chat-input').value.trim();
+      if (msg) socket.emit('chat', msg);
+      $('chat-input').value = '';
+    });
+
+    // --- Overhead map (top-down X/Z, auto-fit camera) ---
+    const canvas = $('map');
+    const ctx = canvas.getContext('2d');
+    let view = { cx: 0, cz: 0, scale: 8 };  // smoothed camera
+
+    function frame() {
+      const wrap = $('map-wrap');
+      const dpr = window.devicePixelRatio || 1;
+      const w = wrap.clientWidth, h = wrap.clientHeight;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr; canvas.height = h * dpr;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const ids = Object.keys(players);
+      if (ids.length) {
+        // Fit all players with padding; never zoom tighter than a 40u span.
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const id of ids) {
+          const p = players[id];
+          minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+          minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+        }
+        const spanX = Math.max(maxX - minX, 40), spanZ = Math.max(maxZ - minZ, 40);
+        const tScale = Math.min(w / (spanX * 1.4), h / (spanZ * 1.4));
+        const tCx = (minX + maxX) / 2, tCz = (minZ + maxZ) / 2;
+        const k = 0.06;  // camera smoothing
+        view.cx += (tCx - view.cx) * k;
+        view.cz += (tCz - view.cz) * k;
+        view.scale += (tScale - view.scale) * k;
+      }
+      const toX = (x) => w / 2 + (x - view.cx) * view.scale;
+      const toY = (z) => h / 2 + (z - view.cz) * view.scale;
+
+      // Grid: 4u minor (the build grid), 20u major, with axis labels.
+      const step = 4;
+      const x0 = Math.floor((view.cx - w / 2 / view.scale) / step) * step;
+      const x1 = view.cx + w / 2 / view.scale;
+      const z0 = Math.floor((view.cz - h / 2 / view.scale) / step) * step;
+      const z1 = view.cz + h / 2 / view.scale;
+      ctx.font = '10px monospace';
+      for (let x = x0; x <= x1; x += step) {
+        const major = Math.round(x) % 20 === 0;
+        ctx.strokeStyle = major ? '#232a38' : '#161a22';
+        ctx.beginPath(); ctx.moveTo(toX(x), 0); ctx.lineTo(toX(x), h); ctx.stroke();
+        if (major) { ctx.fillStyle = '#39445a'; ctx.fillText(Math.round(x), toX(x) + 3, h - 6); }
+      }
+      for (let z = z0; z <= z1; z += step) {
+        const major = Math.round(z) % 20 === 0;
+        ctx.strokeStyle = major ? '#232a38' : '#161a22';
+        ctx.beginPath(); ctx.moveTo(0, toY(z)); ctx.lineTo(w, toY(z)); ctx.stroke();
+        if (major) { ctx.fillStyle = '#39445a'; ctx.fillText(Math.round(z), 4, toY(z) - 4); }
+      }
+
+      // Trails (fading)
+      for (const id of ids) {
+        const t = trails[id];
+        if (!t || t.length < 2) continue;
+        const color = players[id].skinColor || '#ffffff';
+        for (let i = 1; i < t.length; i++) {
+          ctx.globalAlpha = (i / t.length) * 0.35;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(toX(t[i - 1].x), toY(t[i - 1].z));
+          ctx.lineTo(toX(t[i].x), toY(t[i].z));
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // Players
+      const r = Math.max(6, 0.5 * view.scale);
+      for (const id of ids) {
+        const p = players[id];
+        const x = toX(p.x), y = toY(p.z);
+        if (id === holder) {  // pulsing gold ring on the oddball holder
+          ctx.strokeStyle = '#ffd54a';
+          ctx.lineWidth = 3;
+          ctx.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 150);
+          ctx.beginPath(); ctx.arc(x, y, r + 5, 0, Math.PI * 2); ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        ctx.fillStyle = p.skinColor || '#ffffff';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#dde3ea';
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${p.name} (${scores[id] || 0})`, x, y - r - 8);
+        ctx.fillStyle = '#6b7688';
+        ctx.font = '10px monospace';
+        ctx.fillText('y ' + (p.y || 0).toFixed(1), x, y + r + 12);
+        ctx.textAlign = 'left';
+      }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
 </body>
 </html>
