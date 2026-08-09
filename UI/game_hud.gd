@@ -12,7 +12,12 @@ extends CanvasLayer
 @onready var _version_label: Label = $VersionLabel
 @onready var _update_banner: Label = $UpdateBanner
 
+## Render deploy hook — kicks a server redeploy (used when the server is the
+## stale side). Owners consider this key non-sensitive for this project.
+const DEPLOY_HOOK := "https://api.render.com/deploy/srv-d9s2kkegekts73faq3vg?key=psfptLVM8D4"
+
 var _outdated := false
+var _offer_server_kick := false
 
 
 func _ready() -> void:
@@ -33,8 +38,11 @@ func _on_version_mismatch(server_build: String, client_build: String) -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if _outdated and event is InputEventKey and event.pressed and event.keycode == KEY_F9:
-		_run_git_pull()
+	if event is InputEventKey and event.pressed:
+		if _outdated and event.keycode == KEY_F9:
+			_run_git_pull()
+		elif _offer_server_kick and event.keycode == KEY_F10:
+			_trigger_server_deploy()
 
 
 func _run_git_pull() -> void:
@@ -45,9 +53,28 @@ func _run_git_pull() -> void:
 	if code == 0:
 		var result := "".join(output).strip_edges()
 		if result.contains("Already up to date"):
-			_update_banner.text = "You already have the latest — the SERVER is behind.\nIt should finish deploying shortly; restart the game in a minute or two."
+			_offer_server_kick = true
+			_update_banner.text = "You already have the latest — the SERVER is behind.\nPress F10 to trigger a server redeploy (takes ~2 min), then restart the game."
 		else:
 			_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % result.left(200)
+
+
+func _trigger_server_deploy() -> void:
+	_offer_server_kick = false
+	_update_banner.text = "Triggering server redeploy..."
+	var req := HTTPRequest.new()
+	add_child(req)
+	req.request_completed.connect(func(_r, code, _h, _b):
+		if code >= 200 and code < 300:
+			_update_banner.text = "Server redeploy started — give it ~2 minutes, then restart the game."
+		else:
+			_offer_server_kick = true
+			_update_banner.text = "Deploy hook failed (HTTP %d) — check the Render dashboard.\nPress F10 to retry." % code
+		req.queue_free()
+	)
+	if req.request(DEPLOY_HOOK) != OK:
+		_offer_server_kick = true
+		_update_banner.text = "Could not reach the deploy hook — check your connection. Press F10 to retry."
 	else:
 		_update_banner.text = "Update failed (is git installed / do you have local changes?)\n%s" % "".join(output).strip_edges().left(200)
 
