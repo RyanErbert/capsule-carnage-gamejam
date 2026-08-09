@@ -1,0 +1,75 @@
+extends Node3D
+
+## "Ball on a chain" third-person camera ported from the web version — PORT_BLUEPRINT.md §1.5.
+## Sits as a child of the player but top_level, so it lags behind in world space.
+
+const BASE_CHAIN_MIN := 2.0
+const BASE_CHAIN_MAX := 20.0
+const MOUSE_SENSITIVITY := 0.003
+const CAM_PITCH_MIN := -1.4
+const CAM_PITCH_MAX := 1.4
+const CAM_DRAG_SPEED := 1.8       # auto-follow yaw rate
+const CAM_TURN_BOOST := 1.5
+const MOUSE_IDLE_DELAY := 0.6     # seconds before auto-follow kicks in
+const POS_LERP_RATE := 6.0
+const AUTO_FOLLOW_MIN_SPEED := 1.5
+const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
+
+@export var spring_arm: SpringArm3D
+
+var yaw := PI
+var pitch := 0.4
+var base_chain_length := 10.0
+var _mouse_idle_timer := 999.0
+
+@onready var _player: CharacterBody3D = get_parent()
+
+
+func _ready() -> void:
+	top_level = true
+	global_position = _player.global_position
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		yaw -= event.relative.x * MOUSE_SENSITIVITY
+		pitch = clampf(pitch + event.relative.y * MOUSE_SENSITIVITY, CAM_PITCH_MIN, CAM_PITCH_MAX)
+		_mouse_idle_timer = 0.0
+	elif event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			base_chain_length = clampf(base_chain_length - 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			base_chain_length = clampf(base_chain_length + 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
+	elif event.is_action_pressed("ui_cancel"):
+		# Esc toggles mouse capture (stand-in for the web's escape menu)
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _physics_process(delta: float) -> void:
+	_mouse_idle_timer += delta
+
+	var vel: Vector3 = _player.velocity
+	var h_speed := Vector2(vel.x, vel.z).length()
+
+	# Auto-follow: swing behind the movement direction when the mouse is idle (web §1.5)
+	if h_speed > AUTO_FOLLOW_MIN_SPEED and _mouse_idle_timer > MOUSE_IDLE_DELAY:
+		var target_yaw := atan2(vel.x, vel.z) + PI
+		var diff := absf(wrapf(target_yaw - yaw, -PI, PI))
+		var rate := CAM_DRAG_SPEED * (1.0 + minf(1.0, diff / (PI / 2.0)) * CAM_TURN_BOOST) * delta
+		yaw = lerp_angle(yaw, target_yaw, minf(1.0, rate))
+
+	# Chain stretches when moving past walk speed (sprint/explosions)
+	var chain := clampf(base_chain_length + maxf(0.0, h_speed - 9.0) * CHAIN_SPEED_STRETCH, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
+	if spring_arm:
+		spring_arm.spring_length = chain
+
+	# Lagged position follow, damped less at high speed (web: 1-exp(-6*dt) * (1 - speedFactor*0.4))
+	var speed_factor := minf(1.0, h_speed / 18.0)
+	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
+	global_position = global_position.lerp(_player.global_position + Vector3(0, 1, 0), t)
+
+	rotation.y = yaw
+	rotation.x = -pitch
