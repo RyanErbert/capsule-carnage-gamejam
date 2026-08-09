@@ -31,7 +31,9 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	var mouse_look: bool = Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+		or (event is InputEventMouseMotion and event.button_mask & MOUSE_BUTTON_MASK_RIGHT)
+	if event is InputEventMouseMotion and mouse_look:
 		yaw -= event.relative.x * MOUSE_SENSITIVITY
 		pitch = clampf(pitch + event.relative.y * MOUSE_SENSITIVITY, CAM_PITCH_MIN, CAM_PITCH_MAX)
 		_mouse_idle_timer = 0.0
@@ -55,7 +57,7 @@ func _physics_process(delta: float) -> void:
 	var h_speed := Vector2(vel.x, vel.z).length()
 
 	# Auto-follow: swing behind the movement direction when the mouse is idle (web §1.5)
-	if h_speed > AUTO_FOLLOW_MIN_SPEED and _mouse_idle_timer > MOUSE_IDLE_DELAY:
+	if h_speed > AUTO_FOLLOW_MIN_SPEED and _mouse_idle_timer > MOUSE_IDLE_DELAY and not _player.godmode:
 		var target_yaw := atan2(vel.x, vel.z) + PI
 		var diff := absf(wrapf(target_yaw - yaw, -PI, PI))
 		var rate := CAM_DRAG_SPEED * (1.0 + minf(1.0, diff / (PI / 2.0)) * CAM_TURN_BOOST) * delta

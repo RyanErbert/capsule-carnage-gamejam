@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://UI/game_hud.gd" id="1_hud"]
+[ext_resource type="Script" path="res://UI/god_menu.gd" id="2_god"]
 
 [node name="GameHUD" type="CanvasLayer"]
 script = ExtResource("1_hud")
@@ -80,6 +81,15 @@ theme_override_font_sizes/font_size = 13
 theme_override_colors/font_color = Color(1, 1, 1, 0.5)
 horizontal_alignment = 2
 text = "build"
+
+[node name="GodMenu" type="PanelContainer" parent="."]
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -280.0
+offset_top = 60.0
+offset_right = -16.0
+grow_horizontal = 0
+script = ExtResource("2_god")
 
 [node name="InventoryHud" type="HBoxContainer" parent="."]
 offset_left = 10.0

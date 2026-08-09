@@ -31,6 +31,9 @@ const FALL_RESPAWN_AIRTIME := 10.0
 const MORPH_RATE := 3.0
 const IDLE_SMOOTHING := 0.25
 
+# --- God mode (web §6.8: free-fly at 40, no gravity/collisions) ---
+const GOD_FLY_SPEED := 40.0
+
 @export var camera_rig: Node3D
 @export var capsuleCollider: CollisionShape3D
 @export var devInfoLabel: Label
@@ -49,6 +52,7 @@ var last_grounded_time := -1000.0
 
 var air_time := 0.0
 var spawn_position := Vector3.ZERO
+var godmode := false
 
 # Player model: bear marble (default) or the ported web roundcube.
 # Interim selector until the character menu (phase 7): FRIENDSLOP_MODEL=cube
@@ -80,7 +84,37 @@ func set_it(is_it: bool) -> void:
 		_cube_visual.set_outline_visible(is_it)
 
 
+func set_godmode(on: bool) -> void:
+	godmode = on
+	velocity = Vector3.ZERO
+	air_time = 0.0
+	charging_jump = false
+	if _items:
+		_items.is_grappling = false
+
+
+## Free-fly: WASD camera-relative, Space/E up, Shift/Q down (web fly @ 40).
+func _god_fly(delta: float) -> void:
+	if get_viewport().gui_get_focus_owner() != null:
+		return
+	var input_dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
+	var cam_yaw: float = camera_rig.yaw if camera_rig else 0.0
+	var forward := Vector3(-sin(cam_yaw), 0, -cos(cam_yaw))
+	var right := Vector3(-forward.z, 0, forward.x)
+	var dir := right * input_dir.x - forward * input_dir.y
+	if Input.is_action_pressed("jump") or Input.is_key_pressed(KEY_E):
+		dir.y += 1.0
+	if Input.is_action_pressed("sprint") or Input.is_key_pressed(KEY_Q):
+		dir.y -= 1.0
+	global_position += dir.limit_length(1.0) * GOD_FLY_SPEED * delta
+
+
 func _physics_process(delta: float) -> void:
+	if godmode:
+		_god_fly(delta)
+		_update_dev_info()
+		return
+
 	var now := Time.get_ticks_msec() / 1000.0
 	if is_on_floor():
 		last_grounded_time = now

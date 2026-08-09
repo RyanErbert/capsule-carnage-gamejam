@@ -69,6 +69,18 @@ func _on_net_event(event: String, data: Variant) -> void:
 			_add_teleporter(data)
 
 
+## Nearest pedestal id within `radius` of a point ("" if none) — god menu delete.
+func pedestal_near(pos: Vector3, radius := 2.0) -> String:
+	var best_id := ""
+	var best := radius
+	for id in _pedestals:
+		var d: float = _pedestals[id]["node"].position.distance_to(pos)
+		if d < best:
+			best = d
+			best_id = id
+	return best_id
+
+
 # --- Builders -----------------------------------------------------------
 
 func _add_pedestal(ped: Dictionary) -> void:
@@ -221,8 +233,10 @@ func _physics_process(delta: float) -> void:
 	if not player:
 		return
 
-	# Pedestal pickup (< 1.8, needs a free slot; web hides crystal optimistically)
-	if _item_controller and _item_controller.inventory.size() < _item_controller.MAX_INVENTORY:
+	# Pedestal pickup (< 1.8, needs a free slot, never in godmode; web hides
+	# the crystal optimistically)
+	if _item_controller and not player.godmode \
+			and _item_controller.inventory.size() < _item_controller.MAX_INVENTORY:
 		for id in _pedestals:
 			var ped: Dictionary = _pedestals[id]
 			if ped["has_item"] and player.global_position.distance_to(ped["node"].position) < PICKUP_DIST:
