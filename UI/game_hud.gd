@@ -14,9 +14,16 @@ extends CanvasLayer
 @onready var _update_banner: Label = $UpdateBanner
 @onready var _chat_log: VBoxContainer = $ChatLog
 @onready var _chat_input: LineEdit = $ChatInput
+@onready var _inventory_hud: HBoxContainer = $InventoryHud
 
 const CHAT_MAX_ROWS := 8  # web: chatLog keeps the last 8 rows
 const CMD_COLOR := Color("#ffd54a")
+# Web getColorForItem: category border colors
+const ITEM_COLORS := {
+	"grapple": "#44ff44", "launch_pad": "#44ff44", "boost_pad": "#44ff44", "teleporter": "#44ff44",
+	"machinegun": "#ff4444", "rocket": "#ff4444", "mines": "#ff4444",
+	"block": "#ffff44", "wall": "#ffff44", "ramp": "#ffff44", "platform": "#ffff44", "bridge_gun": "#ffff44",
+}
 
 ## Render deploy hook — kicks a server redeploy (used when the server is the
 ## stale side). Owners consider this key non-sensitive for this project.
@@ -39,6 +46,10 @@ func _ready() -> void:
 	_chat_input.text_changed.connect(_on_chat_text_changed)
 	_chat_input.focus_exited.connect(_close_chat)
 	Net.event_received.connect(_on_net_event)
+	if sync_node and sync_node.player:
+		var items: Node = sync_node.player.get_node_or_null("ItemController")
+		if items:
+			items.inventory_changed.connect(_refresh_inventory)
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -209,6 +220,34 @@ func _trigger_server_deploy() -> void:
 	if req.request(DEPLOY_HOOK) != OK:
 		_offer_server_kick = true
 		_update_banner.text = "Could not reach the deploy hook — check your connection. Press F10 to retry."
+
+
+## Web updateInventoryUI: slot 0 is 80px (active), others 50px, borders in the
+## item's category color, red ammo count (blank when 0 = single-use).
+func _refresh_inventory(items: Array) -> void:
+	for child in _inventory_hud.get_children():
+		child.queue_free()
+	for i in items.size():
+		var item: String = items[i]["type"]
+		var ammo: int = int(items[i]["ammo"])
+		var size := 80 if i == 0 else 50
+		var slot := PanelContainer.new()
+		slot.custom_minimum_size = Vector2(size, size)
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0, 0, 0, 0.6)
+		style.border_color = Color(str(ITEM_COLORS.get(item, "#ffffff")))
+		style.set_border_width_all(2)
+		style.set_corner_radius_all(8)
+		slot.add_theme_stylebox_override("panel", style)
+		var label := Label.new()
+		label.text = item.replace("_", " ").to_upper() + ("\n%d" % ammo if ammo > 0 else "")
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD
+		label.add_theme_font_size_override("font_size", 10 if i > 0 else 12)
+		slot.add_child(label)
+		_inventory_hud.add_child(slot)
 
 
 func _process(_delta: float) -> void:

@@ -58,6 +58,7 @@ var _sprint_morph_t := 0.0
 
 @onready var _cube_visual: Node3D = get_node_or_null("CubeVisual")
 @onready var _capsule_logic: Node3D = get_node_or_null("CapsuleLogic")
+@onready var _items: Node = get_node_or_null("ItemController")
 
 
 func _ready() -> void:
@@ -126,8 +127,9 @@ func _physics_process(delta: float) -> void:
 	# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
 	var cap_target := SPRINT_SPEED if sprinting else MAX_SPEED
 	speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
+	var grappling: bool = _items != null and _items.is_grappling
 	var h_vel := Vector2(velocity.x, velocity.z)
-	if h_vel.length() > speed_cap:
+	if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
 		h_vel = h_vel.normalized() * speed_cap
 		velocity.x = h_vel.x
 		velocity.z = h_vel.y
@@ -177,6 +179,15 @@ func _physics_process(delta: float) -> void:
 			air_time = 0.0
 	else:
 		air_time = 0.0
+
+	# --- Grapple (web §4.8): velocity set directly to dir*40, all axes; ---
+	# release when close (<2), on jump press, or with a buffered jump.
+	if grappling:
+		var to_target: Vector3 = _items.grapple_target - global_position
+		if to_target.length() < 2.0 or (not typing and Input.is_action_pressed("jump")) or jump_buffer > 0.0:
+			_items.is_grappling = false
+		else:
+			velocity = to_target.normalized() * _items.GRAPPLE_SPEED
 
 	# --- Roundcube ball morph while sprinting (web updateSprintMorph) ---
 	if use_cube and _cube_visual:
