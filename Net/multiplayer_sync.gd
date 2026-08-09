@@ -41,7 +41,7 @@ func _on_socket_connected() -> void:
 	Net.emit_event("ready", {
 		"type": "desktop",
 		"name": OS.get_environment("USERNAME").left(16) if OS.get_environment("USERNAME") else "GodotBear",
-		"shape": "sphere",
+		"shape": "roundcube" if (player and player.use_cube) else "sphere",
 		"skinColor": "#b5651d",
 		"skinImage": null,
 		"model": null,
@@ -84,6 +84,8 @@ func _on_event(event: String, data: Variant) -> void:
 			holder_id = str(data) if data != null else ""
 			for id in _remotes:
 				_remotes[id].set_holder(id == holder_id)
+			if player and player.has_method("set_it"):
+				player.set_it(holder_id == self_id)
 			holder_changed.emit(holder_id)
 		"tagCooldown":
 			_tag_cooldown = float(data) / 1000.0  # server sends ms
@@ -128,6 +130,6 @@ func _physics_process(delta: float) -> void:
 		"y": player.global_position.y,
 		"z": player.global_position.z,
 		"qx": q.x, "qy": q.y, "qz": q.z, "qw": q.w,
-		"smoothing": 1.0,  # web ball-morph field; we're always a sphere
+		"smoothing": player.smoothing,  # web ball-morph field (1.0 for the bear)
 		"godmode": false,
 	})

@@ -27,6 +27,10 @@ const SPRINT_REFILL_TIME := 6.0   # empty → full
 # --- Fall respawn (web §1.10) ---
 const FALL_RESPAWN_AIRTIME := 10.0
 
+# --- Roundcube ball morph (web: sprintMorphT ±3/s, smoothing 0.25 -> 1.0) ---
+const MORPH_RATE := 3.0
+const IDLE_SMOOTHING := 0.25
+
 @export var camera_rig: Node3D
 @export var capsuleCollider: CollisionShape3D
 @export var devInfoLabel: Label
@@ -46,10 +50,33 @@ var last_grounded_time := -1000.0
 var air_time := 0.0
 var spawn_position := Vector3.ZERO
 
+# Player model: bear marble (default) or the ported web roundcube.
+# Interim selector until the character menu (phase 7): FRIENDSLOP_MODEL=cube
+var use_cube := false
+var smoothing := 1.0  # sent to the server; bear reads as a full sphere
+var _sprint_morph_t := 0.0
+
+@onready var _cube_visual: Node3D = get_node_or_null("CubeVisual")
+@onready var _capsule_logic: Node3D = get_node_or_null("CapsuleLogic")
+
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	spawn_position = global_position
+	use_cube = OS.get_environment("FRIENDSLOP_MODEL").to_lower() == "cube"
+	if use_cube and _cube_visual:
+		smoothing = IDLE_SMOOTHING
+		_cube_visual.visible = true
+		_cube_visual.set_color(Color("#b5651d"))
+		if _capsule_logic:
+			_capsule_logic.visible = false
+
+
+## Multiplayer sync calls this when the oddball holder changes (web: white
+## outline hull on the it-player, including yourself).
+func set_it(is_it: bool) -> void:
+	if use_cube and _cube_visual:
+		_cube_visual.set_outline_visible(is_it)
 
 
 func _physics_process(delta: float) -> void:
@@ -150,6 +177,12 @@ func _physics_process(delta: float) -> void:
 			air_time = 0.0
 	else:
 		air_time = 0.0
+
+	# --- Roundcube ball morph while sprinting (web updateSprintMorph) ---
+	if use_cube and _cube_visual:
+		_sprint_morph_t = clampf(_sprint_morph_t + (MORPH_RATE if sprinting else -MORPH_RATE) * delta, 0.0, 1.0)
+		smoothing = IDLE_SMOOTHING + (1.0 - IDLE_SMOOTHING) * _sprint_morph_t
+		_cube_visual.set_smoothing(smoothing)
 
 	_update_dev_info()
 	move_and_slide()

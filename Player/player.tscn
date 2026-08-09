@@ -5,6 +5,7 @@
 [ext_resource type="Script" uid="uid://bfku7gjk8hinh" path="res://Player/capsule_script.gd" id="2_btcbx"]
 [ext_resource type="Texture2D" uid="uid://u2igtopsqrbf" path="res://Player/PL_bear_Untitled.png" id="3_gwnis"]
 [ext_resource type="Script" path="res://Player/camera_rig.gd" id="4_camrig"]
+[ext_resource type="PackedScene" path="res://Player/roundcube_visual.tscn" id="5_cube"]
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_cxbfv"]
 
@@ -51,6 +52,9 @@ skeleton = NodePath("")
 
 [node name="CritterModel" parent="CapsuleLogic" unique_id=2007587499 instance=ExtResource("2_4ntmi")]
 transform = Transform3D(-5.399256e-09, 0, -0.12352056, 0, 0.12352056, 0, 0.12352056, 0, -5.399256e-09, -0.011972426, -0.12711218, 0.017524272)
+
+[node name="CubeVisual" parent="." instance=ExtResource("5_cube")]
+visible = false
 
 [node name="CameraRig" type="Node3D" parent="." unique_id=1702733511 node_paths=PackedStringArray("spring_arm")]
 script = ExtResource("4_camrig")
