@@ -6,6 +6,7 @@ extends Node
 
 signal scores_changed(scores: Dictionary)
 signal holder_changed(holder_id: String)
+signal version_mismatch(server_build: String, client_build: String)
 
 const RemotePlayerScene := preload("res://Net/remote_player.tscn")
 const SEND_RATE := 20.0  # Hz — the web client sent every frame; 20 Hz is plenty
@@ -44,6 +45,7 @@ func _on_socket_connected() -> void:
 		"skinColor": "#b5651d",
 		"skinImage": null,
 		"model": null,
+		"build": Net.git_commit(),
 	})
 
 
@@ -85,6 +87,10 @@ func _on_event(event: String, data: Variant) -> void:
 			holder_changed.emit(holder_id)
 		"tagCooldown":
 			_tag_cooldown = float(data) / 1000.0  # server sends ms
+		"versionMismatch":
+			var server_build := str(data.get("server", "?"))
+			print("[net] VERSION MISMATCH — server %s, local %s" % [server_build, Net.git_commit()])
+			version_mismatch.emit(server_build, Net.git_commit())
 		"kicked", "gameEnded":
 			# Menu flow comes in a later phase; for now just note it.
 			print("[net] server ended session: ", event)

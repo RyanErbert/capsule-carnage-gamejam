@@ -10,36 +10,42 @@ extends CanvasLayer
 @onready var _scoreboard: PanelContainer = $Scoreboard
 @onready var _scoreboard_text: Label = $Scoreboard/Margin/Rows
 @onready var _version_label: Label = $VersionLabel
+@onready var _update_banner: Label = $UpdateBanner
+
+var _outdated := false
 
 
 func _ready() -> void:
 	_it_label.visible = false
 	_scoreboard.visible = false
-	_version_label.text = "build " + _git_commit()
+	_update_banner.visible = false
+	_version_label.text = "build " + Net.git_commit()
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
+		sync_node.version_mismatch.connect(_on_version_mismatch)
 
 
-## Reads the current git commit so both players can confirm they run the same
-## build (shown bottom-right; works when running from a clone, "dev" otherwise).
-func _git_commit() -> String:
-	var head := FileAccess.open("res://.git/HEAD", FileAccess.READ)
-	if head == null:
-		return "dev"
-	var line := head.get_as_text().strip_edges()
-	if not line.begins_with("ref: "):
-		return line.left(7)  # detached HEAD
-	var ref := line.substr(5)
-	var ref_file := FileAccess.open("res://.git/" + ref, FileAccess.READ)
-	if ref_file:
-		return ref_file.get_as_text().strip_edges().left(7)
-	var packed := FileAccess.open("res://.git/packed-refs", FileAccess.READ)
-	if packed:
-		for l in packed.get_as_text().split("\n"):
-			if l.ends_with(" " + ref):
-				return l.get_slice(" ", 0).left(7)
-	return "dev"
+func _on_version_mismatch(server_build: String, client_build: String) -> void:
+	_outdated = true
+	_update_banner.visible = true
+	_update_banner.text = "GAME OUT OF DATE — server is on %s, you are on %s\nPress F9 to update (runs git pull), then restart the game" % [server_build, client_build]
+
+
+func _input(event: InputEvent) -> void:
+	if _outdated and event is InputEventKey and event.pressed and event.keycode == KEY_F9:
+		_run_git_pull()
+
+
+func _run_git_pull() -> void:
+	_update_banner.text = "Updating (git pull)..."
+	var project_dir := ProjectSettings.globalize_path("res://")
+	var output: Array = []
+	var code := OS.execute("git", ["-C", project_dir, "pull", "--ff-only"], output, true)
+	if code == 0:
+		_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % "".join(output).strip_edges().left(200)
+	else:
+		_update_banner.text = "Update failed (is git installed / do you have local changes?)\n%s" % "".join(output).strip_edges().left(200)
 
 
 func _process(_delta: float) -> void:

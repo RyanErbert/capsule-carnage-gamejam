@@ -20,6 +20,27 @@ app.use('/models', express.static(path.join(__dirname, 'models')));
 let activeLevel = 'level_1.glb';
 let levelLocked = false;
 
+// Build hash for client version checks. Render provides RENDER_GIT_COMMIT;
+// locally we read the repo's .git (server/ lives one level below repo root).
+function readGitCommit() {
+  if (process.env.RENDER_GIT_COMMIT) return process.env.RENDER_GIT_COMMIT.slice(0, 7);
+  try {
+    const gitDir = path.join(__dirname, '..', '.git');
+    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    if (!head.startsWith('ref: ')) return head.slice(0, 7);
+    const ref = head.slice(5);
+    const refPath = path.join(gitDir, ...ref.split('/'));
+    if (fs.existsSync(refPath)) return fs.readFileSync(refPath, 'utf8').trim().slice(0, 7);
+    const packed = fs.readFileSync(path.join(gitDir, 'packed-refs'), 'utf8');
+    for (const line of packed.split('\n')) {
+      if (line.endsWith(' ' + ref)) return line.split(' ')[0].slice(0, 7);
+    }
+  } catch (e) { /* not running from a clone */ }
+  return '';
+}
+const SERVER_BUILD = readGitCommit();
+if (SERVER_BUILD) console.log(`Server build: ${SERVER_BUILD}`);
+
 app.get('/api/levels', (req, res) => {
   try {
     const files = fs.readdirSync(path.join(__dirname, 'levels')).filter(f => f.endsWith('.glb'));
@@ -250,6 +271,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ready', (data = {}) => {
+    // Version check: Godot clients send their git build hash. Warn (don't kick)
+    // on mismatch so both players know to pull. Web clients don't send one.
+    const clientBuild = (typeof data.build === 'string' ? data.build : '').slice(0, 7);
+    if (SERVER_BUILD && clientBuild && clientBuild !== SERVER_BUILD) {
+      socket.emit('versionMismatch', { server: SERVER_BUILD, client: clientBuild });
+    }
     const sp = randomSpawn();
     const color = data.skinColor || COLORS[colorIndex % COLORS.length];
     if (!data.skinColor) colorIndex++;
