@@ -11,8 +11,9 @@ signal socket_connected
 signal socket_disconnected
 signal event_received(event: String, data: Variant)
 
-## Deployed game server — override with FRIENDSLOP_SERVER=ws://localhost:3001 for local dev.
-const DEFAULT_SERVER := "wss://friendslop-gamejam.onrender.com"
+## Deployed game server (auto-deploys from this repo's main branch).
+## Override with FRIENDSLOP_SERVER=ws://localhost:3001 for local dev.
+const DEFAULT_SERVER := "wss://capsule-carnage-gamejam.onrender.com"
 
 var _ws := WebSocketPeer.new()
 var _url := ""
