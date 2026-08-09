@@ -9,14 +9,37 @@ extends CanvasLayer
 @onready var _it_label: Label = $ItLabel
 @onready var _scoreboard: PanelContainer = $Scoreboard
 @onready var _scoreboard_text: Label = $Scoreboard/Margin/Rows
+@onready var _version_label: Label = $VersionLabel
 
 
 func _ready() -> void:
 	_it_label.visible = false
 	_scoreboard.visible = false
+	_version_label.text = "build " + _git_commit()
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
+
+
+## Reads the current git commit so both players can confirm they run the same
+## build (shown bottom-right; works when running from a clone, "dev" otherwise).
+func _git_commit() -> String:
+	var head := FileAccess.open("res://.git/HEAD", FileAccess.READ)
+	if head == null:
+		return "dev"
+	var line := head.get_as_text().strip_edges()
+	if not line.begins_with("ref: "):
+		return line.left(7)  # detached HEAD
+	var ref := line.substr(5)
+	var ref_file := FileAccess.open("res://.git/" + ref, FileAccess.READ)
+	if ref_file:
+		return ref_file.get_as_text().strip_edges().left(7)
+	var packed := FileAccess.open("res://.git/packed-refs", FileAccess.READ)
+	if packed:
+		for l in packed.get_as_text().split("\n"):
+			if l.ends_with(" " + ref):
+				return l.get_slice(" ", 0).left(7)
+	return "dev"
 
 
 func _process(_delta: float) -> void:
