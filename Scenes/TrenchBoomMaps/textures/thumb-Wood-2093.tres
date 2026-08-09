@@ -1,0 +1,8 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://bn3tfbh0r2fmh"]
+
+[ext_resource type="Texture2D" uid="uid://d0yjlni1wt8hu" path="res://Scenes/TrenchBoomMaps/textures/thumb-Wood-2093.jpg" id="1_oh5ba"]
+
+[resource]
+albedo_texture = ExtResource("1_oh5ba")
+metallic_specular = 0.0
+texture_filter = 2

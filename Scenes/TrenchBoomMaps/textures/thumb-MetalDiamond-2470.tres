@@ -1,0 +1,8 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://b1war7ikanv22"]
+
+[ext_resource type="Texture2D" uid="uid://cwvpw7i7h0un" path="res://Scenes/TrenchBoomMaps/textures/thumb-MetalDiamond-2470.jpg" id="1_m4ycm"]
+
+[resource]
+albedo_texture = ExtResource("1_m4ycm")
+metallic_specular = 0.0
+texture_filter = 2

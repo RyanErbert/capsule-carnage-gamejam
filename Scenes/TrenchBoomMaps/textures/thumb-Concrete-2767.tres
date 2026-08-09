@@ -1,0 +1,8 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://bk7dndlw0pac4"]
+
+[ext_resource type="Texture2D" uid="uid://b6yk3e4vtffa6" path="res://Scenes/TrenchBoomMaps/textures/thumb-Concrete-2767.jpg" id="1_yo2tk"]
+
+[resource]
+albedo_texture = ExtResource("1_yo2tk")
+metallic_specular = 0.0
+texture_filter = 2

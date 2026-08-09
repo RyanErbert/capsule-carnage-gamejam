@@ -1,0 +1,14 @@
+[remap]
+
+importer="func_godot.map"
+type="Resource"
+uid="uid://cjxnpocvbsfjb"
+path="res://.godot/imported/testmapv1.2.map-c1d9ed4e25daa74148aff2c1a2e27ac1.tres"
+
+[deps]
+
+source_file="res://Scenes/TrenchBoomMaps/autosave/testmapv1.2.map"
+dest_files=["res://.godot/imported/testmapv1.2.map-c1d9ed4e25daa74148aff2c1a2e27ac1.tres"]
+
+[params]
+

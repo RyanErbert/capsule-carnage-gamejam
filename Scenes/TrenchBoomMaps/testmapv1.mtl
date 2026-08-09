@@ -1,0 +1,33 @@
+newmtl Grass-0790
+map_Kd textures/Grass-0790.jpg
+
+newmtl __TB_empty
+map_Kd textures/__TB_empty.png
+
+newmtl thumb-Brick-0788
+map_Kd textures/thumb-Brick-0788.jpg
+
+newmtl thumb-Concrete-2767
+map_Kd textures/thumb-Concrete-2767.jpg
+
+newmtl thumb-MetalDiamond-2470
+map_Kd textures/thumb-MetalDiamond-2470.jpg
+
+newmtl thumb-Wood-2093
+map_Kd textures/thumb-Wood-2093.jpg
+
+newmtl thumb-concrete_5657
+map_Kd textures/thumb-concrete_5657.jpg
+
+newmtl thumb-concrete_5728
+map_Kd textures/thumb-concrete_5728.jpg
+
+newmtl thumb-concrete_7838
+map_Kd textures/thumb-concrete_7838.jpg
+
+newmtl thumb-metal058
+map_Kd textures/thumb-metal058.JPG
+
+newmtl thumb-stone_5742
+map_Kd textures/thumb-stone_5742.jpg
+

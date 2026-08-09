@@ -1,0 +1,8 @@
+[gd_resource type="StandardMaterial3D" format=3 uid="uid://c3dbcw6fmg4dk"]
+
+[ext_resource type="Texture2D" uid="uid://bfuq2cblgqxm6" path="res://Scenes/TrenchBoomMaps/textures/thumb-Brick-0788.jpg" id="1_ekwnm"]
+
+[resource]
+albedo_texture = ExtResource("1_ekwnm")
+metallic_specular = 0.0
+texture_filter = 2

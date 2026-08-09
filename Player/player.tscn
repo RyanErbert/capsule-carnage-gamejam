@@ -1,0 +1,85 @@
+[gd_scene format=3 uid="uid://bl6sje7k2t6r1"]
+
+[ext_resource type="Script" uid="uid://slm625fqagrt" path="res://Player/player.gd" id="1_h8mut"]
+[ext_resource type="PackedScene" uid="uid://dblh264xnn1hk" path="res://Player/PL_bear.glb" id="2_4ntmi"]
+[ext_resource type="Script" uid="uid://bfku7gjk8hinh" path="res://Player/capsule_script.gd" id="2_btcbx"]
+[ext_resource type="Texture2D" uid="uid://u2igtopsqrbf" path="res://Player/PL_bear_Untitled.png" id="3_gwnis"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_cxbfv"]
+
+[sub_resource type="ORMMaterial3D" id="ORMMaterial3D_l8h54"]
+transparency = 1
+albedo_color = Color(0, 0.5529412, 0.8235294, 0.23137255)
+emission = Color(0.18988335, 0.61557555, 0.77704984, 1)
+emission_energy_multiplier = 0.6
+rim_tint = 1.0
+rim_texture = ExtResource("3_gwnis")
+clearcoat_enabled = true
+clearcoat_roughness = 0.0
+anisotropy = 0.6
+refraction_scale = 0.1
+
+[sub_resource type="SphereMesh" id="SphereMesh_gwnis"]
+material = SubResource("ORMMaterial3D_l8h54")
+
+[sub_resource type="GDScript" id="GDScript_l8h54"]
+script/source = "extends Node3D
+
+@export var cameraRay : RayCast3D
+@export var camera : Camera3D
+
+var paint:=1
+# Called when the node enters the scene tree for the first time.
+func _ready() -> void:
+	if cameraRay.is_colliding():
+		paint=2
+
+
+# Called every frame. 'delta' is the elapsed time since the previous frame.
+func _process(delta: float) -> void:
+	pass
+"
+
+[node name="player" type="CharacterBody3D" unique_id=218872812 node_paths=PackedStringArray("camera", "cameraTilter", "capsuleCollider", "devInfoLabel")]
+floor_snap_length = 0.0
+script = ExtResource("1_h8mut")
+camera = NodePath("CameraOrigin")
+cameraTilter = NodePath("CameraOrigin/Tilter")
+capsuleCollider = NodePath("CapsuleCollider")
+devInfoLabel = NodePath("Label")
+
+[node name="Label" type="Label" parent="." unique_id=405812786]
+offset_left = 23.0
+offset_top = 20.0
+offset_right = 105.0
+offset_bottom = 69.0
+
+[node name="CapsuleCollider" type="CollisionShape3D" parent="." unique_id=956698930]
+transform = Transform3D(0.785, 0, 0, 0, 0.785, 0, 0, 0, 0.785, 0, 0, 0)
+shape = SubResource("SphereShape3D_cxbfv")
+
+[node name="CapsuleLogic" type="Node3D" parent="." unique_id=1434453342 node_paths=PackedStringArray("critterModel")]
+script = ExtResource("2_btcbx")
+critterModel = NodePath("CritterModel")
+
+[node name="CapsuleModel" type="MeshInstance3D" parent="CapsuleLogic" unique_id=1143886365]
+transform = Transform3D(0.785, 0, 0, 0, 0.76302004, 0, 0, 0, 0.785, 0.0013948471, 0, -0.001960827)
+mesh = SubResource("SphereMesh_gwnis")
+skeleton = NodePath("")
+
+[node name="CritterModel" parent="CapsuleLogic" unique_id=2007587499 instance=ExtResource("2_4ntmi")]
+transform = Transform3D(-5.399256e-09, 0, -0.12352056, 0, 0.12352056, 0, 0.12352056, 0, -5.399256e-09, -0.011972426, -0.12711218, 0.017524272)
+
+[node name="CameraOrigin" type="Node3D" parent="." unique_id=1702733511 node_paths=PackedStringArray("cameraRay", "camera")]
+script = SubResource("GDScript_l8h54")
+cameraRay = NodePath("Tilter/RayCast3D")
+camera = NodePath("Tilter/Camera3D")
+
+[node name="Tilter" type="Node3D" parent="CameraOrigin" unique_id=1579543554]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.002, 0.4298004, 1.599)
+
+[node name="RayCast3D" type="RayCast3D" parent="CameraOrigin/Tilter" unique_id=313183705]
+transform = Transform3D(1.925, 0, 0, 0, -0.3011365, 1.9013, 0, -1.9013, -0.3011365, 0.002, -0.4377526, -1.8344407)
+
+[node name="Camera3D" type="Camera3D" parent="CameraOrigin/Tilter" unique_id=1910539237]
+current = true
