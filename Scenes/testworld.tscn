@@ -13,6 +13,7 @@
 [ext_resource type="Texture2D" uid="uid://cko6xmerpuumd" path="res://Scenes/TrenchBoomMaps/textures/thumb-concrete_7838.jpg" id="11_1j1fi"]
 [ext_resource type="Texture2D" uid="uid://b6yk3e4vtffa6" path="res://Scenes/TrenchBoomMaps/textures/thumb-Concrete-2767.jpg" id="12_diyjp"]
 [ext_resource type="Texture2D" uid="uid://cwpt2fyf47my6" path="res://Scenes/TrenchBoomMaps/textures/thumb-concrete_5728.jpg" id="13_wgpmd"]
+[ext_resource type="Script" path="res://Net/multiplayer_sync.gd" id="14_netsync"]
 
 [sub_resource type="Environment" id="Environment_ywrmy"]
 
@@ -1529,3 +1530,7 @@ shape = SubResource("ConvexPolygonShape3D_573jo")
 
 [node name="entity_0_brush_214_collision_shape" type="CollisionShape3D" parent="FuncGodotMap/entity_0_worldspawn" unique_id=1474449603]
 shape = SubResource("ConvexPolygonShape3D_ckrex")
+
+[node name="MultiplayerSync" type="Node" parent="." node_paths=PackedStringArray("player")]
+script = ExtResource("14_netsync")
+player = NodePath("../player")

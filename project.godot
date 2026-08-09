@@ -19,6 +19,10 @@ run/main_scene="res://Scenes/testworld.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
 
+[autoload]
+
+Net="*res://Net/network_client.gd"
+
 [display]
 
 window/stretch/aspect="expand"
