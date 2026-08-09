@@ -16,7 +16,7 @@ extends CanvasLayer
 ## stale side). Owners consider this key non-sensitive for this project.
 const DEPLOY_HOOK := "https://api.render.com/deploy/srv-d9s2kkegekts73faq3vg?key=psfptLVM8D4"
 
-var _outdated := false
+var _offer_pull := false
 var _offer_server_kick := false
 
 
@@ -31,32 +31,55 @@ func _ready() -> void:
 		sync_node.version_mismatch.connect(_on_version_mismatch)
 
 
-func _on_version_mismatch(server_build: String, client_build: String) -> void:
-	_outdated = true
+func _on_version_mismatch(server_build: String, _client_build: String) -> void:
 	_update_banner.visible = true
-	_update_banner.text = "VERSION MISMATCH — server: %s, you: %s\nPress F9 to update (runs git pull), then restart.\nIf F9 says already up to date, the SERVER is behind — it's still deploying, wait a minute." % [server_build, client_build]
+	_update_banner.text = "Version differs from server — checking who's behind..."
+	# Let the banner render before blocking on git.
+	await get_tree().process_frame
+	_diagnose_mismatch(server_build)
+
+
+## Uses commit ancestry to determine WHO is out of date:
+## server's commit is an ancestor of ours -> the server is behind (offer F10);
+## ours is an ancestor of the server's   -> we are behind (offer F9).
+func _diagnose_mismatch(server_build: String) -> void:
+	var dir := ProjectSettings.globalize_path("res://")
+	OS.execute("git", ["-C", dir, "fetch", "--quiet", "origin"], [], true)
+	var server_is_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", server_build, "HEAD"], [], true) == 0
+	var we_are_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", "HEAD", server_build], [], true) == 0
+	if server_is_old:
+		_offer_server_kick = true
+		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min), then restart the game." % [server_build, Net.git_commit()]
+	elif we_are_old:
+		_offer_pull = true
+		_update_banner.text = "YOUR GAME IS OUT OF DATE (you %s, server %s)\nPress F9 to update (runs git pull), then restart the game." % [Net.git_commit(), server_build]
+	else:
+		_offer_pull = true
+		_update_banner.text = "Your copy and the server have DIVERGED (you %s, server %s)\nPress F9 to try updating — if that fails, sort it out in git together." % [Net.git_commit(), server_build]
 
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
-		if _outdated and event.keycode == KEY_F9:
+		if _offer_pull and event.keycode == KEY_F9:
 			_run_git_pull()
 		elif _offer_server_kick and event.keycode == KEY_F10:
 			_trigger_server_deploy()
 
 
 func _run_git_pull() -> void:
+	_offer_pull = false
 	_update_banner.text = "Updating (git pull)..."
-	var project_dir := ProjectSettings.globalize_path("res://")
 	var output: Array = []
-	var code := OS.execute("git", ["-C", project_dir, "pull", "--ff-only"], output, true)
+	var code := OS.execute("git", ["-C", ProjectSettings.globalize_path("res://"), "pull", "--ff-only"], output, true)
+	var result := "".join(output).strip_edges()
 	if code == 0:
-		var result := "".join(output).strip_edges()
 		if result.contains("Already up to date"):
-			_offer_server_kick = true
-			_update_banner.text = "You already have the latest — the SERVER is behind.\nPress F10 to trigger a server redeploy (takes ~2 min), then restart the game."
+			_update_banner.text = "You already have the latest — nothing to pull."
 		else:
 			_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % result.left(200)
+	else:
+		_offer_pull = true
+		_update_banner.text = "Update failed (local changes? git missing?) — press F9 to retry\n%s" % result.left(200)
 
 
 func _trigger_server_deploy() -> void:
@@ -75,8 +98,6 @@ func _trigger_server_deploy() -> void:
 	if req.request(DEPLOY_HOOK) != OK:
 		_offer_server_kick = true
 		_update_banner.text = "Could not reach the deploy hook — check your connection. Press F10 to retry."
-	else:
-		_update_banner.text = "Update failed (is git installed / do you have local changes?)\n%s" % "".join(output).strip_edges().left(200)
 
 
 func _process(_delta: float) -> void:
