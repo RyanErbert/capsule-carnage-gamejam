@@ -34,7 +34,25 @@ func apply_move(d: Dictionary) -> void:
 		_mesh.transparency = 0.7 if godmode else 0.0  # web: godmode players are 30% ghosts
 
 
+var _is_holder := false
+var _strobe_t := 0.0
+
+
+func set_holder(holder: bool) -> void:
+	_is_holder = holder
+	if not holder and _mesh.material_override is StandardMaterial3D:
+		_mesh.material_override.emission_enabled = false
+
+
 func _process(delta: float) -> void:
 	var t := 1.0 - pow(0.7, delta * 60.0)  # web: lerp factor 0.3 per 60fps frame
 	global_position = global_position.lerp(target_position, t)
 	_mesh.quaternion = _mesh.quaternion.slerp(target_quat, t)
+
+	# Holder strobes gold (web §1.9: sin(t*0.008) on ms — ~1.3 Hz)
+	if _is_holder and _mesh.material_override is StandardMaterial3D:
+		_strobe_t += delta
+		var mat: StandardMaterial3D = _mesh.material_override
+		mat.emission_enabled = true
+		mat.emission = Color(1.0, 0.85, 0.1)
+		mat.emission_energy_multiplier = 0.5 + 0.5 * sin(_strobe_t * 8.0)

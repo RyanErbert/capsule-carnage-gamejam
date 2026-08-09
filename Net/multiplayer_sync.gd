@@ -4,14 +4,27 @@ extends Node
 ## Handles the join handshake (connect -> ready -> snapshots) and the player
 ## roster/movement events. Scoring, items, and the rest arrive in later phases.
 
+signal scores_changed(scores: Dictionary)
+signal holder_changed(holder_id: String)
+
 const RemotePlayerScene := preload("res://Net/remote_player.tscn")
 const SEND_RATE := 20.0  # Hz — the web client sent every frame; 20 Hz is plenty
+const TAG_DISTANCE := 1.5  # web §1.9
 
 @export var player: CharacterBody3D
 
 var self_id := ""
+var scores: Dictionary = {}       # id -> int (includes self)
+var holder_id := ""
+var _tag_cooldown := 0.0
 var _remotes: Dictionary = {}  # id -> RemotePlayer node
 var _send_accum := 0.0
+
+
+func name_of(id: String) -> String:
+	if id == self_id:
+		return "You"
+	return _remotes[id].player_name if _remotes.has(id) else "???"
 
 
 func _ready() -> void:
@@ -62,6 +75,16 @@ func _on_event(event: String, data: Variant) -> void:
 			if _remotes.has(id):
 				_remotes[id].queue_free()
 				_remotes.erase(id)
+		"scores":
+			scores = data
+			scores_changed.emit(scores)
+		"holderChanged":
+			holder_id = str(data) if data != null else ""
+			for id in _remotes:
+				_remotes[id].set_holder(id == holder_id)
+			holder_changed.emit(holder_id)
+		"tagCooldown":
+			_tag_cooldown = float(data) / 1000.0  # server sends ms
 		"kicked", "gameEnded":
 			# Menu flow comes in a later phase; for now just note it.
 			print("[net] server ended session: ", event)
@@ -80,6 +103,15 @@ func _spawn_remote(id: String, data: Dictionary) -> void:
 func _physics_process(delta: float) -> void:
 	if not player or not Net.is_socket_connected() or self_id == "":
 		return
+
+	# Holder auto-tags on proximity (web §1.9: dist < 1.5, 4 s server cooldown)
+	_tag_cooldown = maxf(0.0, _tag_cooldown - delta)
+	if holder_id == self_id and _tag_cooldown <= 0.0:
+		for id in _remotes:
+			if player.global_position.distance_to(_remotes[id].global_position) < TAG_DISTANCE:
+				Net.emit_event("tagPlayer", id)
+				break
+
 	_send_accum += delta
 	if _send_accum < 1.0 / SEND_RATE:
 		return
