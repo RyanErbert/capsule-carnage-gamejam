@@ -649,6 +649,17 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
 
+// Render SIGTERMs the old instance once a new deploy is healthy. Without this,
+// live sessions linger on the OLD build until the process is killed — cut them
+// immediately so everyone reconnects to the new version.
+process.on('SIGTERM', () => {
+  console.log('SIGTERM — new deploy going live, disconnecting all sessions');
+  sysMsg('Server updating — you will be reconnected in a few seconds.');
+  io.disconnectSockets(true);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+});
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout

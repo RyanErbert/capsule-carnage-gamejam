@@ -15,10 +15,13 @@ signal event_received(event: String, data: Variant)
 ## Override with FRIENDSLOP_SERVER=ws://localhost:3001 for local dev.
 const DEFAULT_SERVER := "wss://capsule-carnage-gamejam.onrender.com"
 
+const RECONNECT_DELAY := 3.0  # seconds between retries after a drop
+
 var _ws := WebSocketPeer.new()
 var _url := ""
 var _handshake_done := false
 var _was_open := false
+var _reconnect_timer := 0.0
 
 
 func _ready() -> void:
@@ -70,7 +73,7 @@ func emit_event(event: String, data: Variant = null) -> void:
 	_ws.send_text("42" + JSON.stringify(payload))
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_ws.poll()
 	var state := _ws.get_ready_state()
 	if state == WebSocketPeer.STATE_OPEN:
@@ -82,6 +85,15 @@ func _process(_delta: float) -> void:
 			_was_open = false
 			_handshake_done = false
 			socket_disconnected.emit()
+			print("[net] connection lost — retrying every %.0fs" % RECONNECT_DELAY)
+		# Auto-reconnect (server redeploys drop everyone; rejoin the new instance).
+		# On reconnect multiplayer_sync re-sends 'ready', which also re-runs the
+		# server version check.
+		if _url != "":
+			_reconnect_timer += delta
+			if _reconnect_timer >= RECONNECT_DELAY:
+				_reconnect_timer = 0.0
+				_ws.connect_to_url(_url)
 
 
 func _handle_frame(frame: String) -> void:

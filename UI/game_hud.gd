@@ -59,7 +59,7 @@ func _diagnose_mismatch(server_build: String) -> void:
 	var we_are_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", "HEAD", server_build], [], true) == 0
 	if server_is_old:
 		_offer_server_kick = true
-		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min), then restart the game." % [server_build, Net.git_commit()]
+		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min) — you'll be reconnected automatically." % [server_build, Net.git_commit()]
 	elif we_are_old:
 		_offer_pull = true
 		_update_banner.text = "YOUR GAME IS OUT OF DATE (you %s, server %s)\nPress F9 to update (runs git pull), then restart the game." % [Net.git_commit(), server_build]
@@ -200,7 +200,7 @@ func _trigger_server_deploy() -> void:
 	add_child(req)
 	req.request_completed.connect(func(_r, code, _h, _b):
 		if code >= 200 and code < 300:
-			_update_banner.text = "Server redeploy started — give it ~2 minutes, then restart the game."
+			_update_banner.text = "Server redeploy started — give it ~2 minutes; you'll be reconnected automatically."
 		else:
 			_offer_server_kick = true
 			_update_banner.text = "Deploy hook failed (HTTP %d) — check the Render dashboard.\nPress F10 to retry." % code
