@@ -23,6 +23,7 @@ config/icon="res://icon.svg"
 
 Net="*res://Net/network_client.gd"
 Settings="*res://UI/settings.gd"
+Sfx="*res://Audio/sfx.gd"
 
 [display]
 

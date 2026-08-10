@@ -189,6 +189,8 @@ func _physics_process(delta: float) -> void:
 			jump_cooldown = jump_charge
 			jump_cooldown_max = jump_charge
 			last_grounded_time = -1000.0
+			Sfx.jump(global_position)
+			Net.emit_event("jump")  # others hear it via playerJumped
 		else:
 			jump_buffer = JUMP_BUFFER_TIME
 		jump_charge = 1.0
@@ -200,6 +202,8 @@ func _physics_process(delta: float) -> void:
 		jump_cooldown_max = 1.0
 		jump_buffer = 0.0
 		last_grounded_time = -1000.0
+		Sfx.jump(global_position)
+		Net.emit_event("jump")
 
 	# --- Floor snap: off while ascending so jumps aren't eaten ---
 	floor_snap_length = 0.0 if velocity.y > 0.0 else 0.3

@@ -249,11 +249,13 @@ func _physics_process(delta: float) -> void:
 		if player.global_position.distance_to(pad["pos"]) < TRIGGER_DIST:
 			if pad["type"] == "launch_pad" and player.velocity.y < 16.0:
 				player.velocity.y = 32.0
+				Sfx.jump(player.global_position)
 			elif pad["type"] == "boost_pad":
 				var h_speed: float = Vector2(player.velocity.x, player.velocity.z).length()
 				if h_speed < 27.0:
 					player.velocity = Vector3(pad["dx"] * 45.0, 5.0, pad["dz"] * 45.0)
 					player.speed_cap = maxf(player.speed_cap, 45.0)
+					Sfx.boost(player.global_position, 1.0)
 
 	# Teleporters (web §4.7: trigger 1.5, arrive +1.5 Y, 1.5 s cooldown)
 	_teleport_cd = maxf(0.0, _teleport_cd - delta)
@@ -264,5 +266,6 @@ func _physics_process(delta: float) -> void:
 			if dist_a < TRIGGER_DIST or dist_b < TRIGGER_DIST:
 				var dest: Vector3 = t["b"] if dist_a < TRIGGER_DIST else t["a"]
 				player.global_position = dest + Vector3(0, 1.5, 0)  # web keeps velocity
+				Sfx.boost(dest, 1.0)
 				_teleport_cd = TELEPORT_COOLDOWN
 				break

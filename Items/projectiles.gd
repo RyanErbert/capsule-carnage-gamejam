@@ -67,6 +67,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"coinCollected":
 			var id := str(data)
 			if _coins.has(id):
+				Sfx.boost(_coins[id]["pos"], 0.6)
 				_coins[id]["node"].queue_free()
 				_coins.erase(id)
 
@@ -102,6 +103,7 @@ func _spawn_bullet(data: Dictionary) -> void:
 	node.position = pos
 	if vel.length() > 0.01:
 		node.look_at_from_position(pos, pos + vel)
+	Sfx.boost(pos, 0.2)
 	_bullets.append({"pos": pos, "vel": vel, "life": BULLET_LIFE, "owner": str(data.get("owner", "")), "node": node})
 
 
@@ -112,6 +114,7 @@ func _spawn_rocket(data: Dictionary) -> void:
 	node.position = pos
 	if vel.length() > 0.01:
 		node.look_at_from_position(pos, pos + vel)
+	Sfx.boost(pos, 1.0)
 	_rockets.append({"pos": pos, "vel": vel, "life": ROCKET_LIFE, "owner": str(data.get("owner", "")), "node": node})
 
 
@@ -168,6 +171,7 @@ func _on_explosion(data: Dictionary) -> void:
 	var pos := _vec3(data)
 	var is_mine: bool = str(data.get("type", "")) == "mine"
 	_explosion_vfx(pos, is_mine)
+	Sfx.bomb(pos)
 	if player == null:
 		return
 	var dist := player.global_position.distance_to(pos)

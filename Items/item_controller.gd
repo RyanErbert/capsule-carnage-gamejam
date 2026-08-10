@@ -104,6 +104,7 @@ func use_item() -> void:
 				return
 			grapple_target = target
 			is_grappling = true
+			Sfx.boost(player.global_position, 0.8)
 			_use_ammo()
 		"launch_pad", "boost_pad", "mines":
 			if target == null or player.global_position.distance_to(target) > PLACE_RANGE:

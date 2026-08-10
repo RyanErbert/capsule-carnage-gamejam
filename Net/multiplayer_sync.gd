@@ -94,6 +94,10 @@ func _on_event(event: String, data: Variant) -> void:
 			holder_changed.emit(holder_id)
 		"tagCooldown":
 			_tag_cooldown = float(data) / 1000.0  # server sends ms
+		"playerJumped":
+			var jid := str(data)
+			if _remotes.has(jid):
+				Sfx.jump(_remotes[jid].global_position)
 		"kicked":
 			_return_to_menu("kicked (inactivity)")
 		"gameEnded":
