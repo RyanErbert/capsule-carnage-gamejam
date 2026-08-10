@@ -216,6 +216,12 @@ func _spawn_gameplay() -> void:
 	vehicles.player = player
 	add_child(vehicles)
 
+	var generators := Node3D.new()
+	generators.name = "WorldGenerators"
+	generators.set_script(load("res://Items/generators.gd"))
+	generators.player = player
+	add_child(generators)
+
 	var hud := HudScene.instantiate()
 	hud.sync_node = sync
 	add_child(hud)

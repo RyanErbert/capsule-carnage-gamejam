@@ -14,7 +14,7 @@ const GIVE_ITEMS := [
 	"machinegun", "rocket", "mines",
 	"block", "wall", "ramp", "platform", "bridge_gun",
 ]
-const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["spawn", "#7dedb0"], ["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["delete", "#aaaaaa"]]
+const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["spawn", "#7dedb0"], ["generator", "#6affc2"], ["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["delete", "#aaaaaa"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
 const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
@@ -163,6 +163,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif _tool == "spawn":
 			Net.emit_event("placeSpawn", {"x": pos.x, "y": pos.y, "z": pos.z})
 			_status.text = "spawn point placed"
+		elif _tool == "generator":
+			Net.emit_event("placeGenerator", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"x": pos.x, "y": pos.y + 0.7, "z": pos.z,
+			})
+			_status.text = "generator placed (E drags it)"
 		elif _tool == "castle" or _tool == "gate":
 			if _castle_start == null:
 				_castle_start = pos
@@ -400,6 +406,11 @@ func _find_delete_target(pos: Vector3) -> Dictionary:
 		var vh: Dictionary = vehicles.nearest_deletable(pos)
 		if not vh.is_empty():
 			candidates.append(vh.merged({"event": "removeVehicle", "kind": "vehicle"}))
+	var gens: Node = get_tree().get_first_node_in_group("world_generators")
+	if gens:
+		var gn: Dictionary = gens.nearest_deletable(pos)
+		if not gn.is_empty():
+			candidates.append(gn.merged({"event": "removeGenerator", "kind": "generator"}))
 	var best: Dictionary = {}
 	for c in candidates:
 		if best.is_empty() or c["dist"] < best["dist"]:

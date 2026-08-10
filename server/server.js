@@ -147,6 +147,7 @@ function normLayers(g) {
 
 // --- Global game settings (server-authoritative, alert on change) ---
 const gameSettings = {
+  slayer: true,              // DEFAULT gamemode: coins are health (start 100)
   infiniteAmmo: false,
   selfAssign: true,          // players may give themselves items via the god menu
   allowMidgameChanges: true, // when false, settings freeze while a game is running
@@ -154,6 +155,148 @@ const gameSettings = {
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0
 };
+
+// --- Slayer: coins ARE health. Players spawn with 100, damage sheds coins,
+// zero triggers a death explosion (clients carve + scorch) and a respawn
+// countdown, after which the server restores 100.
+const SLAYER_START = 100;
+const RESPAWN_MS = 4000;
+const deadUntil = {};   // socket.id -> timestamp while dead
+
+function startingScore() { return gameSettings.slayer ? SLAYER_START : 0; }
+
+function isDead(id) { return (deadUntil[id] || 0) > Date.now(); }
+
+function checkDeath(id) {
+  if (!gameSettings.slayer || !players[id] || isDead(id)) return;
+  if (scores[id] > 0) return;
+  scores[id] = 0;
+  deadUntil[id] = Date.now() + RESPAWN_MS;
+  const pos = { x: players[id].x, y: players[id].y, z: players[id].z };
+  io.emit('playerDied', { id, ...pos, respawnMs: RESPAWN_MS });
+  sysMsg(`${players[id].name} exploded.`);
+  // The death blast damages everyone nearby (chain deaths welcome).
+  explosionDamage(pos, id);
+  io.emit('scores', scores);
+  setTimeout(() => {
+    delete deadUntil[id];
+    if (players[id]) {
+      scores[id] = startingScore();
+      io.emit('scores', scores);
+      io.emit('playerRespawned', id);
+    }
+  }, RESPAWN_MS);
+}
+
+// Falloff damage + coin spray around a blast. Slayer uses flat damage bands
+// (percentages can never kill); the old sandbox mode keeps its pct-of-score.
+function explosionDamage(pos, excludeId) {
+  const droppedCoins = [];
+  for (const [id, player] of Object.entries(players)) {
+    if (id === excludeId || isDead(id)) continue;
+    const dx = player.x - pos.x;
+    const dy = player.y - pos.y;
+    const dz = player.z - pos.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    let pointsLost = 0;
+    if (gameSettings.slayer) {
+      if (dist < 1.5) pointsLost = 55;
+      else if (dist < 3) pointsLost = 40;
+      else if (dist < 5) pointsLost = 25;
+      else if (dist < 7) pointsLost = 12;
+      else if (dist < 9) pointsLost = 5;
+      pointsLost = Math.min(pointsLost, scores[id] || 0);
+    } else {
+      let pctLost = 0;
+      if (dist < 1) pctLost = 1.0;
+      else if (dist < 2) pctLost = 0.5;
+      else if (dist < 4) pctLost = 0.25;
+      else if (dist < 6) pctLost = 0.125;
+      else if (dist < 8) pctLost = 0.0625;
+      if (pctLost > 0 && scores[id] > 0) pointsLost = Math.ceil(scores[id] * pctLost);
+    }
+
+    if (pointsLost > 0 && scores[id] > 0) {
+      scores[id] -= pointsLost;
+      const coinsToSpawn = Math.min(pointsLost, 15); // Cap visuals at 15
+      for (let i = 0; i < coinsToSpawn; i++) {
+        const coinId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+        // Spray coins in every direction with widely varying speed so they
+        // scatter instead of fountaining onto one spot.
+        const ang = Math.random() * Math.PI * 2;
+        const horiz = 5 + Math.random() * 24;          // big horizontal speed spread
+        const up = 5 + Math.random() * 22;             // big vertical speed spread
+        const radial = 0.3 + Math.random() * 0.8;      // partial pull along blast dir
+        const safeDist = dist > 0.001 ? dist : 1;
+        const coin = {
+          id: coinId,
+          x: player.x + (Math.random() - 0.5) * 0.8,
+          y: player.y + 1 + Math.random() * 0.6,
+          z: player.z + (Math.random() - 0.5) * 0.8,
+          vx: (dx / safeDist) * 5 * radial + Math.cos(ang) * horiz,
+          vy: up,
+          vz: (dz / safeDist) * 5 * radial + Math.sin(ang) * horiz,
+          rx: (Math.random() - 0.5) * 30, ry: (Math.random() - 0.5) * 30, rz: (Math.random() - 0.5) * 30,
+          // Last coin carries the remainder so total shed health is conserved
+          value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
+          createdAt: Date.now()
+        };
+        activeCoins.push(coin);
+        droppedCoins.push(coin);
+      }
+      checkDeath(id);
+    }
+  }
+  if (droppedCoins.length > 0) io.emit('coinsDropped', droppedCoins);
+  io.emit('scores', scores);
+}
+
+// --- Generators (Slayer): humming heal stations, draggable with E ---
+const activeGenerators = [];  // { id, x, y, z, holder }
+const GEN_HEAL_RANGE = 4.5;
+
+function autoPlaceGenerator() {
+  activeGenerators.length = 0;
+  if (creativeLayers) {
+    const ground = creativeLayers[0], main = creativeLayers[1];
+    // First walkable pixel scanning outward-ish from the center
+    let placed = false;
+    for (let ring = 0; ring < 14 && !placed; ring++) {
+      for (let r = 16 - ring; r <= 16 + ring && !placed; r += Math.max(1, 2 * ring)) {
+        for (let c = 16 - ring; c <= 16 + ring && !placed; c++) {
+          if (r < 1 || r > 30 || c < 1 || c > 30) continue;
+          if (((main[r] >>> (31 - c)) & 1) === 1) continue;   // wall
+          if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
+          activeGenerators.push({
+            id: 'gen-auto', x: -64 + c * 4 + 2, y: 1.2, z: -64 + r * 4 + 2, holder: null
+          });
+          placed = true;
+        }
+      }
+    }
+  }
+  io.emit('currentGenerators', activeGenerators);
+}
+
+// Heal +1 per 2 s while standing near a generator (Slayer only).
+setInterval(() => {
+  if (!gameSettings.slayer || activeGenerators.length === 0) return;
+  let changed = false;
+  for (const id of readyIds) {
+    const p = players[id];
+    if (!p || isDead(id)) continue;
+    for (const g of activeGenerators) {
+      const dx = p.x - g.x, dy = p.y - g.y, dz = p.z - g.z;
+      if (dx * dx + dy * dy + dz * dz <= GEN_HEAL_RANGE * GEN_HEAL_RANGE) {
+        scores[id] = (scores[id] || 0) + 1;
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed) io.emit('scores', scores);
+}, 2000);
 
 // --- Castle walls (parametric, brick-built) ---
 const activeCastles = [];  // { id, a:{x,y,z}, b:{x,y,z}, arch }
@@ -268,7 +411,7 @@ function rebuildMap() {
   activeChannels.length = 0;
   activeCastles.length = 0;
   activeVehicles.length = 0;
-  for (const id of Object.keys(scores)) scores[id] = 0;
+  for (const id of Object.keys(scores)) scores[id] = startingScore();
   io.emit('scores', scores);
   io.emit('currentTeleporters', []);
   io.emit('currentMines', []);
@@ -279,13 +422,14 @@ function rebuildMap() {
   io.emit('currentCastles', []);
   io.emit('currentVehicles', []);
   autoPopulatePedestals();
+  autoPlaceGenerator();
   pickRandomHolder();
   io.emit('mapRebuilt', { layers: creativeLayers });
 }
 
 function endGame() {
   if (endVote) { clearTimeout(endVote.timer); endVote = null; }
-  for (const id of Object.keys(scores)) scores[id] = 0;
+  for (const id of Object.keys(scores)) scores[id] = startingScore();
   io.emit('scores', scores);
   holderID = null;
   io.emit('holderChanged', holderID);
@@ -313,9 +457,10 @@ function pickRandomHolder() {
   io.emit('scores', scores);
 }
 
-// Score tick — holder gains 1 point per second
+// Score tick — holder gains 1 point per second (old sandbox mode only;
+// in Slayer, scores are health and only coins/generators raise them)
 setInterval(() => {
-  if (holderID && players[holderID]) {
+  if (!gameSettings.slayer && holderID && players[holderID]) {
     scores[holderID] = (scores[holderID] || 0) + 1;
     io.emit('scores', scores);
   }
@@ -508,6 +653,7 @@ io.on('connection', (socket) => {
     terrainEdits = [];
     io.emit('creativeGrid', { layers: creativeLayers });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
+    autoPlaceGenerator();     // and one heal generator near the center
   });
 
   socket.on('terrainEdit', (e) => {
@@ -560,7 +706,7 @@ io.on('connection', (socket) => {
       skinImage: typeof data.skinImage === 'string' ? data.skinImage.slice(0, 500) : '',
       model: typeof data.model === 'string' ? data.model : 'none'
     };
-    scores[socket.id] = 0;
+    scores[socket.id] = startingScore();
     readyIds.add(socket.id);
     lastActivity[socket.id] = Date.now();
     // First player to join locks the lobby (level + game settings) for everyone.
@@ -578,6 +724,7 @@ io.on('connection', (socket) => {
     socket.emit('currentChannels', activeChannels);
     socket.emit('currentCastles', activeCastles);
     socket.emit('currentVehicles', activeVehicles);
+    socket.emit('currentGenerators', activeGenerators);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
     socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
 
@@ -714,7 +861,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('machinegunHit', ({ targetId, dir }) => {
-    if (!players[targetId]) return;
+    if (!players[targetId] || isDead(targetId)) return;
     if (scores[targetId] > 0) {
       const pointsLost = Math.min(scores[targetId], 2);
       scores[targetId] -= pointsLost;
@@ -738,6 +885,7 @@ io.on('connection', (socket) => {
       }
       io.emit('coinsDropped', droppedCoins);
       io.emit('scores', scores);
+      checkDeath(targetId);
     }
     io.emit('applyImpulse', { id: targetId, dir, force: 25 });
   });
@@ -748,57 +896,58 @@ io.on('connection', (socket) => {
 
   socket.on('triggerExplosion', (pos) => {
     io.emit('explosion', pos);
+    explosionDamage(pos);
+  });
 
-    const droppedCoins = [];
-    for (const [id, player] of Object.entries(players)) {
-      const dx = player.x - pos.x;
-      const dy = player.y - pos.y;
-      const dz = player.z - pos.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  // Slayer self-destruct (K or /kill): zero out and run the death flow.
+  socket.on('suicide', () => {
+    if (!gameSettings.slayer || !players[socket.id] || isDead(socket.id)) return;
+    scores[socket.id] = 0;
+    checkDeath(socket.id);
+  });
 
-      let pctLost = 0;
-      if (dist < 1) pctLost = 1.0;
-      else if (dist < 2) pctLost = 0.5;
-      else if (dist < 4) pctLost = 0.25;
-      else if (dist < 6) pctLost = 0.125;
-      else if (dist < 8) pctLost = 0.0625;
+  socket.on('placeGenerator', (g) => {
+    if (!g || typeof g.x !== 'number') return;
+    const gen = {
+      id: (typeof g.id === 'string' && g.id) ? g.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      x: +g.x, y: +g.y, z: +g.z, holder: null
+    };
+    activeGenerators.push(gen);
+    io.emit('generatorPlaced', gen);
+  });
 
-      if (pctLost > 0 && scores[id] > 0) {
-        const pointsLost = Math.ceil(scores[id] * pctLost);
-        if (pointsLost > 0) {
-          scores[id] -= pointsLost;
-          const coinsToSpawn = Math.min(pointsLost, 15); // Cap visuals at 15
-          for (let i = 0; i < coinsToSpawn; i++) {
-            const coinId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-            // Spray coins in every direction with widely varying speed so they
-            // scatter instead of fountaining onto one spot.
-            const ang = Math.random() * Math.PI * 2;
-            const horiz = 5 + Math.random() * 24;          // big horizontal speed spread
-            const up = 5 + Math.random() * 22;             // big vertical speed spread
-            const radial = 0.3 + Math.random() * 0.8;      // partial pull along blast dir
-            const safeDist = dist > 0.001 ? dist : 1;
-            const coin = {
-              id: coinId,
-              x: player.x + (Math.random() - 0.5) * 0.8,
-              y: player.y + 1 + Math.random() * 0.6,
-              z: player.z + (Math.random() - 0.5) * 0.8,
-              vx: (dx / safeDist) * 5 * radial + Math.cos(ang) * horiz,
-              vy: up,
-              vz: (dz / safeDist) * 5 * radial + Math.sin(ang) * horiz,
-              rx: (Math.random() - 0.5) * 30, ry: (Math.random() - 0.5) * 30, rz: (Math.random() - 0.5) * 30,
-              value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
-              createdAt: Date.now()
-            };
-            activeCoins.push(coin);
-            droppedCoins.push(coin);
-          }
-        }
-      }
+  socket.on('removeGenerator', (id) => {
+    const idx = activeGenerators.findIndex(g => g.id === id);
+    if (idx !== -1) {
+      activeGenerators.splice(idx, 1);
+      io.emit('generatorRemoved', id);
     }
-    if (droppedCoins.length > 0) {
-      io.emit('coinsDropped', droppedCoins);
-      io.emit('scores', scores);
+  });
+
+  socket.on('grabGenerator', (id) => {
+    const gen = activeGenerators.find(g => g.id === id);
+    if (!gen) return;
+    if (gen.holder && gen.holder !== socket.id && io.sockets.sockets.get(gen.holder)) {
+      socket.emit('generatorHolder', { id: gen.id, holder: gen.holder });
+      return;
     }
+    gen.holder = socket.id;
+    io.emit('generatorHolder', { id: gen.id, holder: gen.holder });
+  });
+
+  socket.on('releaseGenerator', (id) => {
+    const gen = activeGenerators.find(g => g.id === id);
+    if (gen && gen.holder === socket.id) {
+      gen.holder = null;
+      io.emit('generatorHolder', { id: gen.id, holder: null });
+    }
+  });
+
+  socket.on('generatorMoved', (d) => {
+    const gen = d && activeGenerators.find(g => g.id === d.id);
+    if (!gen || gen.holder !== socket.id) return;
+    gen.x = +d.x || 0; gen.y = +d.y || 0; gen.z = +d.z || 0;
+    socket.broadcast.emit('generatorMoved', { id: gen.id, x: gen.x, y: gen.y, z: gen.z });
   });
 
   socket.on('placeMine', (pos) => {
@@ -813,6 +962,7 @@ io.on('connection', (socket) => {
       const m = activeMines.splice(idx, 1)[0];
       io.emit('mineTriggered', { id, pos: m });
       io.emit('explosion', { x: m.x, y: m.y, z: m.z, type: 'mine' });
+      explosionDamage({ x: m.x, y: m.y, z: m.z });
     }
   });
 
@@ -901,6 +1051,14 @@ io.on('connection', (socket) => {
         io.emit('vehicleDriver', { id: veh.id, driver: null });
       }
     }
+    // Drop any generator this player was dragging.
+    for (const gen of activeGenerators) {
+      if (gen.holder === socket.id) {
+        gen.holder = null;
+        io.emit('generatorHolder', { id: gen.id, holder: null });
+      }
+    }
+    delete deadUntil[socket.id];
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
     // Drop the player from any running vote and re-evaluate the tally.
     if (endVote && endVote.voters.has(socket.id)) {

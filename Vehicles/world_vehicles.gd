@@ -116,14 +116,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			and event.keycode == KEY_E \
 			and get_viewport().gui_get_focus_owner() == null \
 			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
-			and player != null and not player.godmode:
+			and player != null and not player.godmode and not player.dead:
 		if _mounted:
 			_dismount(true)
-		else:
-			_try_mount()
+			get_viewport().set_input_as_handled()
+		elif _try_mount():
+			get_viewport().set_input_as_handled()
 
 
-func _try_mount() -> void:
+func _try_mount() -> bool:
 	var best: CharacterBody3D = null
 	var best_d := MOUNT_RANGE
 	for id in _vehicles:
@@ -135,7 +136,7 @@ func _try_mount() -> void:
 			best_d = d
 			best = veh
 	if best == null:
-		return
+		return false
 	_mounted = best
 	best.driver_id = _self_id()
 	best.driven_by_me = true
@@ -145,6 +146,7 @@ func _try_mount() -> void:
 		player.camera_rig.follow_target = best
 	Net.emit_event("mountVehicle", best.id)
 	Sfx.boost(best.global_position, 0.5)
+	return true
 
 
 func _dismount(tell_server: bool) -> void:
@@ -179,8 +181,8 @@ func _process(delta: float) -> void:
 		if player:
 			player.exit_vehicle()
 		return
-	# Entering drone/god mode hops you out first.
-	if player and player.godmode:
+	# Entering drone/god mode (or dying) hops you out first.
+	if player and (player.godmode or player.dead):
 		_dismount(true)
 		return
 	# Fell out of the world: rescue vehicle and driver to a spawn point.

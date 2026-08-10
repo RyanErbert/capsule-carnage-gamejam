@@ -71,6 +71,9 @@ var spawn_position := Vector3.ZERO
 var spawn_points: Array = []  # optional; respawns pick randomly (web randomSpawn)
 var godmode := false
 var vehicle: Node3D = null    # riding: body glued to the seat, collider off
+var dragging_generator := false  # rope-tied to a generator: heavy slowdown
+var dead := false             # Slayer: exploded, waiting out the countdown
+var dead_timer := 0.0
 
 
 func respawn_point() -> Vector3:
@@ -133,10 +136,14 @@ func exit_vehicle() -> void:
 	vehicle = null
 
 
-## Self-destruct (K or /kill): blow up — the server sheds your score as
-## coins for anyone nearby to loot — then respawn at a spawn point.
+## Self-destruct (K or /kill). Slayer: the server zeroes your health and the
+## normal death flow runs (explosion, scorch, countdown). Sandbox: blow up,
+## shed score as coins, instant respawn.
 func suicide() -> void:
-	if godmode or vehicle != null:
+	if godmode or vehicle != null or dead:
+		return
+	if bool(Net.game_settings.get("slayer", true)):
+		Net.emit_event("suicide")
 		return
 	Net.emit_event("triggerExplosion", {
 		"x": global_position.x, "y": global_position.y, "z": global_position.z,
@@ -144,6 +151,36 @@ func suicide() -> void:
 	global_position = respawn_point()
 	velocity = Vector3.ZERO
 	air_time = 0.0
+
+
+## Slayer death: hide + freeze through the countdown, then pop up at a spawn
+## point. The server restores health on its own matching timer.
+func die_slayer(respawn_secs: float) -> void:
+	if dead:
+		return
+	dead = true
+	dead_timer = respawn_secs
+	velocity = Vector3.ZERO
+	air_time = 0.0
+	charging_jump = false
+	dragging_generator = false
+	if _items:
+		_items.is_grappling = false
+	visible = false
+	if capsuleCollider:
+		capsuleCollider.disabled = true
+	# Move to the respawn spot now so remotes see one clean jump, not a corpse
+	global_position = respawn_point()
+
+
+func _dead_tick(delta: float) -> void:
+	dead_timer -= delta
+	if dead_timer <= 0.0:
+		dead = false
+		visible = true
+		if capsuleCollider:
+			capsuleCollider.disabled = false
+		velocity = Vector3.ZERO
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -175,6 +212,9 @@ func _god_idle(delta: float) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if dead:
+		_dead_tick(delta)
+		return
 	if vehicle != null:
 		if is_instance_valid(vehicle):
 			global_position = vehicle.seat_pos()
@@ -220,6 +260,8 @@ func _physics_process(delta: float) -> void:
 	var spd := clampf(float(Net.game_settings.get("speedScale", 0.33)), 0.05, 3.0)
 	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 3.0)
 	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 3.0)
+	if dragging_generator:
+		spd *= 0.45  # hauling the generator is slow going
 
 	if Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)

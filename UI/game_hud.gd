@@ -38,6 +38,8 @@ var _conn_pill: PanelContainer
 var _conn_style: StyleBoxFlat
 var _esc_toggles: Dictionary = {}
 var _esc_sliders: Dictionary = {}
+var _health_label: Label
+var _death_label: Label
 
 
 func _ready() -> void:
@@ -60,6 +62,7 @@ func _ready() -> void:
 	_build_meters()
 	_build_esc_menu()
 	_build_conn_pill()
+	_build_slayer_hud()
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -161,7 +164,7 @@ func _run_chat_command(msg: String) -> void:
 		"rebuild":
 			Net.emit_event("startRebuildVote")
 		"help":
-			_add_system_row("Commands: /vote yes|no, /end, /rebuild (map-reset vote), /kill (also K), /god (also Tab)")
+			_add_system_row("Commands: /vote yes|no, /end, /rebuild (map-reset vote), /kill (also K), /god (also Q)")
 		_:
 			_add_system_row("Unknown command: /" + cmd)
 
@@ -362,7 +365,7 @@ func _build_esc_menu() -> void:
 	box.add_child(title)
 
 	# Server-wide toggles (everyone sees an alert when these change)
-	for entry in [["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
+	for entry in [["slayer", "Slayer (coins = health)"], ["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
 		var check := CheckBox.new()
 		check.text = entry[1]
 		check.focus_mode = Control.FOCUS_NONE
@@ -429,6 +432,64 @@ func _input(event: InputEvent) -> void:
 	_hotkey_input(event)
 
 
+## Slayer readouts: health bottom-center above the meters, and the big
+## respawn countdown while dead.
+func _build_slayer_hud() -> void:
+	_health_label = Label.new()
+	_health_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_health_label.offset_left = -90
+	_health_label.offset_right = 90
+	_health_label.offset_top = -84
+	_health_label.offset_bottom = -52
+	_health_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_health_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_health_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_health_label.add_theme_font_size_override("font_size", 24)
+	_health_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	_health_label.add_theme_constant_override("outline_size", 8)
+	add_child(_health_label)
+
+	_death_label = Label.new()
+	_death_label.set_anchors_preset(Control.PRESET_CENTER)
+	_death_label.offset_left = -160
+	_death_label.offset_right = 160
+	_death_label.offset_top = -60
+	_death_label.offset_bottom = 60
+	_death_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_death_label.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_death_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_death_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_death_label.add_theme_font_size_override("font_size", 54)
+	_death_label.add_theme_color_override("font_color", Color("#ff5544"))
+	_death_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	_death_label.add_theme_constant_override("outline_size", 12)
+	_death_label.visible = false
+	add_child(_death_label)
+
+
+func _update_slayer_hud() -> void:
+	if _health_label == null or sync_node == null:
+		return
+	var slayer := bool(Net.game_settings.get("slayer", true))
+	var p: CharacterBody3D = sync_node.player
+	if not slayer or p == null or sync_node.self_id == "":
+		_health_label.visible = false
+		_death_label.visible = false
+		return
+	var hp := int(sync_node.scores.get(sync_node.self_id, 0))
+	_health_label.visible = not p.godmode
+	_health_label.text = "♥ %d" % hp
+	var col := Color(1, 1, 1)
+	if hp <= 25:
+		col = Color("#ff5544")
+	elif hp <= 50:
+		col = Color("#ffb347")
+	_health_label.add_theme_color_override("font_color", col)
+	_death_label.visible = p.dead
+	if p.dead:
+		_death_label.text = "💀 %d" % int(ceil(p.dead_timer))
+
+
 ## Connection pill (top-right): green = connected, red = disconnected.
 func _build_conn_pill() -> void:
 	_conn_pill = PanelContainer.new()
@@ -463,6 +524,7 @@ func _process(_delta: float) -> void:
 	_scoreboard.visible = Input.is_key_pressed(KEY_TAB) and get_viewport().gui_get_focus_owner() == null
 	_update_meters()
 	_update_conn_pill()
+	_update_slayer_hud()
 
 
 func _refresh(scores: Dictionary) -> void:

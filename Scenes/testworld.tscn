@@ -20,6 +20,7 @@
 [ext_resource type="Script" path="res://Items/props.gd" id="19_props"]
 [ext_resource type="Script" path="res://Items/castle.gd" id="20_castle"]
 [ext_resource type="Script" path="res://Vehicles/world_vehicles.gd" id="21_vehicles"]
+[ext_resource type="Script" path="res://Items/generators.gd" id="22_generators"]
 [ext_resource type="PackedScene" path="res://UI/game_hud.tscn" id="15_hud"]
 
 [sub_resource type="Environment" id="Environment_ywrmy"]
@@ -1558,6 +1559,10 @@ script = ExtResource("20_castle")
 
 [node name="WorldVehicles" type="Node3D" parent="." node_paths=PackedStringArray("player")]
 script = ExtResource("21_vehicles")
+player = NodePath("../player")
+
+[node name="WorldGenerators" type="Node3D" parent="." node_paths=PackedStringArray("player")]
+script = ExtResource("22_generators")
 player = NodePath("../player")
 
 [node name="MultiplayerSync" type="Node" parent="." unique_id=203273616 node_paths=PackedStringArray("player")]
