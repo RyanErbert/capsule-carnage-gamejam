@@ -214,7 +214,7 @@ func _fire_machinegun_shot() -> void:
 		"start": {"x": start.x, "y": start.y, "z": start.z},
 		"velocity": {"x": dir.x * MG_SPEED, "y": dir.y * MG_SPEED, "z": dir.z * MG_SPEED},
 	})
-	if Settings.infinite_ammo:
+	if bool(Net.game_settings.get("infiniteAmmo", false)):
 		return
 	inventory[0]["ammo"] = int(inventory[0]["ammo"]) - 1
 	if int(inventory[0]["ammo"]) <= 0:
@@ -238,7 +238,7 @@ func _aim_point() -> Variant:
 
 
 func _use_ammo() -> void:
-	if Settings.infinite_ammo:
+	if bool(Net.game_settings.get("infiniteAmmo", false)):
 		return
 	inventory[0]["ammo"] = int(inventory[0]["ammo"]) - 1
 	if int(inventory[0]["ammo"]) <= 0:

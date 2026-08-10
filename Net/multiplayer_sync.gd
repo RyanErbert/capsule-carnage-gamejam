@@ -55,6 +55,9 @@ func _on_socket_connected() -> void:
 
 
 func _on_socket_disconnected() -> void:
+	# Losing the server mid-game: back to the menu, which shows the red
+	# disconnected state and disables JOIN until the connection returns.
+	_return_to_menu("lost connection to the server")
 	for id in _remotes:
 		_remotes[id].queue_free()
 	_remotes.clear()

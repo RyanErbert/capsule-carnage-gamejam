@@ -86,6 +86,19 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"creativeGrid":
 			if data is Array and not _same_rows(data):
 				_start_play(data.duplicate(), [], false)
+		"mapRebuilt":
+			# Round reset: regenerate terrain from the pixels, fresh spawn
+			if _playing and terrain:
+				var px: Variant = data.get("pixels") if data is Dictionary else null
+				if px is Array and not px.is_empty():
+					_rows = []
+					for v in px:
+						_rows.append(int(v))
+				terrain.build_from_pixels(_rows)
+				if player:
+					player.spawn_points = _spawn_points()
+					player.global_position = player.respawn_point()
+					player.velocity = Vector3.ZERO
 		"terrainEdit":
 			if _playing and data is Dictionary and terrain:
 				terrain.apply_brush(
@@ -208,6 +221,11 @@ func _physics_process(delta: float) -> void:
 	if player.global_position.y < KILL_Y:
 		player.global_position = player.respawn_point()
 		player.velocity = Vector3.ZERO
+	# Filled-in terrain can embed the player (own or remote F-strokes);
+	# depenetration then shoves them through the floor. Pop upward instead.
+	if terrain and terrain.density_at(player.global_position + Vector3(0, 0.2, 0)) > 0.55:
+		player.global_position.y += 1.0
+		player.velocity.y = maxf(player.velocity.y, 0.0)
 	_brush_cd = maxf(0.0, _brush_cd - delta)
 	var busy: bool = get_viewport().gui_get_focus_owner() != null \
 		or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode

@@ -121,6 +121,13 @@ func _seal_boundary() -> void:
 # so you can dig trenches into the floor but never through it into the void.
 const BEDROCK_Y := 2  # world y = 0 (the canyon floor's top)
 
+## Density at a world position (nearest lattice point) — used to detect a
+## player embedded by a fill brush so they can be popped out upward.
+func density_at(pos: Vector3) -> float:
+	var g := (pos - ORIGIN) / VOXEL
+	return _d(clampi(roundi(g.x), 0, NX), clampi(roundi(g.y), 0, NY), clampi(roundi(g.z), 0, NZ))
+
+
 ## Astroneer-style brush: add (sign +1) or carve (sign -1) a falloff sphere.
 ## `strength` scales the per-call amount so held-button strokes carve
 ## gradually instead of stamping. Returns true if anything changed.

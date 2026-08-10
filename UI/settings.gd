@@ -19,9 +19,8 @@ var level := "creative"        # "creative" (default) | "testworld"
 
 
 func _ready() -> void:
-	var env_name := OS.get_environment("USERNAME")
-	if env_name != "":
-		player_name = env_name.left(16)
+	# Name defaults to one of the web game's predesignated random names
+	# (player_name is already rolled from RANDOM_NAMES above).
 	if OS.get_environment("FRIENDSLOP_MODEL").to_lower() == "cube":
 		model = "cube"
 	if OS.get_environment("FRIENDSLOP_LEVEL") != "":

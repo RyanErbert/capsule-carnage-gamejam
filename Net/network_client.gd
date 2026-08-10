@@ -27,6 +27,8 @@ var _was_open := false
 var creative_grid: Variant = null
 var terrain_edits: Array = []
 var paint_rows: Variant = null  # in-progress editor canvas (live co-painting)
+var game_settings: Dictionary = {}  # server-authoritative global settings
+var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var _reconnect_timer := 0.0
 
 
@@ -147,4 +149,15 @@ func _handle_frame(frame: String) -> void:
 					terrain_edits = data if data is Array else []
 				"creativePaint":
 					paint_rows = data
+				"gameSettings":
+					game_settings = data if data is Dictionary else {}
+				"currentSpawns":
+					spawn_points = data if data is Array else []
+				"spawnPlaced":
+					spawn_points.append(data)
+				"spawnRemoved":
+					for i in spawn_points.size():
+						if str(spawn_points[i].get("id", "")) == str(data):
+							spawn_points.remove_at(i)
+							break
 			event_received.emit(event, data)

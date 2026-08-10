@@ -34,6 +34,9 @@ var _offer_server_kick := false
 var _meters: VBoxContainer
 var _meter_fills: Array = []
 var _esc_menu: PanelContainer
+var _conn_pill: PanelContainer
+var _conn_style: StyleBoxFlat
+var _esc_toggles: Dictionary = {}
 
 
 func _ready() -> void:
@@ -55,6 +58,7 @@ func _ready() -> void:
 			items.inventory_changed.connect(_refresh_inventory)
 	_build_meters()
 	_build_esc_menu()
+	_build_conn_pill()
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -149,8 +153,14 @@ func _run_chat_command(msg: String) -> void:
 		"kill":
 			if sync_node and sync_node.player:
 				sync_node.player.suicide()
+		"god":
+			var god: Node = get_node_or_null("GodMenu")
+			if god:
+				god.toggle()
+		"rebuild":
+			Net.emit_event("startRebuildVote")
 		"help":
-			_add_system_row("Commands: /vote yes, /vote no, /end (end-game vote), /kill (self-destruct, also K)")
+			_add_system_row("Commands: /vote yes|no, /end, /rebuild (map-reset vote), /kill (also K), /god (also Tab)")
 		_:
 			_add_system_row("Unknown command: /" + cmd)
 
@@ -165,6 +175,11 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_add_system_row(str(data.get("text", "")))
 		"gameEnded":
 			_add_system_row("Game ended.")
+		"gameSettings":
+			if data is Dictionary:
+				for key in _esc_toggles:
+					_esc_toggles[key].set_pressed_no_signal(bool(data.get(key, false)))
+				_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
 
 
 func _bb_escape(s: String) -> String:
@@ -273,9 +288,12 @@ func _update_meters() -> void:
 		_meter_fills[1].color = Color(0.9, 0.25, 0.2)
 
 
+var _last_inventory: Array = []
+
 ## Web updateInventoryUI: slot 0 is 80px (active), others 50px, borders in the
 ## item's category color, red ammo count (blank when 0 = single-use).
 func _refresh_inventory(items: Array) -> void:
+	_last_inventory = items
 	for child in _inventory_hud.get_children():
 		child.queue_free()
 	for i in items.size():
@@ -293,7 +311,7 @@ func _refresh_inventory(items: Array) -> void:
 		slot.add_theme_stylebox_override("panel", style)
 		var label := Label.new()
 		var ammo_text := ""
-		if Settings.infinite_ammo:
+		if bool(Net.game_settings.get("infiniteAmmo", false)):
 			ammo_text = "\n∞"
 		elif ammo > 0:
 			ammo_text = "\n%d" % ammo
@@ -330,15 +348,30 @@ func _build_esc_menu() -> void:
 	box.add_theme_constant_override("separation", 8)
 	_esc_menu.add_child(box)
 	var title := Label.new()
-	title.text = "PAUSED"
+	title.text = "GAME SETTINGS"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	box.add_child(title)
+
+	# Server-wide toggles (everyone sees an alert when these change)
+	for entry in [["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
+		var check := CheckBox.new()
+		check.text = entry[1]
+		check.focus_mode = Control.FOCUS_NONE
+		check.set_pressed_no_signal(bool(Net.game_settings.get(entry[0], false)))
+		check.toggled.connect(func(on: bool): Net.emit_event("updateGameSetting", {"key": entry[0], "value": on}))
+		box.add_child(check)
+		_esc_toggles[entry[0]] = check
+
 	for entry in [
 		["RESUME", func(): _toggle_esc_menu(false)],
-		["VOTE END GAME", func():
+		["VOTE: REBUILD MAP (reset)", func():
+			Net.emit_event("startRebuildVote")
+			_toggle_esc_menu(false)],
+		["VOTE: END GAME", func():
 			Net.emit_event("startEndVote")
 			_toggle_esc_menu(false)],
+		["LEAVE TO MENU", func(): get_tree().change_scene_to_file("res://UI/main_menu.tscn")],
 		["QUIT GAME", func(): get_tree().quit()],
 	]:
 		var b := Button.new()
@@ -364,9 +397,41 @@ func _input(event: InputEvent) -> void:
 	_hotkey_input(event)
 
 
+## Connection pill (top-right): green = connected, red = disconnected.
+func _build_conn_pill() -> void:
+	_conn_pill = PanelContainer.new()
+	_conn_pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_conn_pill.offset_left = -110
+	_conn_pill.offset_right = -10
+	_conn_pill.offset_top = 8
+	_conn_pill.offset_bottom = 30
+	_conn_pill.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_conn_style = StyleBoxFlat.new()
+	_conn_style.set_corner_radius_all(11)
+	_conn_style.set_content_margin_all(4)
+	_conn_pill.add_theme_stylebox_override("panel", _conn_style)
+	var label := Label.new()
+	label.name = "Text"
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 11)
+	label.add_theme_color_override("font_color", Color.WHITE)
+	_conn_pill.add_child(label)
+	add_child(_conn_pill)
+
+
+func _update_conn_pill() -> void:
+	if _conn_pill == null:
+		return
+	var ok := Net.is_socket_connected()
+	_conn_style.bg_color = Color(0.1, 0.45, 0.2, 0.85) if ok else Color(0.55, 0.1, 0.1, 0.9)
+	(_conn_pill.get_node("Text") as Label).text = "● online" if ok else "● offline"
+
+
 func _process(_delta: float) -> void:
-	_scoreboard.visible = Input.is_key_pressed(KEY_TAB)
+	# Scoreboard: hold V (Tab toggles the drone/god menu now)
+	_scoreboard.visible = Input.is_key_pressed(KEY_V) and get_viewport().gui_get_focus_owner() == null
 	_update_meters()
+	_update_conn_pill()
 
 
 func _refresh(scores: Dictionary) -> void:

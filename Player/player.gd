@@ -91,6 +91,8 @@ var _sprint_morph_t := 0.0
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	spawn_position = global_position
+	if devInfoLabel:
+		devInfoLabel.visible = false
 	use_cube = Settings.model == "cube"
 	if use_cube and _cube_visual:
 		smoothing = IDLE_SMOOTHING
@@ -151,7 +153,6 @@ func _god_idle(delta: float) -> void:
 func _physics_process(delta: float) -> void:
 	if godmode:
 		_god_idle(delta)
-		_update_dev_info()
 		return
 
 	var now := Time.get_ticks_msec() / 1000.0
@@ -283,7 +284,6 @@ func _physics_process(delta: float) -> void:
 			var axis := Vector3.UP.cross(h_roll.normalized()).normalized()
 			_cube_visual.global_rotate(axis, (h_roll.length() / 0.5) * delta)
 
-	_update_dev_info()
 	move_and_slide()
 
 
@@ -346,14 +346,4 @@ func visual_quat() -> Quaternion:
 	return global_transform.basis.get_rotation_quaternion()
 
 
-func _update_dev_info() -> void:
-	if not devInfoLabel:
-		return
-	devInfoLabel.text = "POS x:%.2f y:%.2f z:%.2f\nVEL x:%.2f y:%.2f z:%.2f\nSPD %.1f / cap %.1f%s\nSTAMINA %.1f%s   CHARGE %.2f   CD %.1f" % [
-		position.x, position.y, position.z,
-		velocity.x, velocity.y, velocity.z,
-		Vector2(velocity.x, velocity.z).length(), speed_cap,
-		" SPRINT" if sprinting else "",
-		sprint_stamina, " EXHAUSTED" if sprint_exhausted else "",
-		jump_charge, jump_cooldown,
-	]
+# (POS/VEL/SPD debug readout removed — the HUD's connection pill replaced it)

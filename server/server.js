@@ -132,6 +132,16 @@ let creativePixels = null;
 let terrainEdits = [];
 let paintRows = null;  // in-progress editor canvas, live-synced between painters
 
+// --- Global game settings (server-authoritative, alert on change) ---
+const gameSettings = {
+  infiniteAmmo: false,
+  selfAssign: true,          // players may give themselves items via the god menu
+  allowMidgameChanges: true  // when false, settings freeze while a game is running
+};
+
+// --- Placeable spawn points ---
+const spawnPoints = [];  // { id, x, y, z }
+
 // --- Pedestal state ---
 const pedestals = [];
 const ITEMS_BY_CATEGORY = {
@@ -185,10 +195,61 @@ function checkEndVote() {
 
 function finishEndVote(passed) {
   if (!endVote) return;
+  const kind = endVote.kind || 'end';
   clearTimeout(endVote.timer);
   endVote = null;
-  if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
-  else sysMsg('Vote to end the game failed.');
+  if (passed && kind === 'rebuild') { sysMsg('Vote passed — rebuilding the map.'); rebuildMap(); }
+  else if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
+  else sysMsg(kind === 'rebuild' ? 'Vote to rebuild the map failed.' : 'Vote to end the game failed.');
+}
+
+// Auto-populate item pedestals across the OPEN pixels of the creative map:
+// movement (green) and weapon (red) pedestals so a fresh round has pickups
+// without anyone god-placing them. Deterministic, capped at 12.
+function autoPopulatePedestals() {
+  if (!creativePixels) return;
+  pedestals.length = 0;
+  const types = ['green', 'red', 'green', 'red', 'yellow'];
+  let n = 0;
+  outer:
+  for (let r = 2; r < 30; r += 5) {
+    for (let c = 2; c < 30; c += 5) {
+      if (((creativePixels[r] >>> (31 - c)) & 1) === 1) continue; // wall
+      pedestals.push({
+        id: 'auto-' + r + '-' + c,
+        x: -64 + c * 4 + 2, y: 0, z: -64 + r * 4 + 2, ry: 0,
+        type: types[n % types.length],
+        currentItem: null, spawnTime: 0
+      });
+      if (++n >= 12) break outer;
+    }
+  }
+  io.emit('currentPedestals', pedestals);
+}
+
+// Rebuild = round reset: world objects and terrain edits wiped, scores
+// zeroed, everyone stays in-game, pedestals repopulate, and each client
+// regenerates the map from the painted pixels.
+function rebuildMap() {
+  terrainEdits = [];
+  activeTeleporters.length = 0;
+  activeMines.length = 0;
+  activeCoins.length = 0;
+  activePads.length = 0;
+  activeBuilds.length = 0;
+  activeModels.length = 0;
+  activeChannels.length = 0;
+  for (const id of Object.keys(scores)) scores[id] = 0;
+  io.emit('scores', scores);
+  io.emit('currentTeleporters', []);
+  io.emit('currentMines', []);
+  io.emit('currentPads', []);
+  io.emit('currentBuilds', []);
+  io.emit('currentModels', []);
+  io.emit('currentChannels', []);
+  autoPopulatePedestals();
+  pickRandomHolder();
+  io.emit('mapRebuilt', { pixels: creativePixels });
 }
 
 function endGame() {
@@ -279,6 +340,53 @@ io.on('connection', (socket) => {
     socket.emit('terrainEdits', terrainEdits);
   }
   if (paintRows) socket.emit('creativePaint', paintRows);
+  socket.emit('gameSettings', gameSettings);
+  socket.emit('currentSpawns', spawnPoints);
+
+  socket.on('updateGameSetting', (u) => {
+    if (!u || typeof u.key !== 'string' || !(u.key in gameSettings)) return;
+    if (!gameSettings.allowMidgameChanges && readyIds.size > 0 && u.key !== 'allowMidgameChanges') {
+      socket.emit('systemMessage', { text: 'Game settings are locked while a game is in progress.' });
+      return;
+    }
+    gameSettings[u.key] = !!u.value;
+    const who = players[socket.id] ? players[socket.id].name : 'Someone';
+    io.emit('gameSettings', gameSettings);
+    sysMsg(`${who} turned ${u.key} ${gameSettings[u.key] ? 'ON' : 'OFF'}`);
+  });
+
+  socket.on('placeSpawn', (s) => {
+    if (!s || typeof s.x !== 'number') return;
+    const sp = {
+      id: (typeof s.id === 'string' && s.id) ? s.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      x: +s.x, y: +s.y, z: +s.z
+    };
+    spawnPoints.push(sp);
+    io.emit('spawnPlaced', sp);
+  });
+
+  socket.on('removeSpawn', (id) => {
+    const idx = spawnPoints.findIndex(p => p.id === id);
+    if (idx !== -1) {
+      spawnPoints.splice(idx, 1);
+      io.emit('spawnRemoved', id);
+    }
+  });
+
+  socket.on('startRebuildVote', () => {
+    if (!readyIds.has(socket.id) || endVote) return;
+    endVote = {
+      kind: 'rebuild',
+      voters: new Set([...readyIds]),
+      yes: new Set([socket.id]),
+      no: new Set(),
+      timer: null
+    };
+    endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
+    const name = players[socket.id] ? players[socket.id].name : 'Player';
+    sysMsg(`${name} wants to rebuild the map (full reset). /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
+    checkEndVote();
+  });
 
   // Live co-painting of the creative editor canvas (full 32-int grid per
   // stroke burst — tiny and idempotent).
@@ -293,6 +401,7 @@ io.on('connection', (socket) => {
     creativePixels = rows.slice(0, 64).map(Number);
     terrainEdits = [];
     io.emit('creativeGrid', creativePixels);
+    autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
   });
 
   socket.on('terrainEdit', (e) => {
@@ -414,6 +523,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('godmodeGive', (item) => {
+    if (!gameSettings.selfAssign) {
+      socket.emit('systemMessage', { text: 'Self-assigning items is disabled in game settings.' });
+      return;
+    }
     socket.emit('itemPickedUp', item);
   });
 

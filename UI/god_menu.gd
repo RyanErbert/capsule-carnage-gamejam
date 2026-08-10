@@ -14,7 +14,7 @@ const GIVE_ITEMS := [
 	"machinegun", "rocket", "mines",
 	"block", "wall", "ramp", "platform", "bridge_gun",
 ]
-const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["channel", "#66ccff"], ["delete", "#aaaaaa"]]
+const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["spawn", "#7dedb0"], ["channel", "#66ccff"], ["delete", "#aaaaaa"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
 
 var _player: CharacterBody3D
@@ -56,8 +56,9 @@ func _find_refs() -> bool:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
 			and get_viewport().gui_get_focus_owner() == null:
-		if event.keycode == KEY_QUOTELEFT:
+		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_TAB:
 			toggle()
+			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_R and visible and _tool.begins_with("build:"):
 			_build_rot = (_build_rot + 1) % 4
 
@@ -144,6 +145,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				Net.emit_event(target["event"], target["id"])
 				_status.text = "%s removed" % target["kind"]
+		elif _tool == "spawn":
+			Net.emit_event("placeSpawn", {"x": pos.x, "y": pos.y, "z": pos.z})
+			_status.text = "spawn point placed"
 		elif _tool == "channel":
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
@@ -304,6 +308,9 @@ func _find_delete_target(pos: Vector3) -> Dictionary:
 		var ped: Dictionary = _world_items.nearest_deletable(pos)
 		if not ped.is_empty():
 			candidates.append(ped.merged({"event": "removePedestal", "kind": "pedestal"}))
+		var sp: Dictionary = _world_items.nearest_spawn(pos)
+		if not sp.is_empty():
+			candidates.append(sp.merged({"event": "removeSpawn", "kind": "spawn point"}))
 	if _world_props:
 		var prop: Dictionary = _world_props.nearest_deletable(pos)
 		if not prop.is_empty():
@@ -409,17 +416,23 @@ func _build_ui() -> void:
 	help.add_theme_font_size_override("font_size", 11)
 	root.add_child(help)
 
-	var give_label := Label.new()
-	give_label.text = "GIVE ITEM"
-	give_label.add_theme_font_size_override("font_size", 12)
-	give_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
-	root.add_child(give_label)
+	# GIVE section is collapsed by default (housekeeping request)
+	var give_toggle := Button.new()
+	give_toggle.text = "▸ GIVE ITEM"
+	give_toggle.focus_mode = Control.FOCUS_NONE
+	give_toggle.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	give_toggle.add_theme_font_size_override("font_size", 12)
+	root.add_child(give_toggle)
 
 	var grid := GridContainer.new()
 	grid.columns = 3
+	grid.visible = false
 	grid.add_theme_constant_override("h_separation", 6)
 	grid.add_theme_constant_override("v_separation", 6)
 	root.add_child(grid)
+	give_toggle.pressed.connect(func():
+		grid.visible = not grid.visible
+		give_toggle.text = ("▾ GIVE ITEM" if grid.visible else "▸ GIVE ITEM"))
 	for item in GIVE_ITEMS:
 		var color := Color("#44ff44")
 		if item in ["machinegun", "rocket", "mines"]:

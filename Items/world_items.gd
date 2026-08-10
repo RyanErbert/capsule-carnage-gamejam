@@ -21,12 +21,56 @@ var _teleporters: Array = []      # {a: Vector3, b: Vector3, nodes: [..]}
 var _teleport_cd := 0.0
 var _pending_ghost: MeshInstance3D = null
 var _time := 0.0
+var _spawn_markers: Dictionary = {}   # id -> Node3D
 
 
 func _ready() -> void:
 	Net.event_received.connect(_on_net_event)
 	if player:
 		_item_controller = player.get_node_or_null("ItemController")
+	for sp in Net.spawn_points:
+		_add_spawn(sp)
+	_sync_player_spawns()
+
+
+## Placed spawn beacons: a small pillar of light. Player respawns use them.
+func _add_spawn(sp: Dictionary) -> void:
+	var id := str(sp.get("id", ""))
+	if id == "" or _spawn_markers.has(id):
+		return
+	var node := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.5
+	cyl.bottom_radius = 0.7
+	cyl.height = 3.0
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.5, 0.9, 1.0, 0.25)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cyl.material = mat
+	node.mesh = cyl
+	node.position = Vector3(sp.get("x", 0.0), float(sp.get("y", 0.0)) + 1.5, sp.get("z", 0.0))
+	add_child(node)
+	_spawn_markers[id] = node
+
+
+func _sync_player_spawns() -> void:
+	if player == null or Net.spawn_points.is_empty():
+		return
+	var pts: Array = []
+	for sp in Net.spawn_points:
+		pts.append(Vector3(sp.get("x", 0.0), float(sp.get("y", 0.0)) + 1.0, sp.get("z", 0.0)))
+	player.spawn_points = pts
+
+
+## Nearest spawn marker within `radius` — god menu delete. {} if none.
+func nearest_spawn(pos: Vector3, radius := 2.5) -> Dictionary:
+	var best := {}
+	for id in _spawn_markers:
+		var d: float = _spawn_markers[id].position.distance_to(pos)
+		if d < radius and (best.is_empty() or d < best["dist"]):
+			best = {"id": id, "dist": d, "pos": _spawn_markers[id].position}
+	return best
 
 
 func _on_net_event(event: String, data: Variant) -> void:
@@ -67,6 +111,22 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_add_teleporter(t)
 		"teleporterPlaced":
 			_add_teleporter(data)
+		"currentSpawns":
+			for id in _spawn_markers:
+				_spawn_markers[id].queue_free()
+			_spawn_markers.clear()
+			for sp in data:
+				_add_spawn(sp)
+			_sync_player_spawns()
+		"spawnPlaced":
+			_add_spawn(data)
+			_sync_player_spawns()
+		"spawnRemoved":
+			var sid := str(data)
+			if _spawn_markers.has(sid):
+				_spawn_markers[sid].queue_free()
+				_spawn_markers.erase(sid)
+			_sync_player_spawns()
 
 
 ## Nearest pedestal within `radius` — god menu delete. {} if none.
