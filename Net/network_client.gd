@@ -60,6 +60,17 @@ func connect_to_server(url: String) -> void:
 		push_warning("NetworkClient: connect failed (%s) — running offline" % err)
 
 
+## Drop the socket and rejoin with a fresh id (web returnToMenu did
+## socket.disconnect(); socket.connect()).
+func reconnect() -> void:
+	_ws = WebSocketPeer.new()
+	_handshake_done = false
+	_was_open = false
+	var err := _ws.connect_to_url(_url)
+	if err != OK:
+		push_warning("NetworkClient: reconnect failed (%s)" % err)
+
+
 func is_socket_connected() -> bool:
 	return _handshake_done and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN
 

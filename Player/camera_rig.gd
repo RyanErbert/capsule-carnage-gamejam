@@ -46,12 +46,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			base_chain_length = clampf(base_chain_length - 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			base_chain_length = clampf(base_chain_length + 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
-	elif event.is_action_pressed("ui_cancel"):
-		# Esc toggles mouse capture (stand-in for the web's escape menu)
-		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		else:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# (Esc handling moved to the HUD's escape menu)
 
 
 func _physics_process(delta: float) -> void:

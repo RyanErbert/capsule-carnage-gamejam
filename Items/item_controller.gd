@@ -35,6 +35,11 @@ var _rocket_cd := 0.0
 
 func _ready() -> void:
 	Net.event_received.connect(_on_net_event)
+	# Lobby starting weapon (web menu: none/machinegun/rocket/mines/grapple)
+	var weapon: String = Settings.starting_weapon
+	if weapon != "none" and weapon != "":
+		inventory.append({"type": weapon, "ammo": int(Settings.STARTING_AMMO.get(weapon, 0))})
+		inventory_changed.emit.call_deferred(inventory)
 	_grapple_line = MeshInstance3D.new()
 	_grapple_line.top_level = true
 	_grapple_line.mesh = ImmediateMesh.new()
@@ -203,6 +208,8 @@ func _fire_machinegun_shot() -> void:
 		"start": {"x": start.x, "y": start.y, "z": start.z},
 		"velocity": {"x": dir.x * MG_SPEED, "y": dir.y * MG_SPEED, "z": dir.z * MG_SPEED},
 	})
+	if Settings.infinite_ammo:
+		return
 	inventory[0]["ammo"] = int(inventory[0]["ammo"]) - 1
 	if int(inventory[0]["ammo"]) <= 0:
 		_mg_firing = false
@@ -225,6 +232,8 @@ func _aim_point() -> Variant:
 
 
 func _use_ammo() -> void:
+	if Settings.infinite_ammo:
+		return
 	inventory[0]["ammo"] = int(inventory[0]["ammo"]) - 1
 	if int(inventory[0]["ammo"]) <= 0:
 		_shift_inventory()

@@ -68,11 +68,11 @@ var _sprint_morph_t := 0.0
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	spawn_position = global_position
-	use_cube = OS.get_environment("FRIENDSLOP_MODEL").to_lower() == "cube"
+	use_cube = Settings.model == "cube"
 	if use_cube and _cube_visual:
 		smoothing = IDLE_SMOOTHING
 		_cube_visual.visible = true
-		_cube_visual.set_color(Color("#b5651d"))
+		_cube_visual.set_color(Settings.color)
 		if _capsule_logic:
 			_capsule_logic.visible = false
 

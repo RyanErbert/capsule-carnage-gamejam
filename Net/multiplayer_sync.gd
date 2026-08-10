@@ -45,9 +45,9 @@ func _on_socket_connected() -> void:
 	# Two-phase join: server sends spectatorPlayers first; 'ready' enters the game.
 	Net.emit_event("ready", {
 		"type": "desktop",
-		"name": OS.get_environment("USERNAME").left(16) if OS.get_environment("USERNAME") else "GodotBear",
+		"name": Settings.player_name,
 		"shape": "roundcube" if (player and player.use_cube) else "sphere",
-		"skinColor": "#b5651d",
+		"skinColor": Settings.color_hex(),
 		"skinImage": null,
 		"model": null,
 		"build": Net.git_commit(),
@@ -94,6 +94,10 @@ func _on_event(event: String, data: Variant) -> void:
 			holder_changed.emit(holder_id)
 		"tagCooldown":
 			_tag_cooldown = float(data) / 1000.0  # server sends ms
+		"kicked":
+			_return_to_menu("kicked (inactivity)")
+		"gameEnded":
+			_return_to_menu("game ended by vote")
 		"versionMismatch":
 			var server_build := str(data.get("server", "?"))
 			print("[net] VERSION MISMATCH — server %s, local %s" % [server_build, Net.git_commit()])
@@ -101,6 +105,13 @@ func _on_event(event: String, data: Variant) -> void:
 		"kicked", "gameEnded":
 			# Menu flow comes in a later phase; for now just note it.
 			print("[net] server ended session: ", event)
+
+
+## Web returnToMenu(): full teardown + a fresh socket id, back to the lobby.
+func _return_to_menu(reason: String) -> void:
+	print("[net] returning to menu — %s" % reason)
+	Net.reconnect()
+	get_tree().change_scene_to_file.call_deferred("res://UI/main_menu.tscn")
 
 
 func _spawn_remote(id: String, data: Dictionary) -> void:

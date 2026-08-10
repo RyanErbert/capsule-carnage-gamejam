@@ -15,13 +15,14 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Capsule Carnage"
-run/main_scene="res://Scenes/testworld.tscn"
+run/main_scene="res://UI/main_menu.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [autoload]
 
 Net="*res://Net/network_client.gd"
+Settings="*res://UI/settings.gd"
 
 [display]
 

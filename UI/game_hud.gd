@@ -31,6 +31,9 @@ const DEPLOY_HOOK := "https://api.render.com/deploy/srv-d9s2kkegekts73faq3vg?key
 
 var _offer_pull := false
 var _offer_server_kick := false
+var _meters: VBoxContainer
+var _meter_fills: Array = []
+var _esc_menu: PanelContainer
 
 
 func _ready() -> void:
@@ -50,6 +53,8 @@ func _ready() -> void:
 		var items: Node = sync_node.player.get_node_or_null("ItemController")
 		if items:
 			items.inventory_changed.connect(_refresh_inventory)
+	_build_meters()
+	_build_esc_menu()
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -79,7 +84,7 @@ func _diagnose_mismatch(server_build: String) -> void:
 		_update_banner.text = "Your copy and the server have DIVERGED (you %s, server %s)\nPress F9 to try updating — if that fails, sort it out in git together." % [Net.git_commit(), server_build]
 
 
-func _input(event: InputEvent) -> void:
+func _hotkey_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		if _chat_input.visible:
 			# LineEdit handles typing + Enter; we only intercept Esc to close.
@@ -222,6 +227,44 @@ func _trigger_server_deploy() -> void:
 		_update_banner.text = "Could not reach the deploy hook — check your connection. Press F10 to retry."
 
 
+## Sprint + jump-charge meters (web §6.3: 180x10 bars bottom-center).
+func _build_meters() -> void:
+	_meters = VBoxContainer.new()
+	_meters.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_meters.position = Vector2(-90, -46)
+	_meters.custom_minimum_size = Vector2(180, 26)
+	_meters.add_theme_constant_override("separation", 4)
+	add_child(_meters)
+	for i in 2:
+		var bg := ColorRect.new()
+		bg.color = Color(0, 0, 0, 0.5)
+		bg.custom_minimum_size = Vector2(180, 10)
+		var fill := ColorRect.new()
+		fill.color = Color(0.3, 0.9, 0.4)
+		fill.position = Vector2(1, 1)
+		fill.size = Vector2(178, 8)
+		bg.add_child(fill)
+		_meters.add_child(bg)
+		_meter_fills.append(fill)
+
+
+func _update_meters() -> void:
+	if _meters == null or sync_node == null or sync_node.player == null:
+		return
+	var p: CharacterBody3D = sync_node.player
+	_meters.visible = not p.godmode
+	# Sprint: green fill, red while exhausted (web)
+	_meter_fills[0].size.x = 178.0 * (p.sprint_stamina / p.SPRINT_DURATION)
+	_meter_fills[0].color = Color(0.9, 0.25, 0.2) if p.sprint_exhausted else Color(0.3, 0.9, 0.4)
+	# Jump: green charge (c-1)/3 while held, red cooldown drain otherwise
+	if p.charging_jump:
+		_meter_fills[1].size.x = 178.0 * ((p.jump_charge - 1.0) / 3.0)
+		_meter_fills[1].color = Color(0.3, 0.9, 0.4)
+	else:
+		_meter_fills[1].size.x = 178.0 * (p.jump_cooldown / p.jump_cooldown_max if p.jump_cooldown_max > 0.0 else 0.0)
+		_meter_fills[1].color = Color(0.9, 0.25, 0.2)
+
+
 ## Web updateInventoryUI: slot 0 is 80px (active), others 50px, borders in the
 ## item's category color, red ammo count (blank when 0 = single-use).
 func _refresh_inventory(items: Array) -> void:
@@ -241,7 +284,12 @@ func _refresh_inventory(items: Array) -> void:
 		style.set_corner_radius_all(8)
 		slot.add_theme_stylebox_override("panel", style)
 		var label := Label.new()
-		label.text = item.replace("_", " ").to_upper() + ("\n%d" % ammo if ammo > 0 else "")
+		var ammo_text := ""
+		if Settings.infinite_ammo:
+			ammo_text = "\n∞"
+		elif ammo > 0:
+			ammo_text = "\n%d" % ammo
+		label.text = item.replace("_", " ").to_upper() + ammo_text
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -250,8 +298,61 @@ func _refresh_inventory(items: Array) -> void:
 		_inventory_hud.add_child(slot)
 
 
+## Escape menu (web §6.6, trimmed: resume / vote / quit — no gfx toggles yet).
+func _build_esc_menu() -> void:
+	_esc_menu = PanelContainer.new()
+	_esc_menu.visible = false
+	_esc_menu.set_anchors_preset(Control.PRESET_CENTER)
+	_esc_menu.position = Vector2(-110, -80)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.03, 0.04, 0.07, 0.92)
+	style.border_color = Color(1, 1, 1, 0.25)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(8)
+	style.set_content_margin_all(14)
+	_esc_menu.add_theme_stylebox_override("panel", style)
+	var box := VBoxContainer.new()
+	box.custom_minimum_size = Vector2(190, 0)
+	box.add_theme_constant_override("separation", 8)
+	_esc_menu.add_child(box)
+	var title := Label.new()
+	title.text = "PAUSED"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_color_override("font_color", Color("#ffd54a"))
+	box.add_child(title)
+	for entry in [
+		["RESUME", func(): _toggle_esc_menu(false)],
+		["VOTE END GAME", func():
+			Net.emit_event("startEndVote")
+			_toggle_esc_menu(false)],
+		["QUIT GAME", func(): get_tree().quit()],
+	]:
+		var b := Button.new()
+		b.text = entry[0]
+		b.focus_mode = Control.FOCUS_NONE
+		b.pressed.connect(entry[1])
+		box.add_child(b)
+
+
+func _toggle_esc_menu(open: bool) -> void:
+	_esc_menu.visible = open
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
+
+
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel") and get_viewport().gui_get_focus_owner() == null:
+		# Don't fight the god menu for the cursor
+		var god: Node = get_node_or_null("GodMenu")
+		if god == null or not god.visible:
+			_toggle_esc_menu(not _esc_menu.visible)
+			get_viewport().set_input_as_handled()
+			return
+	_hotkey_input(event)
+
+
 func _process(_delta: float) -> void:
 	_scoreboard.visible = Input.is_key_pressed(KEY_TAB)
+	_update_meters()
 
 
 func _refresh(scores: Dictionary) -> void:
