@@ -15,7 +15,7 @@ var model := "bear"            # "bear" | "cube"
 var starting_weapon := "none"
 var infinite_ammo := false
 var movement := "web"          # "web" (Cube Fight physics) | "source" (bhop/air-strafe)
-var level := "testworld"       # "testworld" | "creative"
+var level := "creative"        # "creative" (default) | "testworld"
 
 
 func _ready() -> void:

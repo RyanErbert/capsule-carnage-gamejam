@@ -28,6 +28,11 @@ var _ghost_mat: StandardMaterial3D
 var _dragging := false
 var _drag_lock := {}           # {axis: "x"|"y"|"z", value: float}
 var _last_cell := ""
+# Drag-build only fires after real mouse travel — otherwise placing a block
+# moves the ray hit onto that block's near face and the "drag" marches a row
+# of boxes straight back into your face.
+const DRAG_MIN_MOUSE := 40.0
+var _drag_mouse_accum := 0.0
 
 
 func _ready() -> void:
@@ -71,6 +76,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_drag_lock = {}
 	if not is_build_active():
 		return
+	if event is InputEventMouseMotion and _dragging:
+		_drag_mouse_accum += event.relative.length()
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R:
 		rotation_steps = (rotation_steps + 1) % 4
 	elif event is InputEventMouseButton and event.pressed:
@@ -91,6 +98,7 @@ func try_place() -> void:
 	# Drag-build: walls rail along their facing axis, everything else stays
 	# on the clicked height (web mousedown axis lock).
 	_dragging = true
+	_drag_mouse_accum = 0.0
 	if type == "wall":
 		_drag_lock = {"axis": "z", "value": build_target["z"]} if rotation_steps % 2 == 0 \
 			else {"axis": "x", "value": build_target["x"]}
@@ -178,14 +186,20 @@ func _process(_delta: float) -> void:
 	if _world_builds == null:
 		_world_builds = get_tree().get_first_node_in_group("world_builds")
 	var overlap: bool = _world_builds != null and _world_builds.has_build_at(pos, type, rot_y, 0.0)
-	can_place = not overlap
+	# Never allow a cell that would entomb the placer
+	var to_player := (player.global_position + Vector3(0, 0.5, 0)) - pos
+	var self_trap: bool = absf(to_player.x) < 2.6 and absf(to_player.y) < 2.6 and absf(to_player.z) < 2.6
+	can_place = not overlap and not self_trap
 	_ghost_mat.albedo_color = GHOST_OK if can_place else GHOST_BAD
 
-	# Drag-build: keep placing as the ghost enters new cells while held
-	if _dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and can_place:
+	# Drag-build: keep placing as the ghost enters new cells while held —
+	# but only after real mouse travel (see DRAG_MIN_MOUSE)
+	if _dragging and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and can_place \
+			and _drag_mouse_accum >= DRAG_MIN_MOUSE:
 		var key := _cell_key(build_target)
 		if key != _last_cell:
 			_last_cell = key
+			_drag_mouse_accum = 0.0
 			Net.emit_event("placeBuild", build_target.merged({"type": type}))
 			_items._use_ammo()
 			if _items.inventory.is_empty() or _items.inventory[0]["type"] != type:

@@ -151,5 +151,7 @@ func _physics_process(delta: float) -> void:
 		"z": player.global_position.z,
 		"qx": q.x, "qy": q.y, "qz": q.z, "qw": q.w,
 		"smoothing": player.smoothing,  # web ball-morph field (1.0 for the bear)
-		"godmode": player.godmode,
+		# Drone-style god mode: the body stays put and stays a normal,
+		# vulnerable target — never render it as an untouchable ghost.
+		"godmode": false,
 	})

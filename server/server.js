@@ -130,6 +130,7 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 // stroke since, replayed to late joiners so everyone sculpts the same world.
 let creativePixels = null;
 let terrainEdits = [];
+let paintRows = null;  // in-progress editor canvas, live-synced between painters
 
 // --- Pedestal state ---
 const pedestals = [];
@@ -277,6 +278,15 @@ io.on('connection', (socket) => {
     socket.emit('creativeGrid', creativePixels);
     socket.emit('terrainEdits', terrainEdits);
   }
+  if (paintRows) socket.emit('creativePaint', paintRows);
+
+  // Live co-painting of the creative editor canvas (full 32-int grid per
+  // stroke burst — tiny and idempotent).
+  socket.on('creativePaint', (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return;
+    paintRows = rows.slice(0, 64).map(Number);
+    socket.broadcast.emit('creativePaint', paintRows);
+  });
 
   socket.on('creativeGrid', (rows) => {
     if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return;

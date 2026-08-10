@@ -146,8 +146,11 @@ func _run_chat_command(msg: String) -> void:
 				Net.emit_event("startEndVote")
 		"end":
 			Net.emit_event("startEndVote")
+		"kill":
+			if sync_node and sync_node.player:
+				sync_node.player.suicide()
 		"help":
-			_add_system_row("Commands: /vote yes, /vote no, /end (start end-game vote)")
+			_add_system_row("Commands: /vote yes, /vote no, /end (end-game vote), /kill (self-destruct, also K)")
 		_:
 			_add_system_row("Unknown command: /" + cmd)
 

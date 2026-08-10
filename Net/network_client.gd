@@ -26,6 +26,7 @@ var _was_open := false
 ## (the server sends the snapshot on connection, long before scenes exist).
 var creative_grid: Variant = null
 var terrain_edits: Array = []
+var paint_rows: Variant = null  # in-progress editor canvas (live co-painting)
 var _reconnect_timer := 0.0
 
 
@@ -144,4 +145,6 @@ func _handle_frame(frame: String) -> void:
 					terrain_edits.append(data)
 				"terrainEdits":
 					terrain_edits = data if data is Array else []
+				"creativePaint":
+					paint_rows = data
 			event_received.emit(event, data)

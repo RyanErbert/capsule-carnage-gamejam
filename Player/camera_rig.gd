@@ -20,6 +20,7 @@ const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
 var yaw := PI
 var pitch := 0.4
 var base_chain_length := 10.0
+var follow_target: Node3D = null  # god-mode drone override; null = the player
 var _mouse_idle_timer := 999.0
 
 @onready var _player: CharacterBody3D = get_parent()
@@ -52,7 +53,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	_mouse_idle_timer += delta
 
-	var vel: Vector3 = _player.velocity
+	var target: Node3D = follow_target if is_instance_valid(follow_target) else _player
+	var vel: Vector3 = target.velocity if target is CharacterBody3D else Vector3.ZERO
 	var h_speed := Vector2(vel.x, vel.z).length()
 
 	# Auto-follow: swing behind the movement direction when the mouse is idle (web §1.5)
@@ -70,7 +72,7 @@ func _physics_process(delta: float) -> void:
 	# Lagged position follow, damped less at high speed (web: 1-exp(-6*dt) * (1 - speedFactor*0.4))
 	var speed_factor := minf(1.0, h_speed / 18.0)
 	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
-	global_position = global_position.lerp(_player.global_position + Vector3(0, 1, 0), t)
+	global_position = global_position.lerp(target.global_position + Vector3(0, 1, 0), t)
 
 	rotation.y = yaw
 	rotation.x = -pitch

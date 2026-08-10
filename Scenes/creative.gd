@@ -40,6 +40,9 @@ func _ready() -> void:
 		_start_play(Net.creative_grid.duplicate(), Net.terrain_edits.duplicate(), false)
 	elif OS.get_environment("FRIENDSLOP_AUTOJOIN") == "1":
 		_start_play.call_deferred(_rows, [], true)  # headless testing
+	elif Net.paint_rows is Array and Net.paint_rows.size() == PIXELS:
+		# Someone is mid-painting: adopt their canvas
+		_adopt_paint(Net.paint_rows)
 
 
 func _default_rows() -> Array:
@@ -49,8 +52,37 @@ func _default_rows() -> Array:
 	return rows  # border ring of walls, open interior
 
 
+func _adopt_paint(rows: Array) -> void:
+	_rows = []
+	for v in rows:
+		_rows.append(int(v))
+	if _painter:
+		_painter.queue_redraw()
+
+
+## Painter calls this on every stroke; sends are throttled in _process.
+var _paint_dirty := false
+var _paint_send_cd := 0.0
+
+func _on_painted() -> void:
+	_paint_dirty = true
+
+
+func _process(delta: float) -> void:
+	if _playing:
+		return
+	_paint_send_cd = maxf(0.0, _paint_send_cd - delta)
+	if _paint_dirty and _paint_send_cd <= 0.0:
+		_paint_dirty = false
+		_paint_send_cd = 0.12
+		Net.emit_event("creativePaint", _rows)
+
+
 func _on_net_event(event: String, data: Variant) -> void:
 	match event:
+		"creativePaint":
+			if not _playing and data is Array and data.size() == PIXELS and not _same_rows(data):
+				_adopt_paint(data)
 		"creativeGrid":
 			if data is Array and not _same_rows(data):
 				_start_play(data.duplicate(), [], false)
@@ -100,7 +132,9 @@ func _start_play(rows: Array, edits: Array, announce: bool) -> void:
 func _spawn_gameplay() -> void:
 	player = PlayerScene.instantiate()
 	player.name = "player"
-	player.position = _spawn_point()
+	var spawns := _spawn_points()
+	player.position = spawns.pick_random()
+	player.spawn_points = spawns
 	add_child(player)
 
 	var sync := Node.new()
@@ -126,6 +160,11 @@ func _spawn_gameplay() -> void:
 	builds.set_script(load("res://Items/builds.gd"))
 	add_child(builds)
 
+	var props := Node3D.new()
+	props.name = "WorldProps"
+	props.set_script(load("res://Items/props.gd"))
+	add_child(props)
+
 	var hud := HudScene.instantiate()
 	hud.sync_node = sync
 	add_child(hud)
@@ -144,19 +183,20 @@ func _spawn_gameplay() -> void:
 	add_child(_brush_marker)
 
 
-## Center-most open pixel becomes the spawn.
-func _spawn_point() -> Vector3:
-	var best := Vector2i(PIXELS / 2, PIXELS / 2)
-	var best_d := 999
-	for r in PIXELS:
-		for c in PIXELS:
+## Spawns scattered across the OPEN (unfilled) pixels, one per 3x3 block of
+## the canvas so they cover the whole map (web randomSpawn equivalent).
+func _spawn_points() -> Array:
+	var points: Array = []
+	for r in range(1, PIXELS - 1, 3):
+		for c in range(1, PIXELS - 1, 3):
 			if (int(_rows[r]) >> (31 - c)) & 1:
 				continue
-			var d: int = absi(r - PIXELS / 2) + absi(c - PIXELS / 2)
-			if d < best_d:
-				best_d = d
-				best = Vector2i(c, r)
-	return Vector3(-64.0 + best.x * 4.0 + 2.0, 2.0, -64.0 + best.y * 4.0 + 2.0)
+			points.append(Vector3(-64.0 + c * 4.0 + 2.0, 2.0, -64.0 + r * 4.0 + 2.0))
+	if points.is_empty():
+		points.append(Vector3(2.0, WALL_TOP_HEIGHT + 2.0, 2.0))  # all-filled map: spawn on top
+	return points
+
+const WALL_TOP_HEIGHT := 16.0
 
 
 # --- Terraforming (Q dig / F fill at the crosshair) ------------------------
@@ -164,9 +204,9 @@ func _spawn_point() -> Vector3:
 func _physics_process(delta: float) -> void:
 	if not _playing or player == null:
 		return
-	# Backstop: anything that slips below the world snaps back to spawn
+	# Backstop: anything that slips below the world snaps back to a spawn
 	if player.global_position.y < KILL_Y:
-		player.global_position = _spawn_point()
+		player.global_position = player.respawn_point()
 		player.velocity = Vector3.ZERO
 	_brush_cd = maxf(0.0, _brush_cd - delta)
 	var busy: bool = get_viewport().gui_get_focus_owner() != null \
@@ -316,6 +356,7 @@ class PixelPainter extends Control:
 			owner_scene._rows[r] = int(owner_scene._rows[r]) | bit
 		else:
 			owner_scene._rows[r] = int(owner_scene._rows[r]) & ~bit
+		owner_scene._on_painted()
 		queue_redraw()
 
 	func _draw() -> void:

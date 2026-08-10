@@ -14,13 +14,18 @@ const GIVE_ITEMS := [
 	"machinegun", "rocket", "mines",
 	"block", "wall", "ramp", "platform", "bridge_gun",
 ]
-const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["delete", "#aaaaaa"]]
+const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["channel", "#66ccff"], ["delete", "#aaaaaa"]]
+const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
 
 var _player: CharacterBody3D
 var _world_items: Node
-var _tool := ""   # "", "green", "red", "yellow", "delete"
+var _world_props: Node
+var _tool := ""   # "", "green", "red", "yellow", "channel", "delete", "prop:<glb>"
 var _tool_buttons: Dictionary = {}
 var _status: Label
+var _drone: CharacterBody3D
+var _channel_nodes: Array = []
+var _channel_markers: Array = []
 
 
 func _ready() -> void:
@@ -35,6 +40,8 @@ func _find_refs() -> bool:
 			_player = sync.player
 	if _world_items == null and _player:
 		_world_items = _player.get_parent().get_node_or_null("WorldItems")
+	if _world_props == null and _player:
+		_world_props = _player.get_parent().get_node_or_null("WorldProps")
 	return _player != null
 
 
@@ -51,13 +58,47 @@ func toggle() -> void:
 	if visible:
 		visible = false
 		_player.set_godmode(false)
+		if _player.camera_rig:
+			_player.camera_rig.follow_target = null
+		if _drone:
+			_drone.queue_free()
+			_drone = null
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	else:
 		visible = true
-		_player.set_godmode(true)
+		_player.set_godmode(true)  # body idles in place, still vulnerable
 		Net.emit_event("godmodeEnter")  # server hands the oddball to someone else
+		_drone = _make_drone()
+		_player.get_parent().add_child(_drone)
+		_drone.global_position = _player.global_position + Vector3(0, 2, 0)
+		if _player.camera_rig:
+			_player.camera_rig.follow_target = _drone
+			_drone.camera_rig = _player.camera_rig
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		_set_tool("")
+
+
+func _make_drone() -> CharacterBody3D:
+	var drone := CharacterBody3D.new()
+	drone.set_script(load("res://Player/drone.gd"))
+	var col := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = 0.4
+	col.shape = shape
+	drone.add_child(col)
+	var mesh_inst := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.25
+	sphere.height = 0.5
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.15, 0.15, 0.18)
+	mat.emission_enabled = true
+	mat.emission = Color(0.2, 0.9, 0.4)
+	mat.emission_energy_multiplier = 1.5
+	sphere.material = mat
+	mesh_inst.mesh = sphere
+	drone.add_child(mesh_inst)
+	return drone
 
 
 ## World clicks (UI clicks never get here — buttons consume them first).
@@ -79,23 +120,77 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		var pos: Vector3 = hit["position"]
 		if _tool == "delete":
-			var id: String = _world_items.pedestal_near(pos) if _world_items else ""
-			if id == "":
-				_status.text = "no pedestal near that spot"
-			else:
-				Net.emit_event("removePedestal", id)
+			var ped: String = _world_items.pedestal_near(pos) if _world_items else ""
+			var prop: String = _world_props.prop_near(pos) if _world_props else ""
+			if ped != "":
+				Net.emit_event("removePedestal", ped)
 				_status.text = "pedestal removed"
+			elif prop != "":
+				Net.emit_event("removeModel", prop)
+				_status.text = "prop removed"
+			else:
+				_status.text = "nothing deletable near that spot"
+		elif _tool == "channel":
+			_channel_nodes.append(pos)
+			_channel_markers.append(_channel_marker(pos))
+			_status.text = "%d point%s — click CHANNEL again to finish" % [_channel_nodes.size(), "" if _channel_nodes.size() == 1 else "s"]
+		elif _tool.begins_with("prop:"):
+			Net.emit_event("placeModel", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"model": _tool.substr(5),
+				"x": pos.x, "y": pos.y, "z": pos.z, "ry": randf() * TAU,
+			})
+			_status.text = "%s placed" % _tool.substr(5).trim_suffix(".glb")
 		else:
 			Net.emit_event("placePedestal", {"x": pos.x, "y": pos.y, "z": pos.z, "ry": 0.0, "type": _tool})
 			_status.text = "%s pedestal placed" % _tool
 
 
+func _channel_marker(pos: Vector3) -> MeshInstance3D:
+	var marker := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.4
+	sphere.height = 0.8
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.4, 0.8, 1.0, 0.8)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sphere.material = mat
+	marker.mesh = sphere
+	_player.get_parent().add_child(marker)
+	marker.global_position = pos
+	return marker
+
+
+func _finish_channel() -> void:
+	if _channel_nodes.size() >= 2:
+		var nodes: Array = []
+		for p in _channel_nodes:
+			nodes.append({"x": p.x, "y": p.y, "z": p.z})
+		Net.emit_event("placeChannel", {
+			"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+			"nodes": nodes, "radius": 2.5,
+		})
+		_status.text = "channel placed (%d points)" % _channel_nodes.size()
+	for m in _channel_markers:
+		m.queue_free()
+	_channel_markers.clear()
+	_channel_nodes.clear()
+
+
 func _set_tool(tool_name: String) -> void:
+	if _tool == "channel" and tool_name != "channel":
+		_finish_channel()
 	_tool = tool_name
 	for t in _tool_buttons:
 		_tool_buttons[t].button_pressed = t == tool_name
 	if _status:
-		_status.text = ("tool: %s — left-click the map" % tool_name) if tool_name != "" else "GIVE an item, or arm a pedestal tool"
+		if tool_name == "channel":
+			_status.text = "click points along the route, then click CHANNEL again to finish"
+		elif tool_name != "":
+			_status.text = "tool: %s — left-click the map" % tool_name.trim_prefix("prop:").trim_suffix(".glb")
+		else:
+			_status.text = "GIVE an item, or arm a tool"
 
 
 func _on_tool_pressed(tool_name: String) -> void:
@@ -174,6 +269,25 @@ func _build_ui() -> void:
 		b.pressed.connect(_on_tool_pressed.bind(entry[0]))
 		tools.add_child(b)
 		_tool_buttons[entry[0]] = b
+
+	var props_label := Label.new()
+	props_label.text = "PROPS"
+	props_label.add_theme_font_size_override("font_size", 12)
+	props_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	root.add_child(props_label)
+
+	var props_grid := GridContainer.new()
+	props_grid.columns = 4
+	props_grid.add_theme_constant_override("h_separation", 6)
+	props_grid.add_theme_constant_override("v_separation", 6)
+	root.add_child(props_grid)
+	for model in PROPS:
+		var tool_id: String = "prop:" + str(model)
+		var pb := _mk_button(str(model).trim_suffix(".glb").replace("_", " "), Color("#c7e5a0"))
+		pb.toggle_mode = true
+		pb.pressed.connect(_on_tool_pressed.bind(tool_id))
+		props_grid.add_child(pb)
+		_tool_buttons[tool_id] = pb
 
 	_status = Label.new()
 	_status.text = ""

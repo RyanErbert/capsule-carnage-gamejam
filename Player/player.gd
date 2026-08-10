@@ -31,8 +31,7 @@ const FALL_RESPAWN_AIRTIME := 10.0
 const MORPH_RATE := 3.0
 const IDLE_SMOOTHING := 0.25
 
-# --- God mode (web §6.8: free-fly at 40, no gravity/collisions) ---
-const GOD_FLY_SPEED := 40.0
+# (God mode flies a separate drone now — see Player/drone.gd)
 
 # --- Source-style movement (Settings.movement == "source") ---
 # 1:1 port of the Source SDK ground-friction / Accelerate / AirAccelerate
@@ -69,7 +68,14 @@ var last_grounded_time := -1000.0
 
 var air_time := 0.0
 var spawn_position := Vector3.ZERO
+var spawn_points: Array = []  # optional; respawns pick randomly (web randomSpawn)
 var godmode := false
+
+
+func respawn_point() -> Vector3:
+	if not spawn_points.is_empty():
+		return spawn_points.pick_random()
+	return spawn_position + Vector3(0, 0.5, 0)
 
 # Player model: bear marble (default) or the ported web roundcube.
 # Interim selector until the character menu (phase 7): FRIENDSLOP_MODEL=cube
@@ -101,6 +107,27 @@ func set_it(is_it: bool) -> void:
 		_cube_visual.set_outline_visible(is_it)
 
 
+## Self-destruct (K or /kill): blow up — the server sheds your score as
+## coins for anyone nearby to loot — then respawn at a spawn point.
+func suicide() -> void:
+	if godmode:
+		return
+	Net.emit_event("triggerExplosion", {
+		"x": global_position.x, "y": global_position.y, "z": global_position.z,
+	})
+	global_position = respawn_point()
+	velocity = Vector3.ZERO
+	air_time = 0.0
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_K \
+			and get_viewport().gui_get_focus_owner() == null \
+			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		suicide()
+
+
 func set_godmode(on: bool) -> void:
 	godmode = on
 	velocity = Vector3.ZERO
@@ -110,25 +137,20 @@ func set_godmode(on: bool) -> void:
 		_items.is_grappling = false
 
 
-## Free-fly: WASD camera-relative, Space/E up, Shift/Q down (web fly @ 40).
-func _god_fly(delta: float) -> void:
-	if get_viewport().gui_get_focus_owner() != null:
-		return
-	var input_dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
-	var cam_yaw: float = camera_rig.yaw if camera_rig else 0.0
-	var forward := Vector3(-sin(cam_yaw), 0, -cos(cam_yaw))
-	var right := Vector3(-forward.z, 0, forward.x)
-	var dir := right * input_dir.x - forward * input_dir.y
-	if Input.is_action_pressed("jump") or Input.is_key_pressed(KEY_E):
-		dir.y += 1.0
-	if Input.is_action_pressed("sprint") or Input.is_key_pressed(KEY_Q):
-		dir.y -= 1.0
-	global_position += dir.limit_length(1.0) * GOD_FLY_SPEED * delta
+## While the god-mode DRONE is out, the body just stands here — under
+## gravity, physical, and fully vulnerable. No input reaches it.
+func _god_idle(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y -= GRAVITY * delta
+	var damp := exp(-FLOOR_FRICTION * delta)
+	velocity.x *= damp
+	velocity.z *= damp
+	move_and_slide()
 
 
 func _physics_process(delta: float) -> void:
 	if godmode:
-		_god_fly(delta)
+		_god_idle(delta)
 		_update_dev_info()
 		return
 
@@ -233,7 +255,7 @@ func _physics_process(delta: float) -> void:
 	if not is_on_floor() and velocity.y < 0.0:
 		air_time += delta
 		if air_time > FALL_RESPAWN_AIRTIME:
-			global_position = spawn_position + Vector3(0, 0.5, 0)
+			global_position = respawn_point()
 			velocity = Vector3.ZERO
 			air_time = 0.0
 	else:

@@ -17,6 +17,7 @@
 [ext_resource type="Script" path="res://Items/world_items.gd" id="16_items"]
 [ext_resource type="Script" path="res://Items/projectiles.gd" id="17_proj"]
 [ext_resource type="Script" path="res://Items/builds.gd" id="18_builds"]
+[ext_resource type="Script" path="res://Items/props.gd" id="19_props"]
 [ext_resource type="PackedScene" path="res://UI/game_hud.tscn" id="15_hud"]
 
 [sub_resource type="Environment" id="Environment_ywrmy"]
@@ -1546,6 +1547,9 @@ player = NodePath("../player")
 
 [node name="WorldBuilds" type="Node3D" parent="."]
 script = ExtResource("18_builds")
+
+[node name="WorldProps" type="Node3D" parent="."]
+script = ExtResource("19_props")
 
 [node name="MultiplayerSync" type="Node" parent="." unique_id=203273616 node_paths=PackedStringArray("player")]
 script = ExtResource("14_netsync")
