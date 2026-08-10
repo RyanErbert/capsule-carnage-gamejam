@@ -15,14 +15,24 @@ extends Node3D
 
 const VOXEL := 2.0                 # meters per lattice step
 const NX := 64                     # cells along X  (world 128 m)
-const NY := 12                     # cells along Y  (world 24 m: -4 .. +20)
+const NY := 12                     # cells along Y  (world 24 m: -8 .. +16)
 const NZ := 64                     # cells along Z
-const ORIGIN := Vector3(-64.0, -4.0, -64.0)
+const ORIGIN := Vector3(-64.0, -8.0, -64.0)
 const ISO := 0.5
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
 
-const WALL_TOP_Y := 16.0           # extruded pixel-wall height
-const FLOOR_TOP_Y := 0.0           # canyon floor level
+# Vertical layout: 4 m slabs. Bedrock [-8,-4] is implicit and uneditable;
+# the 4 painted layers stack above it: ground [-4,0] (default solid, erased
+# = pit), main [0,4], +1 [4,8], +2 [8,12]. A flat ground surface meshes out
+# at y ~= 1.0 (density crossing + smoothing).
+const SLAB := 4.0
+
+# The world beyond the paintable 128x128 region: a flat unmodifiable plane
+# level with the ground layer, so the map has no rim dropoff.
+const FRAME_INNER := 60.0
+const FRAME_OUTER := 512.0
+const FRAME_TOP := 0.98            # a hair under the voxel floor's ~1.0
+const FRAME_THICK := 9.0
 
 # Lattice points are (NX+1) x (NY+1) x (NZ+1)
 var _density := PackedFloat32Array()
@@ -62,27 +72,34 @@ func _d(x: int, y: int, z: int) -> float:
 	return _density[_idx(x, y, z)]
 
 
-## Build the field from the editor's pixel grid: `rows` is an Array of ints,
-## bit (31-col) set = wall pixel. Each pixel is a 4x4 m column; walls rise to
-## WALL_TOP_Y, everything sits on a floor slab from ORIGIN.y to FLOOR_TOP_Y.
-func build_from_pixels(rows: Array) -> void:
+## Build the field from the editor's layer stack: `layers` is 4 Arrays of 32
+## ints (ground, main, +1, +2 — bottom to top), bit (31-col) = filled pixel.
+## Each pixel is a 4x4 m column within its 4 m slab; bedrock fills [-8,-4]
+## beneath everything regardless of paint.
+func build_from_layers(layers: Array) -> void:
 	_density.resize((NX + 1) * (NY + 1) * (NZ + 1))
 	_density.fill(0.0)
 	var points_per_pixel := int(4.0 / VOXEL)  # 2
 	for y in NY + 1:
-		var wy := ORIGIN.y + y * VOXEL
+		# Lattice rows: 1-2 bedrock, 3-4 ground, 5-6 main, 7-8 (+1), 9-10 (+2)
+		var bedrock := y >= 1 and y <= 2
+		var li := ((y - 3) >> 1) if (y >= 3 and y <= 10) else -1
+		if not bedrock and (li < 0 or li >= layers.size()):
+			continue
+		var rows: Array = layers[li] if li >= 0 else []
 		for z in NZ + 1:
 			var pz := clampi(z / points_per_pixel, 0, 31)
 			for x in NX + 1:
 				var px := clampi(x / points_per_pixel, 0, 31)
-				var solid := wy <= FLOOR_TOP_Y
-				if not solid and wy <= WALL_TOP_Y and pz < rows.size():
+				var solid := bedrock
+				if not solid and pz < rows.size():
 					solid = (int(rows[pz]) >> (31 - px)) & 1
 				if solid:
 					_density[_idx(x, y, z)] = 1.0
 	var t0 := Time.get_ticks_msec()
 	_smooth_once()
 	_seal_boundary()
+	_build_frame()
 	_remesh_all()
 	var tris := 0
 	for key in _chunks:
@@ -117,9 +134,47 @@ func _seal_boundary() -> void:
 					_density[_idx(x, y, z)] = 0.0
 
 
-# Lattice rows at or below this index are bedrock — brushes can't touch them,
-# so you can dig trenches into the floor but never through it into the void.
-const BEDROCK_Y := 2  # world y = 0 (the canyon floor's top)
+# Lattice rows at or below this index are bedrock (world y <= -4) — brushes
+# can't touch them, so pits bottom out on the bedrock plane instead of
+# opening into the void.
+const BEDROCK_Y := 2
+
+
+## The flat plane surrounding the paintable region: 4 box segments forming a
+## ring from FRAME_INNER to FRAME_OUTER, level with the ground layer. Built
+## once; survives map rebuilds untouched.
+var _frame_built := false
+
+func _build_frame() -> void:
+	if _frame_built:
+		return
+	_frame_built = true
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.7, 0.51, 0.37)  # a shade darker than the field
+	mat.roughness = 0.95
+	var mid := (FRAME_INNER + FRAME_OUTER) / 2.0
+	var run := FRAME_OUTER - FRAME_INNER
+	var segs := [
+		[-mid, 0.0, run, FRAME_OUTER * 2.0],
+		[mid, 0.0, run, FRAME_OUTER * 2.0],
+		[0.0, -mid, FRAME_INNER * 2.0, run],
+		[0.0, mid, FRAME_INNER * 2.0, run],
+	]
+	for s in segs:
+		var body := StaticBody3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = Vector3(s[2], FRAME_THICK, s[3])
+		var col := CollisionShape3D.new()
+		col.shape = shape
+		body.add_child(col)
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = shape.size
+		bm.material = mat
+		mi.mesh = bm
+		body.add_child(mi)
+		body.position = Vector3(s[0], FRAME_TOP - FRAME_THICK / 2.0, s[1])
+		add_child(body)
 
 ## Density at a world position (nearest lattice point) — used to detect a
 ## player embedded by a fill brush so they can be popped out upward.
@@ -136,7 +191,7 @@ func apply_brush(center: Vector3, radius: float, sign_: float, strength := 1.0) 
 	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var dirty := {}
-	for y in range(maxi(BEDROCK_Y, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
+	for y in range(maxi(BEDROCK_Y + 1, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
 		for z in range(maxi(1, floori(lo.z)), mini(NZ - 1, ceili(hi.z)) + 1):
 			for x in range(maxi(1, floori(lo.x)), mini(NX - 1, ceili(hi.x)) + 1):
 				var p := ORIGIN + Vector3(x, y, z) * VOXEL

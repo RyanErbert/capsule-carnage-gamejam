@@ -128,9 +128,22 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 // --- Creative-level terrain state (Godot client) ---
 // The painted pixel grid (32 ints, one bitmask per row) plus every brush
 // stroke since, replayed to late joiners so everyone sculpts the same world.
-let creativePixels = null;
+// creativeLayers: 4 paintable layers, bottom to top — ground (default solid;
+// erased = pit), main, +1, +2. Each layer is 32 uint32 row bitmasks, bit
+// (31-col) = filled. Bedrock below the ground layer is implicit/uneditable.
+let creativeLayers = null;   // [4][32] after normLayers
 let terrainEdits = [];
-let paintRows = null;  // in-progress editor canvas, live-synced between painters
+let paintLayers = null;  // in-progress editor canvas, live-synced between painters
+
+function normLayers(g) {
+  if (!g || !Array.isArray(g.layers) || g.layers.length !== 4) return null;
+  const out = [];
+  for (const rows of g.layers) {
+    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return null;
+    out.push(rows.slice(0, 64).map(n => Number(n) >>> 0));
+  }
+  return out;
+}
 
 // --- Global game settings (server-authoritative, alert on change) ---
 const gameSettings = {
@@ -219,14 +232,16 @@ function finishEndVote(passed) {
 // movement (green) and weapon (red) pedestals so a fresh round has pickups
 // without anyone god-placing them. Deterministic, capped at 12.
 function autoPopulatePedestals() {
-  if (!creativePixels) return;
+  if (!creativeLayers) return;
   pedestals.length = 0;
+  const ground = creativeLayers[0], main = creativeLayers[1];
   const types = ['green', 'red', 'green', 'red', 'yellow'];
   let n = 0;
   outer:
   for (let r = 2; r < 30; r += 5) {
     for (let c = 2; c < 30; c += 5) {
-      if (((creativePixels[r] >>> (31 - c)) & 1) === 1) continue; // wall
+      if (((main[r] >>> (31 - c)) & 1) === 1) continue;   // wall
+      if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
       pedestals.push({
         id: 'auto-' + r + '-' + c,
         x: -64 + c * 4 + 2, y: 0, z: -64 + r * 4 + 2, ry: 0,
@@ -265,7 +280,7 @@ function rebuildMap() {
   io.emit('currentVehicles', []);
   autoPopulatePedestals();
   pickRandomHolder();
-  io.emit('mapRebuilt', { pixels: creativePixels });
+  io.emit('mapRebuilt', { layers: creativeLayers });
 }
 
 function endGame() {
@@ -351,11 +366,11 @@ io.on('connection', (socket) => {
 
   // Creative-level snapshot on plain connection (scenes load after connect,
   // so this must not wait for 'ready').
-  if (creativePixels) {
-    socket.emit('creativeGrid', creativePixels);
+  if (creativeLayers) {
+    socket.emit('creativeGrid', { layers: creativeLayers });
     socket.emit('terrainEdits', terrainEdits);
   }
-  if (paintRows) socket.emit('creativePaint', paintRows);
+  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers });
   socket.emit('gameSettings', gameSettings);
   socket.emit('currentSpawns', spawnPoints);
 
@@ -479,17 +494,19 @@ io.on('connection', (socket) => {
 
   // Live co-painting of the creative editor canvas (full 32-int grid per
   // stroke burst — tiny and idempotent).
-  socket.on('creativePaint', (rows) => {
-    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return;
-    paintRows = rows.slice(0, 64).map(Number);
-    socket.broadcast.emit('creativePaint', paintRows);
+  socket.on('creativePaint', (g) => {
+    const layers = normLayers(g);
+    if (!layers) return;
+    paintLayers = layers;
+    socket.broadcast.emit('creativePaint', { layers: paintLayers });
   });
 
-  socket.on('creativeGrid', (rows) => {
-    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return;
-    creativePixels = rows.slice(0, 64).map(Number);
+  socket.on('creativeGrid', (g) => {
+    const layers = normLayers(g);
+    if (!layers) return;
+    creativeLayers = layers;
     terrainEdits = [];
-    io.emit('creativeGrid', creativePixels);
+    io.emit('creativeGrid', { layers: creativeLayers });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
   });
 

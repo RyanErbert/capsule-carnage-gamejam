@@ -24,9 +24,9 @@ var _was_open := false
 
 ## Creative-level world state, cached so a scene opened later can catch up
 ## (the server sends the snapshot on connection, long before scenes exist).
-var creative_grid: Variant = null
+var creative_grid: Variant = null  # {layers: [4 x 32-int bitmasks]}
 var terrain_edits: Array = []
-var paint_rows: Variant = null  # in-progress editor canvas (live co-painting)
+var paint_rows: Variant = null  # in-progress editor canvas, same layered shape
 var game_settings: Dictionary = {}  # server-authoritative global settings
 var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var _reconnect_timer := 0.0
