@@ -20,7 +20,7 @@ func _physics_process(_delta: float) -> void:
 	var dir := right * input_dir.x - forward * input_dir.y
 	if Input.is_action_pressed("jump") or Input.is_key_pressed(KEY_E):
 		dir.y += 1.0
-	if Input.is_action_pressed("sprint") or Input.is_key_pressed(KEY_Q):
+	if Input.is_action_pressed("sprint"):
 		dir.y -= 1.0
 	velocity = dir.limit_length(1.0) * FLY_SPEED
 	move_and_slide()

@@ -57,7 +57,7 @@ func _find_refs() -> bool:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
 			and get_viewport().gui_get_focus_owner() == null:
-		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_TAB:
+		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_Q:
 			toggle()
 			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_R and visible and _tool.begins_with("build:"):

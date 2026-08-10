@@ -137,7 +137,7 @@ const gameSettings = {
   infiniteAmmo: false,
   selfAssign: true,          // players may give themselves items via the god menu
   allowMidgameChanges: true, // when false, settings freeze while a game is running
-  speedScale: 0.33,          // global movement tuning (Ryan: ~1/3 of web speeds)
+  speedScale: 0.7,           // global movement tuning
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0
 };

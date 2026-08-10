@@ -460,8 +460,7 @@ func _update_conn_pill() -> void:
 
 
 func _process(_delta: float) -> void:
-	# Scoreboard: hold V (Tab toggles the drone/god menu now)
-	_scoreboard.visible = Input.is_key_pressed(KEY_V) and get_viewport().gui_get_focus_owner() == null
+	_scoreboard.visible = Input.is_key_pressed(KEY_TAB) and get_viewport().gui_get_focus_owner() == null
 	_update_meters()
 	_update_conn_pill()
 
