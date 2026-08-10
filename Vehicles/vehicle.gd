@@ -28,7 +28,7 @@ const NET_LERP := 10.0        # remote interpolation rate
 const DRILL_RADIUS := 2.8
 const DRILL_STRENGTH := 0.8
 const DRILL_INTERVAL := 0.09
-const DRILL_MIN_SPEED := 2.0
+const DRILL_HP_PER_TICK := 0.5  # ~5.5 health/s while the drill is eating
 
 var id := ""
 var kind := "ghost"
@@ -41,6 +41,8 @@ var net_yaw := 0.0
 var _visual: Node3D
 var _drill_cone: MeshInstance3D
 var _drill_cd := 0.0
+var _drilling := false
+var _drain_acc := 0.0
 var _input_pitch := 0.0       # visual nose dip/lift
 
 
@@ -73,7 +75,7 @@ func _physics_process(delta: float) -> void:
 		rotation.y = lerp_angle(rotation.y, net_yaw, 1.0 - exp(-NET_LERP * delta))
 	# Parked (driver_id == ""): frozen where the last driver left it.
 	if _drill_cone:
-		var spin_rate := 12.0 if (driven_by_me and velocity.length() > DRILL_MIN_SPEED) else 1.5
+		var spin_rate := 14.0 if _drilling else 1.5
 		_drill_cone.rotate_object_local(Vector3.UP, spin_rate * delta)
 
 
@@ -123,25 +125,40 @@ func _drive(delta: float) -> void:
 		_visual.rotation.x = _input_pitch
 
 	if kind == "drill":
-		_drill(fwd, delta)
+		_drill(typing, delta)
 
 
-## The drill nose eats terrain while moving. Owner-authoritative, same
-## pipeline as weapon craters: carve locally, log the edit on the server.
-func _drill(fwd: Vector3, delta: float) -> void:
+## The drill eats terrain while you HOLD LEFT MOUSE, along where the camera
+## points — face up and it bores upward. Each bite costs health (the drill
+## runs on your life). Owner-authoritative, same pipeline as weapon craters.
+func _drill(typing: bool, delta: float) -> void:
 	_drill_cd = maxf(0.0, _drill_cd - delta)
-	if _drill_cd > 0.0 or velocity.length() < DRILL_MIN_SPEED:
+	var wants := not typing and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) \
+		and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	var p: float = camera_rig.pitch if camera_rig else 0.0
+	if _drill_cone:
+		_drill_cone.rotation.x = -PI / 2.0 - p  # nose follows the camera pitch
+	_drilling = false
+	if not wants or _drill_cd > 0.0:
 		return
 	var terrain: Node = get_tree().get_first_node_in_group("voxel_terrain")
 	if terrain == null:
 		return
-	var nose := global_position + fwd * 2.6
+	var yaw := rotation.y
+	var aim := Vector3(-cos(p) * sin(yaw), -sin(p), -cos(p) * cos(yaw)).normalized()
+	var nose := global_position + aim * 2.8
 	_drill_cd = DRILL_INTERVAL
 	if terrain.apply_brush(nose, DRILL_RADIUS, -1.0, DRILL_STRENGTH):
+		_drilling = true
 		Net.emit_event("terrainEdit", {
 			"x": nose.x, "y": nose.y, "z": nose.z,
 			"r": DRILL_RADIUS, "s": -1.0, "st": DRILL_STRENGTH,
 		})
+		# Drilling burns your life at a medium clip
+		_drain_acc += DRILL_HP_PER_TICK
+		if _drain_acc >= 1.0:
+			_drain_acc -= 1.0
+			Net.emit_event("selfDamage", 1)
 
 
 func _ground_ray() -> Dictionary:
@@ -151,61 +168,51 @@ func _ground_ray() -> Dictionary:
 	return get_world_3d().direct_space_state.intersect_ray(q)
 
 
-# --- Visuals (primitive-built, no assets needed) ---------------------------
+# --- Visuals (Kenney Space Kit, CC0: craft_speederA / craft_miner) ---------
+
+const GhostModel := preload("res://Models/kenney/craft_speederA.glb")
+const DrillModel := preload("res://Models/kenney/craft_miner.glb")
+
+## Merged AABB of every mesh under `node`, in `node`'s local space (works
+## before the node enters the tree — transforms are accumulated manually).
+static func _model_aabb(node: Node) -> AABB:
+	var out: Array = [AABB(), true]
+	_merge_aabb(node, Transform3D(), out)
+	return out[0]
+
+
+static func _merge_aabb(n: Node, xf: Transform3D, out: Array) -> void:
+	if n is Node3D:
+		xf = xf * (n as Node3D).transform
+	if n is MeshInstance3D and (n as MeshInstance3D).mesh:
+		var box: AABB = xf * (n as MeshInstance3D).mesh.get_aabb()
+		out[0] = box if out[1] else (out[0] as AABB).merge(box)
+		out[1] = false
+	for child in n.get_children():
+		_merge_aabb(child, xf, out)
+
 
 func _build_visual() -> Node3D:
 	var root := Node3D.new()
 	var is_drill := kind == "drill"
-	var body_color := Color(0.95, 0.55, 0.15) if is_drill else Color(0.45, 0.3, 0.85)
-	var trim_color := Color(0.35, 0.35, 0.4)
 
-	var body_mat := StandardMaterial3D.new()
-	body_mat.albedo_color = body_color
-	body_mat.metallic = 0.6
-	body_mat.roughness = 0.35
-	var trim_mat := StandardMaterial3D.new()
-	trim_mat.albedo_color = trim_color
-	trim_mat.metallic = 0.8
-	trim_mat.roughness = 0.3
-
-	# Main hull: flattened sphere
-	var hull := MeshInstance3D.new()
-	var hull_mesh := SphereMesh.new()
-	hull_mesh.radius = 1.2
-	hull_mesh.height = 1.1
-	hull_mesh.material = body_mat
-	hull.mesh = hull_mesh
-	hull.scale = Vector3(1.0, 1.0, 1.35)  # stretched along travel
-	root.add_child(hull)
-
-	# Cockpit hump behind center
-	var hump := MeshInstance3D.new()
-	var hump_mesh := SphereMesh.new()
-	hump_mesh.radius = 0.55
-	hump_mesh.height = 0.9
-	hump_mesh.material = trim_mat
-	hump.mesh = hump_mesh
-	hump.position = Vector3(0, 0.55, 0.7)
-	root.add_child(hump)
-
-	# Twin front prongs (the Ghost's wings/cannons)
-	for side in [-1.0, 1.0]:
-		var prong := MeshInstance3D.new()
-		var pm := CapsuleMesh.new()
-		pm.radius = 0.22
-		pm.height = 1.9
-		pm.material = trim_mat
-		prong.mesh = pm
-		prong.rotation.x = PI / 2.0
-		prong.position = Vector3(side * 0.85, -0.1, -1.35)
-		root.add_child(prong)
+	var model: Node3D = (DrillModel if is_drill else GhostModel).instantiate()
+	root.add_child(model)
+	# Normalize the kit model to ~3.4 m of hull, resting under the seat
+	var box := _model_aabb(model)
+	if box.size.z > 0.01:
+		var s := 3.4 / maxf(box.size.z, box.size.x)
+		model.scale = Vector3.ONE * s
+		model.position.y = -0.55 - box.position.y * s
+	# Kenney crafts model forward as +Z; our vehicles drive -Z
+	model.rotation.y = PI
 
 	if is_drill:
 		_drill_cone = MeshInstance3D.new()
 		var cone := CylinderMesh.new()
 		cone.top_radius = 0.0
-		cone.bottom_radius = 0.95
-		cone.height = 2.2
+		cone.bottom_radius = 0.8
+		cone.height = 2.0
 		var cone_mat := StandardMaterial3D.new()
 		cone_mat.albedo_color = Color(0.75, 0.75, 0.8)
 		cone_mat.metallic = 0.9

@@ -260,8 +260,7 @@ func _physics_process(delta: float) -> void:
 	var spd := clampf(float(Net.game_settings.get("speedScale", 0.33)), 0.05, 3.0)
 	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 3.0)
 	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 3.0)
-	if dragging_generator:
-		spd *= 0.45  # hauling the generator is slow going
+	# (dragging the generator slows you via real rope tension — generators.gd)
 
 	if Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)

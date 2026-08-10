@@ -15,29 +15,71 @@ extends Node3D
 
 const VOXEL := 2.0                 # meters per lattice step
 const NX := 64                     # cells along X  (world 128 m)
-const NY := 12                     # cells along Y  (world 24 m: -8 .. +16)
+const NY := 20                     # cells along Y  (world 40 m: -12 .. +28)
 const NZ := 64                     # cells along Z
-const ORIGIN := Vector3(-64.0, -8.0, -64.0)
+const ORIGIN := Vector3(-64.0, -12.0, -64.0)
 const ISO := 0.5
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
 
-# Vertical layout: 4 m slabs. Bedrock [-8,-4] is implicit and uneditable;
-# the 4 painted layers stack above it: ground [-4,0] (default solid, erased
-# = pit), main [0,4], +1 [4,8], +2 [8,12]. A flat ground surface meshes out
-# at y ~= 1.0 (density crossing + smoothing).
-const SLAB := 4.0
+# Vertical layout: 8 m slabs (tall extrusion). Bedrock [-12,-8] is implicit
+# and uneditable; the 4 painted layers stack above it: ground [-8,0]
+# (default solid, erased = deep pit), main [0,8], +1 [8,16], +2 [16,24].
+# A flat ground surface meshes out at y ~= 1.0 (crossing + smoothing).
+const SLAB := 8.0
 
-# The world beyond the paintable 128x128 region: a flat unmodifiable plane
-# level with the ground layer, so the map has no rim dropoff.
-const FRAME_INNER := 60.0
-const FRAME_OUTER := 512.0
+# The world beyond the paintable 128x128 region: a flat unmodifiable
+# CIRCULAR plain level with the ground layer, so the map has no rim dropoff.
+# The fog boundary (creative.gd) turns players around long before the edge.
+const FRAME_INNER := 60.0          # butts against the voxel region's rim
+const STAGE_RADIUS := 640.0        # outer edge of the circular plain
 const FRAME_TOP := 0.98            # a hair under the voxel floor's ~1.0
-const FRAME_THICK := 9.0
+const FRAME_SEGMENTS := 128
 
 # Lattice points are (NX+1) x (NY+1) x (NZ+1)
 var _density := PackedFloat32Array()
 var _chunks: Dictionary = {}       # Vector2i(cx,cz) -> {body, mesh_instance, shape}
-var _material: StandardMaterial3D
+var _material: ShaderMaterial
+
+# Triplanar sand/rock shader over real tiled textures (CC0, Poly Haven:
+# sand_01 + rock_face), slope-blended, with per-vertex cavity AO baked into
+# COLOR.r during meshing and a low-frequency noise tint that breaks up
+# texture tiling — dug/filled ground reads as 3D instead of flat orange.
+const TERRAIN_SHADER := "
+shader_type spatial;
+render_mode cull_disabled;
+uniform sampler2D sand_tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D rock_tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_tex : filter_linear, repeat_enable;
+varying vec3 wpos;
+varying vec3 wnrm;
+varying float vao;
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	wnrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	vao = COLOR.r;
+}
+vec3 triplanar(sampler2D tex, vec3 p, vec3 w, float s) {
+	return texture(tex, p.zy * s).rgb * w.x
+	     + texture(tex, p.xz * s).rgb * w.y
+	     + texture(tex, p.xy * s).rgb * w.z;
+}
+void fragment() {
+	vec3 w = abs(wnrm);
+	w = pow(w, vec3(4.0));
+	w /= (w.x + w.y + w.z);
+	vec3 sand = triplanar(sand_tex, wpos, w, 0.09) * vec3(1.12, 0.98, 0.82);
+	vec3 rock = triplanar(rock_tex, wpos, w, 0.06) * vec3(1.05, 0.95, 0.88);
+	float slope = clamp(1.0 - wnrm.y, 0.0, 1.0);
+	vec3 col = mix(sand, rock, smoothstep(0.25, 0.6, slope));
+	// large-scale tint variation so the tiling never reads as a grid
+	float n2 = texture(noise_tex, wpos.xz * 0.007).r;
+	col *= 0.88 + 0.24 * n2;
+	col *= vao;
+	ALBEDO = col;
+	ROUGHNESS = 0.95;
+	SPECULAR = 0.2;
+}
+"
 
 # Cube edges: pairs of corner indices; corners are (x&1, y&1, z&1) bit order
 const CORNER_OFFSETS := [
@@ -53,13 +95,25 @@ const EDGES := [
 
 func _ready() -> void:
 	add_to_group("voxel_terrain")
-	_material = StandardMaterial3D.new()
-	_material.albedo_color = Color(0.78, 0.55, 0.38)  # canyon sandstone
-	_material.roughness = 0.95
-	_material.uv1_triplanar = true
 	# Some quad windings come out flipped per axis; normals are from the
-	# density gradient anyway, so render both sides instead of leaving cracks.
-	_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# density gradient anyway, so the shader renders both sides (cull_disabled)
+	# instead of leaving cracks.
+	var shader := Shader.new()
+	shader.code = TERRAIN_SHADER
+	_material = ShaderMaterial.new()
+	_material.shader = shader
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise.frequency = 0.03
+	noise.fractal_octaves = 4
+	var ntex := NoiseTexture2D.new()
+	ntex.noise = noise
+	ntex.seamless = true
+	ntex.width = 256
+	ntex.height = 256
+	_material.set_shader_parameter("noise_tex", ntex)
+	_material.set_shader_parameter("sand_tex", load("res://Terrain/textures/sand.jpg"))
+	_material.set_shader_parameter("rock_tex", load("res://Terrain/textures/rock.jpg"))
 
 
 func _idx(x: int, y: int, z: int) -> int:
@@ -74,19 +128,30 @@ func _d(x: int, y: int, z: int) -> float:
 
 ## Build the field from the editor's layer stack: `layers` is 4 Arrays of 32
 ## ints (ground, main, +1, +2 — bottom to top), bit (31-col) = filled pixel.
-## Each pixel is a 4x4 m column within its 4 m slab; bedrock fills [-8,-4]
-## beneath everything regardless of paint.
+## Each pixel is a 4x4 m column within its 8 m slab; bedrock fills [-12,-8]
+## beneath everything regardless of paint. AUTOFILL: a painted pixel with
+## nothing beneath it grows a support column — every layer below a filled
+## one is treated as filled, so nothing generates floating.
 func build_from_layers(layers: Array) -> void:
+	var eff: Array = []
+	eff.resize(4)
+	eff[3] = layers[3].duplicate()
+	for li in [2, 1, 0]:
+		var merged := []
+		for r in layers[li].size():
+			merged.append(int(layers[li][r]) | int(eff[li + 1][r]))
+		eff[li] = merged
 	_density.resize((NX + 1) * (NY + 1) * (NZ + 1))
 	_density.fill(0.0)
 	var points_per_pixel := int(4.0 / VOXEL)  # 2
 	for y in NY + 1:
-		# Lattice rows: 1-2 bedrock, 3-4 ground, 5-6 main, 7-8 (+1), 9-10 (+2)
+		# Lattice rows: 1-2 bedrock, then 4 rows per slab: 3-6 ground,
+		# 7-10 main, 11-14 (+1), 15-18 (+2); 19-20 stay air for the seal.
 		var bedrock := y >= 1 and y <= 2
-		var li := ((y - 3) >> 1) if (y >= 3 and y <= 10) else -1
-		if not bedrock and (li < 0 or li >= layers.size()):
+		var li := ((y - 3) >> 2) if (y >= 3 and y <= 18) else -1
+		if not bedrock and (li < 0 or li >= eff.size()):
 			continue
-		var rows: Array = layers[li] if li >= 0 else []
+		var rows: Array = eff[li] if li >= 0 else []
 		for z in NZ + 1:
 			var pz := clampi(z / points_per_pixel, 0, 31)
 			for x in NX + 1:
@@ -134,47 +199,59 @@ func _seal_boundary() -> void:
 					_density[_idx(x, y, z)] = 0.0
 
 
-# Lattice rows at or below this index are bedrock (world y <= -4) — brushes
+# Lattice rows at or below this index are bedrock (world y <= -8) — brushes
 # can't touch them, so pits bottom out on the bedrock plane instead of
 # opening into the void.
 const BEDROCK_Y := 2
 
 
-## The flat plane surrounding the paintable region: 4 box segments forming a
-## ring from FRAME_INNER to FRAME_OUTER, level with the ground layer. Built
-## once; survives map rebuilds untouched.
+## The flat plain surrounding the paintable region: an annulus mesh with a
+## square inner hole (hugging the voxel region) and a circular outer edge.
+## Built once; survives map rebuilds untouched.
 var _frame_built := false
+
+## Point on the square inner perimeter in the direction of angle `a`.
+func _square_point(a: float) -> Vector3:
+	var c := cos(a)
+	var s := sin(a)
+	var t := FRAME_INNER / maxf(absf(c), absf(s))
+	return Vector3(c * t, FRAME_TOP, s * t)
+
 
 func _build_frame() -> void:
 	if _frame_built:
 		return
 	_frame_built = true
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.7, 0.51, 0.37)  # a shade darker than the field
-	mat.roughness = 0.95
-	var mid := (FRAME_INNER + FRAME_OUTER) / 2.0
-	var run := FRAME_OUTER - FRAME_INNER
-	var segs := [
-		[-mid, 0.0, run, FRAME_OUTER * 2.0],
-		[mid, 0.0, run, FRAME_OUTER * 2.0],
-		[0.0, -mid, FRAME_INNER * 2.0, run],
-		[0.0, mid, FRAME_INNER * 2.0, run],
-	]
-	for s in segs:
-		var body := StaticBody3D.new()
-		var shape := BoxShape3D.new()
-		shape.size = Vector3(s[2], FRAME_THICK, s[3])
-		var col := CollisionShape3D.new()
-		col.shape = shape
-		body.add_child(col)
-		var mi := MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = shape.size
-		bm.material = mat
-		mi.mesh = bm
-		body.add_child(mi)
-		body.position = Vector3(s[0], FRAME_TOP - FRAME_THICK / 2.0, s[1])
-		add_child(body)
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	for i in FRAME_SEGMENTS:
+		var a0 := TAU * i / FRAME_SEGMENTS
+		var a1 := TAU * (i + 1) / FRAME_SEGMENTS
+		var in0 := _square_point(a0)
+		var in1 := _square_point(a1)
+		var out0 := Vector3(cos(a0) * STAGE_RADIUS, FRAME_TOP, sin(a0) * STAGE_RADIUS)
+		var out1 := Vector3(cos(a1) * STAGE_RADIUS, FRAME_TOP, sin(a1) * STAGE_RADIUS)
+		for v in [in0, out0, out1, in0, out1, in1]:
+			verts.append(v)
+			normals.append(Vector3.UP)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(0, _material)  # same sand shader as the field
+	var body := StaticBody3D.new()
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	body.add_child(mi)
+	var col := CollisionShape3D.new()
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(verts)
+	shape.backface_collision = true
+	col.shape = shape
+	body.add_child(col)
+	add_child(body)
 
 ## Density at a world position (nearest lattice point) — used to detect a
 ## player embedded by a fill brush so they can be popped out upward.
@@ -273,6 +350,17 @@ func _gradient(p: Vector3) -> Vector3:
 	return n.normalized() if n.length() > 0.0001 else Vector3.UP
 
 
+## Cavity ambient occlusion at a surface point: how buried it is in nearby
+## density. Crevices and crater bottoms darken; open ground stays bright.
+func _ao_at(p: Vector3) -> float:
+	var occ := density_at(p + Vector3(2.5, 0, 0)) \
+		+ density_at(p + Vector3(-2.5, 0, 0)) \
+		+ density_at(p + Vector3(0, 0, 2.5)) \
+		+ density_at(p + Vector3(0, 0, -2.5)) \
+		+ density_at(p + Vector3(0, 2.5, 0)) * 2.0
+	return 1.0 - clampf((occ / 6.0 - 0.25) * 1.4, 0.0, 0.55)
+
+
 func _remesh_chunk(key: Vector2i) -> void:
 	var x0 := key.x * CHUNK
 	var z0 := key.y * CHUNK
@@ -323,10 +411,23 @@ func _remesh_chunk(key: Vector2i) -> void:
 		_chunks.erase(key)
 	if verts.is_empty():
 		return
+	var colors := PackedColorArray()
+	colors.resize(verts.size())
+	var ao_cache := {}
+	for i in verts.size():
+		var ck := verts[i].snapped(Vector3(0.25, 0.25, 0.25))
+		var ao: float
+		if ao_cache.has(ck):
+			ao = ao_cache[ck]
+		else:
+			ao = _ao_at(verts[i])
+			ao_cache[ck] = ao
+		colors[i] = Color(ao, ao, ao)
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_COLOR] = colors
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, _material)

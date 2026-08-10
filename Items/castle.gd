@@ -1,21 +1,24 @@
 extends Node3D
 
-## Parametric castle walls (Ryan's spec): two clicks A->B make a stone wall
-## with crenellation teeth, a walkable parapet top, and (gate variant) an
-## archway through the middle. Built from BRICK CELLS — 2x1x1 masonry blocks,
-## each with its own collider — so destruction is per-brick: explosions knock
-## bricks out (deterministically, from the shared explosion event) and the
-## lost bricks fall away as rigid-body gibs.
+## Parametric castle walls: click a chain of points (like channels) and a
+## SOLID stone wall runs through them — full-thickness body (no squeezing
+## between bricks), crenellation teeth along the top edges, a walkable
+## parapet between them, square posts at every bend, and (gate variant) an
+## archway through each segment's middle. Plain solid geometry — castles no
+## longer crumble into physics bricks.
 
-const BRICK_L := 2.0    # along the wall
-const BRICK_H := 1.0
-const BRICK_T := 1.0
-const WALL_ROWS := 6    # 5 solid + teeth row
-const WALL_COLS := 3    # outer / walkway / outer
-const MAX_LEN := 48.0
-const GIB_LIFE := 6.0
+const WALL_H := 6.0     # solid body height
+const THICK := 2.0      # full wall thickness
+const TOOTH_H := 1.1
+const TOOTH_W := 0.5    # merlon depth along each top edge
+const TOOTH_L := 1.6    # merlon length + same-size gap, alternating
+const POST := 3.0       # square post at each path node
+const GATE_W := 4.0
+const GATE_H := 4.5
+const MAX_LEN := 64.0   # per-segment clamp
+const MAX_NODES := 16
 
-var _castles: Dictionary = {}   # id -> {root, bricks: {key -> CollisionShape3D}, mm, list, arch, frame}
+var _castles: Dictionary = {}   # id -> {root, points: Array[Vector3]}
 
 
 func _ready() -> void:
@@ -38,155 +41,105 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if _castles.has(id):
 				_castles[id]["root"].queue_free()
 				_castles.erase(id)
-		"explosion":
-			var pos := Vector3(data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0))
-			var radius := 6.0 if str(data.get("type", "")) == "mine" else 8.0
-			_blast(pos, radius * 0.75)  # bricks are tougher than score radius
 
 
 ## Nearest castle within `radius` of a point — god menu delete. {} if none.
 func nearest_deletable(pos: Vector3, radius := 5.0) -> Dictionary:
 	var best := {}
 	for id in _castles:
-		for b in _castles[id]["list"]:
-			var d: float = (b["pos"] as Vector3).distance_to(pos)
+		for p in _castles[id]["points"]:
+			var d: float = (p as Vector3).distance_to(pos)
 			if d < radius and (best.is_empty() or d < best["dist"]):
-				best = {"id": id, "dist": d, "pos": b["pos"]}
+				best = {"id": id, "dist": d, "pos": p}
 	return best
-
-
-## Which brick cells exist for a wall of `n_along` bricks (arch = gate hole).
-static func _cell_exists(i: int, row: int, col: int, n_along: int, arch: bool) -> bool:
-	var outer := col == 0 or col == WALL_COLS - 1
-	if row == WALL_ROWS - 1:
-		return outer and i % 2 == 0        # teeth: alternating merlons, outer edges
-	if row == WALL_ROWS - 2 and not outer:
-		return true                        # walkway floor is the row below
-	if not outer and row < WALL_ROWS - 2:
-		return true                        # interior fill
-	if arch and row <= 3:
-		# gate: a 2-brick-wide opening through the middle, all columns
-		var mid := n_along / 2
-		if i == mid or i == mid - 1:
-			return false
-	return row < WALL_ROWS - 1             # solid outer body below the teeth
 
 
 func _add_castle(c: Dictionary) -> void:
 	var id := str(c.get("id", ""))
 	if id == "" or _castles.has(id):
 		return
-	var a_d: Dictionary = c.get("a", {})
-	var b_d: Dictionary = c.get("b", {})
-	var a := Vector3(a_d.get("x", 0.0), a_d.get("y", 0.0), a_d.get("z", 0.0))
-	var b := Vector3(b_d.get("x", 0.0), b_d.get("y", 0.0), b_d.get("z", 0.0))
-	var arch: bool = c.get("arch", false)
-	var flat := Vector3(b.x - a.x, 0.0, b.z - a.z)
-	var length := minf(flat.length(), MAX_LEN)
-	if length < BRICK_L:
+	var nodes: Array = c.get("nodes", [])
+	# Legacy two-point payloads ({a, b}) still render
+	if nodes.is_empty() and c.get("a") is Dictionary and c.get("b") is Dictionary:
+		nodes = [c.get("a"), c.get("b")]
+	var pts: Array = []
+	for n in nodes:
+		if n is Dictionary:
+			pts.append(Vector3(n.get("x", 0.0), n.get("y", 0.0), n.get("z", 0.0)))
+		if pts.size() >= MAX_NODES:
+			break
+	if pts.size() < 2:
 		return
-	var dir := flat.normalized()
-	var right := Vector3(-dir.z, 0.0, dir.x)
-	var base := Vector3(a.x, minf(a.y, b.y), a.z)
-	var n_along := int(length / BRICK_L)
+	var arch: bool = c.get("arch", false)
 
 	var root := StaticBody3D.new()
 	add_child(root)
-	var bricks: Dictionary = {}
-	var list: Array = []
-	for i in n_along:
-		for row in WALL_ROWS:
-			for col in WALL_COLS:
-				if not _cell_exists(i, row, col, n_along, arch):
-					continue
-				var pos: Vector3 = base \
-					+ dir * (i * BRICK_L + BRICK_L / 2.0) \
-					+ right * ((col - 1) * BRICK_T) \
-					+ Vector3(0, row * BRICK_H + BRICK_H / 2.0, 0)
-				var shape := CollisionShape3D.new()
-				var box := BoxShape3D.new()
-				box.size = Vector3(BRICK_L, BRICK_H, BRICK_T)
-				shape.shape = box
-				root.add_child(shape)
-				shape.global_position = pos
-				shape.global_basis = Basis.looking_at(dir, Vector3.UP)
-				var key := "%d,%d,%d" % [i, row, col]
-				bricks[key] = shape
-				list.append({"key": key, "pos": pos})
-
-	var mm := _make_multimesh(list, dir)
-	root.add_child(mm)
-	_castles[id] = {"root": root, "bricks": bricks, "mm": mm, "list": list, "dir": dir}
-
-
-func _make_multimesh(list: Array, dir: Vector3) -> MultiMeshInstance3D:
-	var mmi := MultiMeshInstance3D.new()
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	var box := BoxMesh.new()
-	box.size = Vector3(BRICK_L - 0.06, BRICK_H - 0.06, BRICK_T - 0.06)  # mortar gaps
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color.WHITE
+	mat.albedo_color = Color(0.62, 0.6, 0.54)
 	mat.roughness = 1.0
-	mat.vertex_color_use_as_albedo = true
-	box.material = mat
-	mm.mesh = box
-	mm.instance_count = list.size()
+
+	var mids: Array = []
+	for i in pts.size() - 1:
+		_build_segment(root, pts[i], pts[i + 1], arch, mat)
+		mids.append((pts[i] + pts[i + 1]) / 2.0)
+	for p in pts:
+		# Square post at every node: seals corners so bends have no gaps
+		var base_y: float = p.y
+		_solid_box(root,
+			Vector3(p.x, base_y + (WALL_H + 1.2) / 2.0, p.z),
+			Vector3(POST, WALL_H + 1.2, POST), Basis(), mat)
+	_castles[id] = {"root": root, "points": pts + mids}
+
+
+func _build_segment(root: StaticBody3D, a: Vector3, b: Vector3, arch: bool, mat: StandardMaterial3D) -> void:
+	var flat := Vector3(b.x - a.x, 0.0, b.z - a.z)
+	var length := minf(flat.length(), MAX_LEN)
+	if length < 1.0:
+		return
+	var dir := flat.normalized()
+	var right := Vector3(-dir.z, 0.0, dir.x)
+	var base_y := minf(a.y, b.y)
 	var basis := Basis.looking_at(dir, Vector3.UP)
-	for i in list.size():
-		mm.set_instance_transform(i, Transform3D(basis, list[i]["pos"]))
-		# stone variation: hash the position for a stable per-brick shade
-		var shade := 0.5 + 0.18 * fposmod(sin(list[i]["pos"].dot(Vector3(12.9, 78.2, 37.7))) * 43758.5, 1.0)
-		mm.set_instance_color(i, Color(shade, shade * 0.97, shade * 0.9))
-	mmi.multimesh = mm
-	return mmi
+	var mid := Vector3(a.x, 0, a.z) + dir * (length / 2.0)
+
+	if arch and length > GATE_W + 2.0:
+		# Gate: two flanks + a lintel over the opening
+		var flank := (length - GATE_W) / 2.0
+		for side: float in [-1.0, 1.0]:
+			var center: Vector3 = Vector3(mid.x, 0, mid.z) + dir * side * ((GATE_W + flank) / 2.0)
+			_solid_box(root, Vector3(center.x, base_y + WALL_H / 2.0, center.z),
+				Vector3(THICK, WALL_H, flank), basis, mat)
+		_solid_box(root, Vector3(mid.x, base_y + GATE_H + (WALL_H - GATE_H) / 2.0, mid.z),
+			Vector3(THICK, WALL_H - GATE_H, GATE_W), basis, mat)
+	else:
+		_solid_box(root, Vector3(mid.x, base_y + WALL_H / 2.0, mid.z),
+			Vector3(THICK, WALL_H, length), basis, mat)
+
+	# Teeth: alternating merlons along both top edges (visual + collision)
+	var n := int(length / TOOTH_L)
+	for i in n:
+		if i % 2 == 1:
+			continue
+		var along := (i + 0.5) * TOOTH_L
+		for side: float in [-1.0, 1.0]:
+			var tp: Vector3 = Vector3(a.x, 0, a.z) + dir * along + right * side * ((THICK - TOOTH_W) / 2.0)
+			_solid_box(root, Vector3(tp.x, base_y + WALL_H + TOOTH_H / 2.0, tp.z),
+				Vector3(TOOTH_W, TOOTH_H, TOOTH_L * 0.9), basis, mat)
 
 
-## Knock out every brick within the blast and send it flying as a gib.
-func _blast(pos: Vector3, radius: float) -> void:
-	for id in _castles:
-		var castle: Dictionary = _castles[id]
-		var removed := false
-		var kept: Array = []
-		for b in castle["list"]:
-			var bpos: Vector3 = b["pos"]
-			if bpos.distance_to(pos) < radius:
-				removed = true
-				var shape: CollisionShape3D = castle["bricks"].get(b["key"])
-				if shape:
-					shape.queue_free()
-				castle["bricks"].erase(b["key"])
-				_spawn_gib(bpos, (bpos - pos).normalized(), castle["dir"])
-			else:
-				kept.append(b)
-		if removed:
-			castle["list"] = kept
-			castle["mm"].queue_free()
-			castle["mm"] = _make_multimesh(kept, castle["dir"])
-			castle["root"].add_child(castle["mm"])
-
-
-func _spawn_gib(pos: Vector3, out_dir: Vector3, wall_dir: Vector3) -> void:
-	var gib := RigidBody3D.new()
-	gib.mass = 2.0
+func _solid_box(root: StaticBody3D, center: Vector3, size: Vector3, basis: Basis, mat: StandardMaterial3D) -> void:
 	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(BRICK_L, BRICK_H, BRICK_T) * 0.8
-	col.shape = box
-	gib.add_child(col)
-	var mesh_inst := MeshInstance3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	col.shape = shape
+	root.add_child(col)
+	col.global_position = center
+	col.global_basis = basis
+	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
-	bm.size = box.size
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.55, 0.53, 0.48)
-	mat.roughness = 1.0
+	bm.size = size
 	bm.material = mat
-	mesh_inst.mesh = bm
-	gib.add_child(mesh_inst)
-	add_child(gib)
-	gib.global_position = pos
-	gib.global_basis = Basis.looking_at(wall_dir, Vector3.UP)
-	gib.linear_velocity = out_dir * (6.0 + randf() * 6.0) + Vector3(0, 4.0 + randf() * 4.0, 0)
-	gib.angular_velocity = Vector3(randf() - 0.5, randf() - 0.5, randf() - 0.5) * 8.0
-	get_tree().create_timer(GIB_LIFE).timeout.connect(gib.queue_free)
+	mi.mesh = bm
+	root.add_child(mi)
+	mi.global_position = center
+	mi.global_basis = basis

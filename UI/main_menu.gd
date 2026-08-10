@@ -21,6 +21,7 @@ var _name_edit: LineEdit
 var _roster: Label
 var _join_btn: Button
 var _toggle_checks: Dictionary = {}
+var _gamemode_opt: OptionButton
 var _players: Dictionary = {}   # id -> {name, skinColor}
 var _scores: Dictionary = {}
 
@@ -64,6 +65,8 @@ func _apply_game_settings(gs: Variant) -> void:
 		return
 	for key in _toggle_checks:
 		_toggle_checks[key].set_pressed_no_signal(bool(gs.get(key, false)))
+	if _gamemode_opt:
+		_gamemode_opt.select(0 if bool(gs.get("slayer", true)) else 1)
 
 
 func _refresh_status() -> void:
@@ -76,11 +79,17 @@ func _refresh_status() -> void:
 		_status.text = "● disconnected - retrying... (free tier wakes in ~60 s)"
 		_status.add_theme_color_override("font_color", Color("#ff8080"))
 	_join_btn.disabled = not Net.is_socket_connected()
-	var lines: Array = []
+	# You always head the roster, flagged as still sitting in the menu
+	var my_name := Settings.player_name
+	if _name_edit and _name_edit.text.strip_edges() != "":
+		my_name = _name_edit.text.strip_edges().left(16)
+	var lines: Array = ["%s (you, in menu)" % my_name]
 	for id in _players:
 		var p: Dictionary = _players[id]
 		lines.append("%s - %d" % [str(p.get("name", "???")), int(_scores.get(id, 0))])
-	_roster.text = "\n".join(lines) if lines.size() > 0 else "nobody in the arena yet"
+	_roster.text = "\n".join(lines)
+	# Nobody in the arena yet: you'd be STARTING the game, not joining one
+	_join_btn.text = "START GAME" if _players.is_empty() else "JOIN GAME"
 
 
 func _join() -> void:
@@ -157,6 +166,7 @@ func _build_ui() -> void:
 	_name_edit = LineEdit.new()
 	_name_edit.text = Settings.player_name
 	_name_edit.max_length = 16
+	_name_edit.text_changed.connect(func(_t: String): _refresh_status())
 	player_box.add_child(_name_edit)
 	var color_btn := ColorPickerButton.new()
 	color_btn.color = Settings.color
@@ -174,6 +184,13 @@ func _build_ui() -> void:
 	# --- GAME SETTINGS (server-wide) ---
 	var settings_box := _panel("GAME SETTINGS (everyone)")
 	grid.add_child(settings_box.get_meta("panel"))
+	_gamemode_opt = OptionButton.new()
+	_gamemode_opt.add_item("Slayer")
+	_gamemode_opt.add_item("Sandbox (oddball)")
+	_gamemode_opt.select(0 if bool(Net.game_settings.get("slayer", true)) else 1)
+	_gamemode_opt.item_selected.connect(func(i: int):
+		Net.emit_event("updateGameSetting", {"key": "slayer", "value": i == 0}))
+	settings_box.add_child(_gamemode_opt)
 	for entry in GAME_TOGGLES:
 		var check := CheckBox.new()
 		check.text = entry[1]

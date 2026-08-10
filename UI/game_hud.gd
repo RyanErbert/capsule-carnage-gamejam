@@ -40,6 +40,8 @@ var _esc_toggles: Dictionary = {}
 var _esc_sliders: Dictionary = {}
 var _health_label: Label
 var _death_label: Label
+var _gamemode_opt: OptionButton
+var _last_hp := -1
 
 
 func _ready() -> void:
@@ -63,6 +65,17 @@ func _ready() -> void:
 	_build_esc_menu()
 	_build_conn_pill()
 	_build_slayer_hud()
+	# Full-screen shader effects (sci-fi drone view, damage datamosh)
+	var fx := Node.new()
+	fx.name = "ScreenFX"
+	fx.set_script(load("res://UI/screen_fx.gd"))
+	add_child(fx)
+	# Dynamic 8-bit soundtrack: intensity follows proximity + damage
+	var music := Node.new()
+	music.name = "DynamicMusic"
+	music.set_script(load("res://Audio/dynamic_music.gd"))
+	music.sync_node = sync_node
+	add_child(music)
 
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
@@ -185,6 +198,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 					_esc_toggles[key].set_pressed_no_signal(bool(data.get(key, false)))
 				for key in _esc_sliders:
 					_esc_sliders[key].set_value_no_signal(clampf(float(data.get(key, 1.0)), 0.1, 2.0))
+				if _gamemode_opt:
+					_gamemode_opt.select(0 if bool(data.get("slayer", true)) else 1)
 				_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
 
 
@@ -364,8 +379,26 @@ func _build_esc_menu() -> void:
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	box.add_child(title)
 
+	# Gamemode dropdown (server-wide; slayer is the default)
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 8)
+	var mode_lbl := Label.new()
+	mode_lbl.text = "Mode"
+	mode_lbl.add_theme_font_size_override("font_size", 12)
+	mode_row.add_child(mode_lbl)
+	_gamemode_opt = OptionButton.new()
+	_gamemode_opt.add_item("Slayer")
+	_gamemode_opt.add_item("Sandbox (oddball)")
+	_gamemode_opt.focus_mode = Control.FOCUS_NONE
+	_gamemode_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_gamemode_opt.select(0 if bool(Net.game_settings.get("slayer", true)) else 1)
+	_gamemode_opt.item_selected.connect(func(i: int):
+		Net.emit_event("updateGameSetting", {"key": "slayer", "value": i == 0}))
+	mode_row.add_child(_gamemode_opt)
+	box.add_child(mode_row)
+
 	# Server-wide toggles (everyone sees an alert when these change)
-	for entry in [["slayer", "Slayer (coins = health)"], ["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
+	for entry in [["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
 		var check := CheckBox.new()
 		check.text = entry[1]
 		check.focus_mode = Control.FOCUS_NONE
@@ -421,14 +454,21 @@ func _toggle_esc_menu(open: bool) -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
 
 
+## God menu calls this when it opens — only one menu at a time.
+func close_esc_menu() -> void:
+	if _esc_menu and _esc_menu.visible:
+		_toggle_esc_menu(false)
+
+
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and get_viewport().gui_get_focus_owner() == null:
-		# Don't fight the god menu for the cursor
+		# One menu at a time: Esc kicks god mode out before opening
 		var god: Node = get_node_or_null("GodMenu")
-		if god == null or not god.visible:
-			_toggle_esc_menu(not _esc_menu.visible)
-			get_viewport().set_input_as_handled()
-			return
+		if god and god.visible:
+			god.toggle()
+		_toggle_esc_menu(not _esc_menu.visible)
+		get_viewport().set_input_as_handled()
+		return
 	_hotkey_input(event)
 
 
@@ -530,8 +570,20 @@ func _process(_delta: float) -> void:
 func _refresh(scores: Dictionary) -> void:
 	if not sync_node:
 		return
+	var slayer := bool(Net.game_settings.get("slayer", true))
+	# Damage feedback: datamosh pulse + music sting when your health drops
+	var my_hp := int(scores.get(sync_node.self_id, 0))
+	if slayer and sync_node.self_id != "" and _last_hp >= 0 and my_hp < _last_hp:
+		var fx: Node = get_tree().get_first_node_in_group("screen_fx")
+		if fx:
+			fx.pulse(clampf(float(_last_hp - my_hp) / 40.0, 0.25, 1.0))
+		var music: Node = get_tree().get_first_node_in_group("dynamic_music")
+		if music:
+			music.damage_pulse()
+	_last_hp = my_hp
 	var holder: String = sync_node.holder_id
-	_it_label.visible = holder != "" and holder == sync_node.self_id
+	# The oddball "YOU'RE IT" banner belongs to the old sandbox mode
+	_it_label.visible = holder != "" and holder == sync_node.self_id and not slayer
 
 	# Leader = highest score (web: crown + "name: score" top center)
 	var best_id := ""
@@ -547,6 +599,6 @@ func _refresh(scores: Dictionary) -> void:
 	rows.sort_custom(func(a, b): return a[1] > b[1])
 	var lines: Array = []
 	for row in rows:
-		var prefix := "[IT] " if row[0] == holder else ""
+		var prefix := "[IT] " if (row[0] == holder and not slayer) else ""
 		lines.append("%s%s - %d" % [prefix, sync_node.name_of(row[0]), row[1]])
 	_scoreboard_text.text = "\n".join(lines)

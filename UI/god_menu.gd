@@ -14,7 +14,9 @@ const GIVE_ITEMS := [
 	"machinegun", "rocket", "mines",
 	"block", "wall", "ramp", "platform", "bridge_gun",
 ]
-const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["spawn", "#7dedb0"], ["generator", "#6affc2"], ["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["delete", "#aaaaaa"]]
+const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
+const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
+const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
 const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
@@ -32,7 +34,9 @@ var _status: Label
 var _drone: CharacterBody3D
 var _channel_nodes: Array = []
 var _channel_markers: Array = []
-var _castle_start: Variant = null
+var _castle_nodes: Array = []
+var _castle_markers: Array = []
+var _hover_ghosts: Dictionary = {}  # tool -> ghost Node3D (blue placement preview)
 # God build mode (web: godmode build tools + the 9^3 grid-point cloud)
 const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
 var _build_rot := 0
@@ -83,14 +87,20 @@ func toggle() -> void:
 		return
 	if visible:
 		visible = false
+		_set_tool("")  # finishes any pending channel/castle chain
 		_player.set_godmode(false)
 		if _player.camera_rig:
 			_player.camera_rig.follow_target = null
 		if _drone:
-			_drone.queue_free()
+			_drone.return_to = _player  # flies home, then despawns
 			_drone = null
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		_set_scifi(false)
 	else:
+		# One menu at a time: opening god mode closes the Esc menu
+		var hud := get_parent()
+		if hud and hud.has_method("close_esc_menu"):
+			hud.close_esc_menu()
 		visible = true
 		_player.set_godmode(true)  # body idles in place, still vulnerable
 		Net.emit_event("godmodeEnter")  # server hands the oddball to someone else
@@ -102,6 +112,13 @@ func toggle() -> void:
 			_drone.camera_rig = _player.camera_rig
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		_set_tool("")
+		_set_scifi(true)
+
+
+func _set_scifi(on: bool) -> void:
+	var fx: Node = get_tree().get_first_node_in_group("screen_fx")
+	if fx:
+		fx.set_scifi(on)
 
 
 func _make_drone() -> CharacterBody3D:
@@ -170,21 +187,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			})
 			_status.text = "generator placed (E drags it)"
 		elif _tool == "castle" or _tool == "gate":
-			if _castle_start == null:
-				_castle_start = pos
-				_channel_markers.append(_channel_marker(pos))
-				_status.text = "castle start set - click the far end"
-			else:
-				Net.emit_event("placeCastle", {
-					"a": {"x": _castle_start.x, "y": _castle_start.y, "z": _castle_start.z},
-					"b": {"x": pos.x, "y": pos.y, "z": pos.z},
-					"arch": _tool == "gate",
-				})
-				_castle_start = null
-				for m in _channel_markers:
-					m.queue_free()
-				_channel_markers.clear()
-				_status.text = "castle wall placed%s" % (" (with gate)" if _tool == "gate" else "")
+			_castle_nodes.append(pos)
+			_castle_markers.append(_channel_marker(pos))
+			_status.text = "%d point%s - click %s again to finish" % [
+				_castle_nodes.size(), "" if _castle_nodes.size() == 1 else "s", _tool.to_upper()]
 		elif _tool == "channel":
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
@@ -251,6 +257,7 @@ func _process(delta: float) -> void:
 	for t in _build_ghosts:
 		_build_ghosts[t].visible = false
 	_update_delete_highlight()
+	_update_hover_preview()
 	if not building or _player == null:
 		_build_target = {}
 		return
@@ -300,6 +307,90 @@ func _process(delta: float) -> void:
 				for gz in range(-4, 5):
 					mm.set_instance_transform(i, Transform3D(Basis(), center + Vector3(gx, gy, gz) * 4.0 + Vector3(2, 2, 2)))
 					i += 1
+
+
+## Blue placement preview at the cursor for every point-and-click tool
+## (pedestals, markers, structures, props, vehicles). BUILD keeps its own
+## snapped ghost; delete keeps its red highlight.
+func _update_hover_preview() -> void:
+	var previewing := visible and _player != null and _tool != "" \
+		and not _tool.begins_with("build:") \
+		and _tool != "delete" and _tool != "dig" and _tool != "fill"
+	for t in _hover_ghosts:
+		_hover_ghosts[t].visible = false
+	if not previewing:
+		return
+	var hit := _mouse_ray(get_viewport().get_mouse_position())
+	if hit.is_empty():
+		return
+	var ghost: Node3D = _hover_ghosts.get(_tool)
+	if ghost == null:
+		ghost = _make_hover_ghost(_tool)
+		_hover_ghosts[_tool] = ghost
+	ghost.visible = true
+	ghost.global_position = hit["position"]
+
+
+func _ghost_material() -> StandardMaterial3D:
+	if _ghost_mat == null:
+		_ghost_mat = StandardMaterial3D.new()
+		_ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_ghost_mat.albedo_color = Color(0.3, 0.6, 1.0, 0.4)
+		_ghost_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _ghost_mat
+
+
+func _make_hover_ghost(tool_name: String) -> Node3D:
+	var root := Node3D.new()
+	_player.get_parent().add_child(root)
+	var mat := _ghost_material()
+	if tool_name.begins_with("prop:"):
+		# The actual model, ghosted blue
+		var scenes: Dictionary = preload("res://Items/props.gd").MODEL_SCENES
+		var model := tool_name.substr(5)
+		if scenes.has(model):
+			var inst: Node3D = scenes[model].instantiate()
+			root.add_child(inst)
+			_ghost_all_meshes(inst, mat)
+			return root
+	var mi := MeshInstance3D.new()
+	if tool_name.begins_with("vehicle:"):
+		var box := BoxMesh.new()
+		box.size = Vector3(2.4, 1.1, 3.2)
+		mi.mesh = box
+		mi.position.y = 1.2
+	elif tool_name == "generator":
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.6
+		cyl.bottom_radius = 0.68
+		cyl.height = 1.4
+		mi.mesh = cyl
+		mi.position.y = 0.7
+	elif tool_name in ["green", "red", "yellow"]:
+		var ped := CylinderMesh.new()
+		ped.top_radius = 0.7
+		ped.bottom_radius = 0.9
+		ped.height = 1.0
+		mi.mesh = ped
+		mi.position.y = 0.5
+	else:
+		# spawn / channel / castle / gate: a simple point marker
+		var sph := SphereMesh.new()
+		sph.radius = 0.6
+		sph.height = 1.2
+		mi.mesh = sph
+		mi.position.y = 0.6
+	mi.material_override = mat
+	root.add_child(mi)
+	return root
+
+
+func _ghost_all_meshes(node: Node, mat: StandardMaterial3D) -> void:
+	for child in node.get_children():
+		_ghost_all_meshes(child, mat)
+	if node is MeshInstance3D:
+		node.material_override = mat
 
 
 var _delete_marker: MeshInstance3D
@@ -450,9 +541,28 @@ func _finish_channel() -> void:
 	_channel_nodes.clear()
 
 
+## Castle walls chain through every clicked point, channel-style.
+func _finish_castle(arch: bool) -> void:
+	if _castle_nodes.size() >= 2:
+		var nodes: Array = []
+		for p in _castle_nodes:
+			nodes.append({"x": p.x, "y": p.y, "z": p.z})
+		Net.emit_event("placeCastle", {
+			"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+			"nodes": nodes, "arch": arch,
+		})
+		_status.text = "castle wall placed (%d points)%s" % [_castle_nodes.size(), " with gates" if arch else ""]
+	for m in _castle_markers:
+		m.queue_free()
+	_castle_markers.clear()
+	_castle_nodes.clear()
+
+
 func _set_tool(tool_name: String) -> void:
 	if _tool == "channel" and tool_name != "channel":
 		_finish_channel()
+	if (_tool == "castle" or _tool == "gate") and tool_name != _tool:
+		_finish_castle(_tool == "gate")
 	_tool = tool_name
 	for t in _tool_buttons:
 		_tool_buttons[t].button_pressed = t == tool_name
@@ -480,6 +590,24 @@ func _mk_button(text: String, color: Color) -> Button:
 	b.add_theme_color_override("font_color", color)
 	b.add_theme_font_size_override("font_size", 12)
 	return b
+
+
+## One labeled row of toggle tools (the standard god-menu section shape).
+func _tool_row(root: VBoxContainer, label_text: String, tools: Array) -> void:
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	root.add_child(lbl)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	root.add_child(row)
+	for entry in tools:
+		var b := _mk_button(entry[0], Color(entry[1]))
+		b.toggle_mode = true
+		b.pressed.connect(_on_tool_pressed.bind(entry[0]))
+		row.add_child(b)
+		_tool_buttons[entry[0]] = b
 
 
 func _build_ui() -> void:
@@ -534,21 +662,9 @@ func _build_ui() -> void:
 		b.pressed.connect(func(): Net.emit_event("godmodeGive", item))
 		grid.add_child(b)
 
-	var ped_label := Label.new()
-	ped_label.text = "PEDESTALS"
-	ped_label.add_theme_font_size_override("font_size", 12)
-	ped_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
-	root.add_child(ped_label)
-
-	var tools := HBoxContainer.new()
-	tools.add_theme_constant_override("separation", 6)
-	root.add_child(tools)
-	for entry in PED_TOOLS:
-		var b := _mk_button(entry[0], Color(entry[1]))
-		b.toggle_mode = true
-		b.pressed.connect(_on_tool_pressed.bind(entry[0]))
-		tools.add_child(b)
-		_tool_buttons[entry[0]] = b
+	_tool_row(root, "PEDESTALS", PED_TOOLS)
+	_tool_row(root, "MARKERS", MARKER_TOOLS)
+	_tool_row(root, "STRUCTURES (multi-click, reclick tool to finish)", STRUCT_TOOLS)
 
 	var build_label := Label.new()
 	build_label.text = "BUILD (free - click cells, R rotates)"
@@ -618,6 +734,12 @@ func _build_ui() -> void:
 		pb.pressed.connect(_on_tool_pressed.bind(tool_id))
 		props_grid.add_child(pb)
 		_tool_buttons[tool_id] = pb
+
+	var del := _mk_button("✕ DELETE (hover highlights red)", Color("#ff7060"))
+	del.toggle_mode = true
+	del.pressed.connect(_on_tool_pressed.bind("delete"))
+	root.add_child(del)
+	_tool_buttons["delete"] = del
 
 	_status = Label.new()
 	_status.text = ""

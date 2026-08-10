@@ -18,6 +18,12 @@ const LAYERS := 4
 const LAYER_NAMES := ["GROUND", "MAIN", "+1", "+2"]  # index 0..3, bottom up
 const BRUSH_RADIUS := 3.0       # default radius for replayed edits
 const KILL_Y := -20.0           # below the world: instant respawn backstop
+
+# Stage bounds: fog starts building the moment you leave the 128x128 play
+# area and hits full white after ~3 s of running (~38 m), at which point
+# you're turned around to face the center.
+const FOG_START := 64.0    # the paint region's edge (max-norm)
+const FOG_WHITE := 102.0
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
@@ -28,9 +34,14 @@ var _playing := false
 var _layers: Array = []        # 4 x (32 ints), bit (31-col) = filled
 var _active_layer := 1         # painting target; 1 = MAIN
 var _layer_buttons: Array = []
+var _spawn_px: Variant = null  # painted spawn pixel [r, c]; a building pops up there
+var _spawn_mode := false       # SPAWN chip armed: clicks place the spawn pixel
+var _spawn_button: Button
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
+var _fog_rect: ColorRect
+var _env_ref: Environment
 
 
 func _ready() -> void:
@@ -42,12 +53,13 @@ func _ready() -> void:
 	var live := _norm_layers(Net.creative_grid)
 	var painting := _norm_layers(Net.paint_rows)
 	if not live.is_empty():
+		_spawn_px = _norm_spawn(Net.creative_grid)
 		_start_play(live, Net.terrain_edits.duplicate(), false)
 	elif OS.get_environment("FRIENDSLOP_AUTOJOIN") == "1":
 		_start_play.call_deferred(_layers, [], true)  # headless testing
 	elif not painting.is_empty():
 		# Someone is mid-painting: adopt their canvas
-		_adopt_paint(painting)
+		_adopt_paint(painting, _norm_spawn(Net.paint_rows))
 
 
 ## Ground layer full (the flat plain you walk on), everything above empty.
@@ -79,8 +91,22 @@ func _norm_layers(data: Variant) -> Array:
 	return out
 
 
-func _adopt_paint(layers: Array) -> void:
+## The painted spawn pixel from a payload: [r, c] or null.
+func _norm_spawn(data: Variant) -> Variant:
+	if data is Dictionary and data.get("spawn") is Array:
+		var sp: Array = data.get("spawn")
+		if sp.size() == 2:
+			return [clampi(int(sp[0]), 0, PIXELS - 1), clampi(int(sp[1]), 0, PIXELS - 1)]
+	return null
+
+
+func _grid_payload() -> Dictionary:
+	return {"layers": _layers, "spawn": _spawn_px}
+
+
+func _adopt_paint(layers: Array, spawn: Variant) -> void:
 	_layers = layers
+	_spawn_px = spawn
 	if _painter:
 		_painter.queue_redraw()
 
@@ -100,18 +126,29 @@ func _process(delta: float) -> void:
 	if _paint_dirty and _paint_send_cd <= 0.0:
 		_paint_dirty = false
 		_paint_send_cd = 0.12
-		Net.emit_event("creativePaint", {"layers": _layers})
+		Net.emit_event("creativePaint", _grid_payload())
+
+
+func _same_spawn(other: Variant) -> bool:
+	if (other == null) != (_spawn_px == null):
+		return false
+	if other == null:
+		return true
+	return int(other[0]) == int(_spawn_px[0]) and int(other[1]) == int(_spawn_px[1])
 
 
 func _on_net_event(event: String, data: Variant) -> void:
 	match event:
 		"creativePaint":
 			var painted := _norm_layers(data)
-			if not _playing and not painted.is_empty() and not _same_layers(painted):
-				_adopt_paint(painted)
+			var psp: Variant = _norm_spawn(data)
+			if not _playing and not painted.is_empty() \
+					and (not _same_layers(painted) or not _same_spawn(psp)):
+				_adopt_paint(painted, psp)
 		"creativeGrid":
 			var grid := _norm_layers(data)
 			if not grid.is_empty() and not _same_layers(grid):
+				_spawn_px = _norm_spawn(data)
 				_start_play(grid, [], false)
 		"mapRebuilt":
 			# Round reset: regenerate terrain from the layers, fresh spawn
@@ -160,7 +197,7 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 			terrain.apply_brush(Vector3(e.get("x", 0.0), e.get("y", 0.0), e.get("z", 0.0)),
 				float(e.get("r", BRUSH_RADIUS)), float(e.get("s", -1.0)), float(e.get("st", 1.0)))
 	if announce:
-		Net.emit_event("creativeGrid", {"layers": _layers})
+		Net.emit_event("creativeGrid", _grid_payload())
 	_editor_layer.visible = false
 	if not _playing:
 		_playing = true
@@ -226,20 +263,32 @@ func _spawn_gameplay() -> void:
 	hud.sync_node = sync
 	add_child(hud)
 
+	# White-out overlay for the fog boundary (above the 3D world, below the HUD)
+	var fog_layer := CanvasLayer.new()
+	fog_layer.layer = 0
+	add_child(fog_layer)
+	_fog_rect = ColorRect.new()
+	_fog_rect.color = Color(1, 1, 1, 0.0)
+	_fog_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_fog_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fog_layer.add_child(_fog_rect)
 
-## Spawns scattered across walkable pixels — main layer open AND ground
-## present (not a pit) — one per 3x3 block (web randomSpawn equivalent).
+
+## Spawns scattered across walkable pixels — nothing at main level or above
+## (autofill makes upper paint imply main) AND ground present (not a pit) —
+## one per 3x3 block (web randomSpawn equivalent).
 func _spawn_points() -> Array:
 	var points: Array = []
 	for r in range(1, PIXELS - 1, 3):
 		for c in range(1, PIXELS - 1, 3):
-			if (int(_layers[1][r]) >> (31 - c)) & 1:
-				continue  # main-layer wall
+			var above := int(_layers[1][r]) | int(_layers[2][r]) | int(_layers[3][r])
+			if (above >> (31 - c)) & 1:
+				continue  # wall column
 			if not ((int(_layers[0][r]) >> (31 - c)) & 1):
 				continue  # pit
 			points.append(Vector3(-64.0 + c * 4.0 + 2.0, 2.0, -64.0 + r * 4.0 + 2.0))
 	if points.is_empty():
-		points.append(Vector3(2.0, 15.0, 2.0))  # all filled: spawn on the stack top
+		points.append(Vector3(2.0, 27.0, 2.0))  # all filled: spawn on the stack top
 	return points
 
 
@@ -247,7 +296,10 @@ func _spawn_points() -> Array:
 # (riding a vehicle: world_vehicles.gd rescues the vehicle + driver instead)
 
 func _physics_process(_delta: float) -> void:
-	if not _playing or player == null or player.vehicle != null:
+	if not _playing or player == null:
+		return
+	_update_fog_bounds()
+	if player.vehicle != null:
 		return
 	# Backstop: anything that slips below the world snaps back to a spawn
 	if player.global_position.y < KILL_Y:
@@ -260,12 +312,49 @@ func _physics_process(_delta: float) -> void:
 		player.velocity.y = maxf(player.velocity.y, 0.0)
 
 
+## Distance-based white-out past FOG_START; at FOG_WHITE the screen is fully
+## white and the player (or their vehicle) is turned to face the center.
+func _update_fog_bounds() -> void:
+	if _fog_rect == null:
+		return
+	var hpos := Vector2(player.global_position.x, player.global_position.z)
+	# Max-norm distance so the fog line hugs the SQUARE play area exactly
+	var d := maxf(absf(hpos.x), absf(hpos.y))
+	var f := clampf((d - FOG_START) / (FOG_WHITE - FOG_START), 0.0, 1.0)
+	if player.godmode or player.dead:
+		f = 0.0
+	_fog_rect.color.a = f * f  # eases in, hits solid white right at the bound
+	if _env_ref:
+		_env_ref.fog_enabled = f > 0.0
+		_env_ref.fog_light_color = Color(1, 1, 1)
+		_env_ref.fog_density = f * 0.05
+	if f < 1.0 or d < 1.0:
+		return
+	# Whited out: about-face toward the center (camera too, so W walks back)
+	var dir := Vector3(-hpos.x, 0.0, -hpos.y).normalized()
+	var yaw := atan2(-dir.x, -dir.z)
+	if player.camera_rig:
+		player.camera_rig.yaw = yaw
+	if player.vehicle != null and is_instance_valid(player.vehicle):
+		var veh: CharacterBody3D = player.vehicle
+		var vspd := maxf(Vector2(veh.velocity.x, veh.velocity.z).length(), 12.0)
+		veh.velocity.x = dir.x * vspd
+		veh.velocity.z = dir.z * vspd
+		veh.rotation.y = yaw
+	else:
+		var pspd := maxf(Vector2(player.velocity.x, player.velocity.z).length(), 8.0)
+		player.velocity.x = dir.x * pspd
+		player.velocity.z = dir.z * pspd
+
+
 # --- Environment ------------------------------------------------------------
 
 func _setup_environment() -> void:
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, -30, 0)
+	sun.rotation_degrees = Vector3(-50, -30, 0)
 	sun.shadow_enabled = true
+	sun.light_energy = 1.15
+	sun.light_color = Color(1.0, 0.95, 0.85)  # warm sun makes slopes read
 	add_child(sun)
 	var env := WorldEnvironment.new()
 	var e := Environment.new()
@@ -274,9 +363,20 @@ func _setup_environment() -> void:
 	e.background_mode = Environment.BG_SKY
 	e.sky = sky
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	e.ambient_light_energy = 0.7
+	e.ambient_light_energy = 0.55  # lower ambient: shading carries the shape
+	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.environment = e
+	_env_ref = e
 	add_child(env)
+	# Ambient bed: CC0 wind loop (opengameart.org/content/wind-whoosh-loop)
+	var wind := AudioStreamPlayer.new()
+	var wind_stream: AudioStreamOggVorbis = load("res://Audio/ambient_wind.ogg")
+	wind_stream = wind_stream.duplicate()
+	wind_stream.loop = true
+	wind.stream = wind_stream
+	wind.volume_db = -16.0
+	wind.autoplay = true
+	add_child(wind)
 
 
 # --- Editor UI ---------------------------------------------------------------
@@ -342,6 +442,19 @@ func _build_editor_ui() -> void:
 	bedrock_chip.add_theme_font_size_override("font_size", 11)
 	bedrock_chip.add_theme_color_override("font_color", Color(1, 1, 1, 0.3))
 	layer_col.add_child(bedrock_chip)
+
+	# SPAWN chip: click the canvas to drop the spawn (a building generates there)
+	_spawn_button = Button.new()
+	_spawn_button.text = "⌂ SPAWN"
+	_spawn_button.toggle_mode = true
+	_spawn_button.focus_mode = Control.FOCUS_NONE
+	_spawn_button.custom_minimum_size = Vector2(88, 34)
+	_spawn_button.add_theme_color_override("font_color", Color("#7dedb0"))
+	_spawn_button.pressed.connect(func():
+		_spawn_mode = _spawn_button.button_pressed
+		if _painter:
+			_painter.queue_redraw())
+	layer_col.add_child(_spawn_button)
 	_set_layer(_active_layer)
 
 	var buttons := HBoxContainer.new()
@@ -374,6 +487,9 @@ func _build_editor_ui() -> void:
 
 func _set_layer(li: int) -> void:
 	_active_layer = clampi(li, 0, LAYERS - 1)
+	_spawn_mode = false
+	if _spawn_button:
+		_spawn_button.button_pressed = false
 	for i in LAYERS:
 		if _layer_buttons[i]:
 			_layer_buttons[i].button_pressed = i == _active_layer
@@ -423,6 +539,11 @@ class PixelPainter extends Control:
 			return
 		var c := clampi(int(pos.x) / CELL, 0, 31)
 		var r := clampi(int(pos.y) / CELL, 0, 31)
+		if owner_scene._spawn_mode:
+			owner_scene._spawn_px = [r, c] if _paint_value == 1 else null
+			owner_scene._on_painted()
+			queue_redraw()
+			return
 		var bit := 1 << (31 - c)
 		var rows: Array = owner_scene._layers[owner_scene._active_layer]
 		if _paint_value == 1:
@@ -452,3 +573,10 @@ class PixelPainter extends Control:
 				elif _bit(active, r, c):
 					col = Color(LAYER_FILL[active])
 				draw_rect(rect, col)
+		# Spawn marker: the building generates on this pixel
+		var sp: Variant = owner_scene._spawn_px
+		if sp is Array:
+			var srect := Rect2(int(sp[1]) * CELL, int(sp[0]) * CELL, CELL - 1, CELL - 1)
+			draw_rect(srect, Color("#7dedb0"))
+			draw_rect(srect.grow(-3), Color("#0c2018"))
+			draw_rect(srect.grow(-5), Color("#7dedb0"))

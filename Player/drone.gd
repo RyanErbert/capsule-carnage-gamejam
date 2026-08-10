@@ -5,11 +5,24 @@ extends CharacterBody3D
 ## (15 vs 40) and moved with move_and_slide, so it can't pass through walls.
 
 const FLY_SPEED := 15.0
+const RETURN_SPEED := 42.0
 
 var camera_rig: Node3D
+var return_to: Node3D = null  # set on god-mode exit: fly home, then despawn
 
 
 func _physics_process(_delta: float) -> void:
+	if return_to != null:
+		if not is_instance_valid(return_to):
+			queue_free()
+			return
+		var to: Vector3 = return_to.global_position + Vector3(0, 1.5, 0) - global_position
+		if to.length() < 1.2:
+			queue_free()
+			return
+		# Straight flight home, no collisions — it always makes it back
+		global_position += to.normalized() * minf(RETURN_SPEED * _delta, to.length())
+		return
 	if get_viewport().gui_get_focus_owner() != null:
 		velocity = Vector3.ZERO
 		return

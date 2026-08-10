@@ -268,6 +268,11 @@ func _add_teleporter(t: Dictionary) -> void:
 func _physics_process(delta: float) -> void:
 	_time += delta
 
+	# Spawn beacons are editor furniture: only shown while in god mode
+	var editing: bool = player != null and player.godmode
+	for id in _spawn_markers:
+		_spawn_markers[id].visible = editing
+
 	# Pending-teleporter ghost (web: half-transparent green disc on first click)
 	var pending: Variant = _item_controller.pending_teleporter if _item_controller else null
 	if pending != null and _pending_ghost == null:

@@ -54,11 +54,10 @@ func _on_net_event(event: String, data: Variant) -> void:
 	if event == "itemPickedUp":
 		var item := str(data)
 		if item != "":
-			if inventory.size() < MAX_INVENTORY:
-				inventory.append({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
-			else:
-				# Full: new item becomes active, the rest shift right, slot 3 drops
-				inventory.push_front({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
+			# New item always takes slot 0 (picked up OR god-given); the rest
+			# shift right, and a fourth pushes the last one off the end.
+			inventory.push_front({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
+			if inventory.size() > MAX_INVENTORY:
 				inventory.resize(MAX_INVENTORY)
 			print("[items] picked up %s — inventory: %s" % [item, inventory])
 			inventory_changed.emit(inventory)
@@ -72,7 +71,9 @@ func _on_net_event(event: String, data: Variant) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
 		_mg_firing = false
-	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode:
+	# Weapons are offline in god mode AND while riding a vehicle (the drill's
+	# left-click carve owns the mouse there)
+	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode or player.vehicle != null:
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		# Web: mousedown starts the machinegun loop; anything else is consumeItem()
@@ -260,7 +261,7 @@ func _process(delta: float) -> void:
 
 	# Machinegun loop (web setInterval 80 ms while mousedown)
 	if _mg_firing:
-		if inventory.is_empty() or inventory[0]["type"] != "machinegun":
+		if inventory.is_empty() or inventory[0]["type"] != "machinegun" or player.vehicle != null:
 			_mg_firing = false
 		else:
 			_mg_timer -= delta

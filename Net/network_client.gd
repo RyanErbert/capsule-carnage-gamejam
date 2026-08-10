@@ -151,6 +151,12 @@ func _handle_frame(frame: String) -> void:
 					paint_rows = data
 				"gameSettings":
 					game_settings = data if data is Dictionary else {}
+				"gameEnded":
+					# Full reset: the server wiped the field and the grid
+					creative_grid = null
+					terrain_edits.clear()
+					paint_rows = null
+					spawn_points = []
 				"currentSpawns":
 					spawn_points = data if data is Array else []
 				"spawnPlaced":

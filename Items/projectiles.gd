@@ -19,10 +19,8 @@ const MINE_CRATER := 4.5
 const BULLET_CHIP_R := 2.0
 const BULLET_CHIP_ST := 0.25
 
-# Slayer death blast: crater + scorch mark left where a player popped
+# Slayer death blast: the crater carved into the terrain IS the death mark
 const DEATH_CRATER := 6.0
-const SCORCH_RADIUS := 5.0
-const MAX_SCORCH := 40
 
 @export var player: CharacterBody3D
 
@@ -33,7 +31,6 @@ var _mines: Dictionary = {}   # id -> {pos, node}
 var _coins: Dictionary = {}   # id -> {pos, vel, collect_timer, node}
 var _terrain_node: Node3D
 var _triggered_mines: Dictionary = {}
-var _scorches: Array = []
 
 
 func _ready() -> void:
@@ -244,44 +241,15 @@ func _on_explosion(data: Dictionary) -> void:
 	player.speed_cap = maxf(player.speed_cap, Vector2(player.velocity.x, player.velocity.z).length())
 
 
-## Slayer death: normal blast visuals + knockback, plus a scorch mark on
-## every client. Only the dead player's own client carves the crater (the
-## destruction-owner rule) and starts the local respawn countdown.
+## Slayer death: normal blast visuals + knockback for everyone. Only the
+## dead player's own client carves the crater (the destruction-owner rule)
+## and starts the local respawn countdown.
 func _on_player_died(data: Dictionary) -> void:
 	var pos := _vec3(data)
-	_add_scorch(pos)
 	_on_explosion({"x": pos.x, "y": pos.y, "z": pos.z})
 	if str(data.get("id", "")) == _self_id() and player:
 		_carve(pos, DEATH_CRATER, 1.0)
 		player.die_slayer(float(data.get("respawnMs", 4000.0)) / 1000.0)
-
-
-func _add_scorch(pos: Vector3) -> void:
-	var s := MeshInstance3D.new()
-	var disc := CylinderMesh.new()
-	disc.top_radius = SCORCH_RADIUS
-	disc.bottom_radius = SCORCH_RADIUS
-	disc.height = 0.08
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.05, 0.045, 0.04, 0.85)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.roughness = 1.0
-	disc.material = mat
-	s.mesh = disc
-	add_child(s)
-	# Rest on the pre-blast ground so the mark rings the crater
-	var ground_y := pos.y
-	if player:
-		var from := pos + Vector3(0, 2.0, 0)
-		var q := PhysicsRayQueryParameters3D.create(from, from + Vector3(0, -14.0, 0))
-		q.exclude = [player.get_rid()]
-		var hit := player.get_world_3d().direct_space_state.intersect_ray(q)
-		if hit:
-			ground_y = hit["position"].y
-	s.global_position = Vector3(pos.x, ground_y + 0.1, pos.z)
-	_scorches.append(s)
-	while _scorches.size() > MAX_SCORCH:
-		_scorches.pop_front().queue_free()
 
 
 func _on_apply_impulse(data: Dictionary) -> void:

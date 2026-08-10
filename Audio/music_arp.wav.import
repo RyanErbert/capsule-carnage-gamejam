@@ -2,13 +2,13 @@
 
 importer="wav"
 type="AudioStreamWAV"
-uid="uid://oy73flitaglx"
-path="res://.godot/imported/generator_hum.wav-a46adbea46e200a937213f63234a8a73.sample"
+uid="uid://wptgt8vovwwe"
+path="res://.godot/imported/music_arp.wav-2b19e244377c9135cf021f1165f83c18.sample"
 
 [deps]
 
-source_file="res://Audio/generator_hum.wav"
-dest_files=["res://.godot/imported/generator_hum.wav-a46adbea46e200a937213f63234a8a73.sample"]
+source_file="res://Audio/music_arp.wav"
+dest_files=["res://.godot/imported/music_arp.wav-2b19e244377c9135cf021f1165f83c18.sample"]
 
 [params]
 

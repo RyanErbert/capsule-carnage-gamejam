@@ -132,8 +132,35 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 // erased = pit), main, +1, +2. Each layer is 32 uint32 row bitmasks, bit
 // (31-col) = filled. Bedrock below the ground layer is implicit/uneditable.
 let creativeLayers = null;   // [4][32] after normLayers
+let creativeSpawn = null;    // painted spawn pixel [r, c] — a building generates there
 let terrainEdits = [];
 let paintLayers = null;  // in-progress editor canvas, live-synced between painters
+let paintSpawn = null;
+
+function normSpawn(g) {
+  if (!g || !Array.isArray(g.spawn) || g.spawn.length !== 2) return null;
+  const r = Math.max(0, Math.min(31, Math.floor(Number(g.spawn[0]) || 0)));
+  const c = Math.max(0, Math.min(31, Math.floor(Number(g.spawn[1]) || 0)));
+  return [r, c];
+}
+
+// The painted spawn pixel becomes a real spawn point with a building on it,
+// re-applied on every generate/rebuild (rebuild clears models).
+function applyPaintedSpawn() {
+  const spIdx = spawnPoints.findIndex(s => s.id === 'spawn-paint');
+  if (spIdx !== -1) { spawnPoints.splice(spIdx, 1); io.emit('spawnRemoved', 'spawn-paint'); }
+  const mIdx = activeModels.findIndex(m => m.id === 'bldg-paint');
+  if (mIdx !== -1) { activeModels.splice(mIdx, 1); io.emit('modelRemoved', 'bldg-paint'); }
+  if (!creativeSpawn) return;
+  const x = -64 + creativeSpawn[1] * 4 + 2;
+  const z = -64 + creativeSpawn[0] * 4 + 2;
+  const sp = { id: 'spawn-paint', x, y: 2, z };
+  spawnPoints.push(sp);
+  io.emit('spawnPlaced', sp);
+  const model = { id: 'bldg-paint', model: 'building_1.glb', x, y: 1, z, ry: 0 };
+  activeModels.push(model);
+  io.emit('modelPlaced', model);
+}
 
 function normLayers(g) {
   if (!g || !Array.isArray(g.layers) || g.layers.length !== 4) return null;
@@ -148,7 +175,7 @@ function normLayers(g) {
 // --- Global game settings (server-authoritative, alert on change) ---
 const gameSettings = {
   slayer: true,              // DEFAULT gamemode: coins are health (start 100)
-  infiniteAmmo: false,
+  infiniteAmmo: true,        // default ON per Ryan
   selfAssign: true,          // players may give themselves items via the god menu
   allowMidgameChanges: true, // when false, settings freeze while a game is running
   speedScale: 0.7,           // global movement tuning
@@ -177,6 +204,20 @@ function checkDeath(id) {
   sysMsg(`${players[id].name} exploded.`);
   // The death blast damages everyone nearby (chain deaths welcome).
   explosionDamage(pos, id);
+  // A tiny generator is left at the corpse (~30 energy, varying)
+  const minis = activeGenerators.filter(g => g.mini);
+  if (minis.length >= MAX_MINI_GENS) {
+    const oldest = minis[0];
+    activeGenerators.splice(activeGenerators.indexOf(oldest), 1);
+    io.emit('generatorRemoved', oldest.id);
+  }
+  const miniGen = {
+    id: 'gen-death-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+    x: pos.x, y: pos.y + 0.8, z: pos.z, holder: null,
+    energy: 20 + Math.floor(Math.random() * 21), mini: true
+  };
+  activeGenerators.push(miniGen);
+  io.emit('generatorPlaced', miniGen);
   io.emit('scores', scores);
   setTimeout(() => {
     delete deadUntil[id];
@@ -253,23 +294,29 @@ function explosionDamage(pos, excludeId) {
 }
 
 // --- Generators (Slayer): humming heal stations, draggable with E ---
-const activeGenerators = [];  // { id, x, y, z, holder }
+// energy is the finite heal pool (shown above the generator); each +1 heal
+// burns 1 energy, and an empty generator disappears. mini = corpse drop.
+const activeGenerators = [];  // { id, x, y, z, holder, energy, mini }
 const GEN_HEAL_RANGE = 4.5;
+const GEN_ENERGY = 150;
+const MAX_MINI_GENS = 12;
 
 function autoPlaceGenerator() {
   activeGenerators.length = 0;
   if (creativeLayers) {
-    const ground = creativeLayers[0], main = creativeLayers[1];
+    const ground = creativeLayers[0];
+    const walls = creativeLayers[1].map((v, r) => v | creativeLayers[2][r] | creativeLayers[3][r]);
     // First walkable pixel scanning outward-ish from the center
     let placed = false;
     for (let ring = 0; ring < 14 && !placed; ring++) {
       for (let r = 16 - ring; r <= 16 + ring && !placed; r += Math.max(1, 2 * ring)) {
         for (let c = 16 - ring; c <= 16 + ring && !placed; c++) {
           if (r < 1 || r > 30 || c < 1 || c > 30) continue;
-          if (((main[r] >>> (31 - c)) & 1) === 1) continue;   // wall
+          if (((walls[r] >>> (31 - c)) & 1) === 1) continue;  // wall column
           if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
           activeGenerators.push({
-            id: 'gen-auto', x: -64 + c * 4 + 2, y: 1.2, z: -64 + r * 4 + 2, holder: null
+            id: 'gen-auto', x: -64 + c * 4 + 2, y: 1.2, z: -64 + r * 4 + 2,
+            holder: null, energy: GEN_ENERGY, mini: false
           });
           placed = true;
         }
@@ -279,20 +326,34 @@ function autoPlaceGenerator() {
   io.emit('currentGenerators', activeGenerators);
 }
 
-// Heal +1 per 2 s while standing near a generator (Slayer only).
+// Heal +1 per 2 s while standing near a generator (Slayer only). Each heal
+// burns 1 energy from the generator used; an empty generator disappears.
 setInterval(() => {
   if (!gameSettings.slayer || activeGenerators.length === 0) return;
   let changed = false;
+  const touched = new Set();
   for (const id of readyIds) {
     const p = players[id];
     if (!p || isDead(id)) continue;
     for (const g of activeGenerators) {
+      if (g.energy <= 0) continue;
       const dx = p.x - g.x, dy = p.y - g.y, dz = p.z - g.z;
       if (dx * dx + dy * dy + dz * dz <= GEN_HEAL_RANGE * GEN_HEAL_RANGE) {
         scores[id] = (scores[id] || 0) + 1;
+        g.energy -= 1;
+        touched.add(g);
         changed = true;
         break;
       }
+    }
+  }
+  for (const g of touched) {
+    if (g.energy <= 0) {
+      const idx = activeGenerators.indexOf(g);
+      if (idx !== -1) activeGenerators.splice(idx, 1);
+      io.emit('generatorRemoved', g.id);
+    } else {
+      io.emit('generatorEnergy', { id: g.id, energy: g.energy });
     }
   }
   if (changed) io.emit('scores', scores);
@@ -377,13 +438,15 @@ function finishEndVote(passed) {
 function autoPopulatePedestals() {
   if (!creativeLayers) return;
   pedestals.length = 0;
-  const ground = creativeLayers[0], main = creativeLayers[1];
+  const ground = creativeLayers[0];
+  // Autofill means paint on any upper layer implies a column at main level
+  const walls = creativeLayers[1].map((v, r) => v | creativeLayers[2][r] | creativeLayers[3][r]);
   const types = ['green', 'red', 'green', 'red', 'yellow'];
   let n = 0;
   outer:
   for (let r = 2; r < 30; r += 5) {
     for (let c = 2; c < 30; c += 5) {
-      if (((main[r] >>> (31 - c)) & 1) === 1) continue;   // wall
+      if (((walls[r] >>> (31 - c)) & 1) === 1) continue;  // wall column
       if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
       pedestals.push({
         id: 'auto-' + r + '-' + c,
@@ -423,10 +486,13 @@ function rebuildMap() {
   io.emit('currentVehicles', []);
   autoPopulatePedestals();
   autoPlaceGenerator();
+  applyPaintedSpawn();
   pickRandomHolder();
   io.emit('mapRebuilt', { layers: creativeLayers });
 }
 
+// Ending the game is a FULL wipe: every placed object clears off the field
+// and the painted grid resets, so the next lobby starts from scratch.
 function endGame() {
   if (endVote) { clearTimeout(endVote.timer); endVote = null; }
   for (const id of Object.keys(scores)) scores[id] = startingScore();
@@ -434,6 +500,34 @@ function endGame() {
   holderID = null;
   io.emit('holderChanged', holderID);
   readyIds.clear();
+  terrainEdits = [];
+  creativeLayers = null;
+  creativeSpawn = null;
+  paintLayers = null;
+  paintSpawn = null;
+  pedestals.length = 0;
+  spawnPoints.length = 0;
+  activeTeleporters.length = 0;
+  activeMines.length = 0;
+  activeCoins.length = 0;
+  activePads.length = 0;
+  activeBuilds.length = 0;
+  activeModels.length = 0;
+  activeChannels.length = 0;
+  activeCastles.length = 0;
+  activeVehicles.length = 0;
+  activeGenerators.length = 0;
+  io.emit('currentPedestals', []);
+  io.emit('currentSpawns', []);
+  io.emit('currentTeleporters', []);
+  io.emit('currentMines', []);
+  io.emit('currentPads', []);
+  io.emit('currentBuilds', []);
+  io.emit('currentModels', []);
+  io.emit('currentChannels', []);
+  io.emit('currentCastles', []);
+  io.emit('currentVehicles', []);
+  io.emit('currentGenerators', []);
   if (levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
   io.emit('gameEnded');
 }
@@ -512,10 +606,10 @@ io.on('connection', (socket) => {
   // Creative-level snapshot on plain connection (scenes load after connect,
   // so this must not wait for 'ready').
   if (creativeLayers) {
-    socket.emit('creativeGrid', { layers: creativeLayers });
+    socket.emit('creativeGrid', { layers: creativeLayers, spawn: creativeSpawn });
     socket.emit('terrainEdits', terrainEdits);
   }
-  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers });
+  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers, spawn: paintSpawn });
   socket.emit('gameSettings', gameSettings);
   socket.emit('currentSpawns', spawnPoints);
 
@@ -537,11 +631,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeCastle', (c) => {
-    if (!c || !c.a || !c.b) return;
+    if (!c || !Array.isArray(c.nodes) || c.nodes.length < 2) return;
     const castle = {
       id: (typeof c.id === 'string' && c.id) ? c.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
-      a: { x: +c.a.x || 0, y: +c.a.y || 0, z: +c.a.z || 0 },
-      b: { x: +c.b.x || 0, y: +c.b.y || 0, z: +c.b.z || 0 },
+      nodes: c.nodes.slice(0, 16).map(n => ({ x: +n.x || 0, y: +n.y || 0, z: +n.z || 0 })),
       arch: !!c.arch
     };
     activeCastles.push(castle);
@@ -643,17 +736,20 @@ io.on('connection', (socket) => {
     const layers = normLayers(g);
     if (!layers) return;
     paintLayers = layers;
-    socket.broadcast.emit('creativePaint', { layers: paintLayers });
+    paintSpawn = normSpawn(g);
+    socket.broadcast.emit('creativePaint', { layers: paintLayers, spawn: paintSpawn });
   });
 
   socket.on('creativeGrid', (g) => {
     const layers = normLayers(g);
     if (!layers) return;
     creativeLayers = layers;
+    creativeSpawn = normSpawn(g);
     terrainEdits = [];
-    io.emit('creativeGrid', { layers: creativeLayers });
+    io.emit('creativeGrid', { layers: creativeLayers, spawn: creativeSpawn });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
     autoPlaceGenerator();     // and one heal generator near the center
+    applyPaintedSpawn();      // painted spawn pixel -> spawn point + building
   });
 
   socket.on('terrainEdit', (e) => {
@@ -906,11 +1002,22 @@ io.on('connection', (socket) => {
     checkDeath(socket.id);
   });
 
+  // Self-inflicted health cost (the drill runs on your life)
+  socket.on('selfDamage', (n) => {
+    if (!gameSettings.slayer || !players[socket.id] || isDead(socket.id)) return;
+    const amt = Math.min(3, Math.max(0, Math.floor(Number(n) || 0)));
+    if (!amt) return;
+    scores[socket.id] = Math.max(0, (scores[socket.id] || 0) - amt);
+    io.emit('scores', scores);
+    checkDeath(socket.id);
+  });
+
   socket.on('placeGenerator', (g) => {
     if (!g || typeof g.x !== 'number') return;
     const gen = {
       id: (typeof g.id === 'string' && g.id) ? g.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
-      x: +g.x, y: +g.y, z: +g.z, holder: null
+      x: +g.x, y: +g.y, z: +g.z, holder: null,
+      energy: GEN_ENERGY, mini: false
     };
     activeGenerators.push(gen);
     io.emit('generatorPlaced', gen);
