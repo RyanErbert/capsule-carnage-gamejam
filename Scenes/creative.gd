@@ -8,12 +8,11 @@ extends Node3D
 ## ('creativeGrid' / 'terrainEdit'); joiners get a snapshot on connect, so
 ## everyone sculpts the same world.
 ##
-## In play: hold Q to dig, hold F to fill, at the crosshair.
+## Terraforming is gated: god mode has DIG/FILL tools (god_menu.gd) and the
+## drill vehicle carves while driving — no free sculpting during normal play.
 
 const PIXELS := 32
-const BRUSH_RADIUS := 3.0
-const BRUSH_INTERVAL := 0.08    # ~12 soft strokes/s reads as continuous
-const BRUSH_STRENGTH := 0.5     # per stroke — full carve in ~2 ticks at center
+const BRUSH_RADIUS := 3.0       # default radius for replayed edits
 const KILL_Y := -20.0           # below the world: instant respawn backstop
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
@@ -26,8 +25,6 @@ var _rows: Array = []          # 32 ints, bit (31-col) = wall
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
-var _brush_cd := 0.0
-var _brush_marker: MeshInstance3D
 
 
 func _ready() -> void:
@@ -183,22 +180,15 @@ func _spawn_gameplay() -> void:
 	castles.set_script(load("res://Items/castle.gd"))
 	add_child(castles)
 
+	var vehicles := Node3D.new()
+	vehicles.name = "WorldVehicles"
+	vehicles.set_script(load("res://Vehicles/world_vehicles.gd"))
+	vehicles.player = player
+	add_child(vehicles)
+
 	var hud := HudScene.instantiate()
 	hud.sync_node = sync
 	add_child(hud)
-
-	_brush_marker = MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = BRUSH_RADIUS
-	sphere.height = BRUSH_RADIUS * 2.0
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(1.0, 1.0, 1.0, 0.15)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	sphere.material = mat
-	_brush_marker.mesh = sphere
-	_brush_marker.visible = false
-	add_child(_brush_marker)
 
 
 ## Spawns scattered across the OPEN (unfilled) pixels, one per 3x3 block of
@@ -217,55 +207,21 @@ func _spawn_points() -> Array:
 const WALL_TOP_HEIGHT := 16.0
 
 
-# --- Terraforming (Q dig / F fill at the crosshair) ------------------------
+# --- World backstops --------------------------------------------------------
+# (riding a vehicle: world_vehicles.gd rescues the vehicle + driver instead)
 
-func _physics_process(delta: float) -> void:
-	if not _playing or player == null:
+func _physics_process(_delta: float) -> void:
+	if not _playing or player == null or player.vehicle != null:
 		return
 	# Backstop: anything that slips below the world snaps back to a spawn
 	if player.global_position.y < KILL_Y:
 		player.global_position = player.respawn_point()
 		player.velocity = Vector3.ZERO
-	# Filled-in terrain can embed the player (own or remote F-strokes);
+	# Filled-in terrain can embed the player (remote FILL strokes); the
 	# depenetration then shoves them through the floor. Pop upward instead.
 	if terrain and terrain.density_at(player.global_position + Vector3(0, 0.2, 0)) > 0.55:
 		player.global_position.y += 1.0
 		player.velocity.y = maxf(player.velocity.y, 0.0)
-	_brush_cd = maxf(0.0, _brush_cd - delta)
-	var busy: bool = get_viewport().gui_get_focus_owner() != null \
-		or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode
-	var dig: bool = not busy and Input.is_key_pressed(KEY_Q)
-	var fill: bool = not busy and Input.is_key_pressed(KEY_F)
-	if not dig and not fill:
-		_brush_marker.visible = false
-		return
-	var target: Variant = _aim_point()
-	if target == null:
-		_brush_marker.visible = false
-		return
-	_brush_marker.visible = true
-	_brush_marker.global_position = target
-	if _brush_cd > 0.0:
-		return
-	_brush_cd = BRUSH_INTERVAL
-	var s := -1.0 if dig else 1.0
-	if terrain.apply_brush(target, BRUSH_RADIUS, s, BRUSH_STRENGTH):
-		Net.emit_event("terrainEdit", {
-			"x": target.x, "y": target.y, "z": target.z,
-			"r": BRUSH_RADIUS, "s": s, "st": BRUSH_STRENGTH,
-		})
-
-
-func _aim_point() -> Variant:
-	var cam := get_viewport().get_camera_3d()
-	if cam == null:
-		return null
-	var from := cam.global_position
-	var to := from + (-cam.global_transform.basis.z) * 100.0
-	var q := PhysicsRayQueryParameters3D.create(from, to)
-	q.exclude = [player.get_rid()]
-	var hit := player.get_world_3d().direct_space_state.intersect_ray(q)
-	return hit["position"] if hit else null
 
 
 # --- Environment ------------------------------------------------------------
@@ -312,7 +268,7 @@ func _build_editor_ui() -> void:
 	box.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "orange = rock wall (16 m), dark = canyon floor\nleft-drag paints, right-drag erases - in game: Q digs, F fills"
+	hint.text = "orange = rock wall (16 m), dark = canyon floor\nleft-drag paints, right-drag erases"
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))

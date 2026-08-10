@@ -70,6 +70,7 @@ var air_time := 0.0
 var spawn_position := Vector3.ZERO
 var spawn_points: Array = []  # optional; respawns pick randomly (web randomSpawn)
 var godmode := false
+var vehicle: Node3D = null    # riding: body glued to the seat, collider off
 
 
 func respawn_point() -> Vector3:
@@ -109,10 +110,33 @@ func set_it(is_it: bool) -> void:
 		_cube_visual.set_outline_visible(is_it)
 
 
+## Riding a vehicle: the body sits on the seat and the vehicle's physics
+## drive everything. world_vehicles.gd owns mount/dismount and server sync.
+func enter_vehicle(v: Node3D) -> void:
+	vehicle = v
+	velocity = Vector3.ZERO
+	air_time = 0.0
+	charging_jump = false
+	if _items:
+		_items.is_grappling = false
+	if capsuleCollider:
+		capsuleCollider.disabled = true
+
+
+func exit_vehicle() -> void:
+	if vehicle and is_instance_valid(vehicle):
+		global_position = vehicle.global_position \
+			+ vehicle.global_transform.basis.x * 2.2 + Vector3(0, 1.0, 0)
+		velocity = vehicle.velocity
+	if capsuleCollider:
+		capsuleCollider.disabled = false
+	vehicle = null
+
+
 ## Self-destruct (K or /kill): blow up — the server sheds your score as
 ## coins for anyone nearby to loot — then respawn at a spawn point.
 func suicide() -> void:
-	if godmode:
+	if godmode or vehicle != null:
 		return
 	Net.emit_event("triggerExplosion", {
 		"x": global_position.x, "y": global_position.y, "z": global_position.z,
@@ -151,6 +175,14 @@ func _god_idle(delta: float) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if vehicle != null:
+		if is_instance_valid(vehicle):
+			global_position = vehicle.seat_pos()
+			velocity = vehicle.velocity
+			return
+		vehicle = null
+		if capsuleCollider:
+			capsuleCollider.disabled = false
 	if godmode:
 		_god_idle(delta)
 		return

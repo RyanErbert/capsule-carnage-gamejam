@@ -16,6 +16,12 @@ const GIVE_ITEMS := [
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"], ["spawn", "#7dedb0"], ["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["delete", "#aaaaaa"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
+const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
+# Terrain sculpting is god-mode only now (or the drill vehicle, in play)
+const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"]]
+const CARVE_RADIUS := 3.0
+const CARVE_INTERVAL := 0.08
+const CARVE_STRENGTH := 0.5
 
 var _player: CharacterBody3D
 var _world_items: Node
@@ -35,6 +41,10 @@ var _build_ghosts: Dictionary = {}
 var _ghost_mat: StandardMaterial3D
 var _grid_points: MultiMeshInstance3D
 var _grid_center := Vector3(1e9, 0, 0)
+# Dig/fill: hold LEFT mouse to carve continuously at the cursor
+var _carve_hold := false
+var _carve_cd := 0.0
+var _terrain_node: Node3D
 
 
 func _ready() -> void:
@@ -62,6 +72,10 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_R and visible and _tool.begins_with("build:"):
 			_build_rot = (_build_rot + 1) % 4
+	# Mouse release anywhere (UI included) ends a dig/fill stroke
+	if event is InputEventMouseButton and not event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT:
+		_carve_hold = false
 
 
 func toggle() -> void:
@@ -169,6 +183,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
 			_status.text = "%d point%s - click CHANNEL again to finish" % [_channel_nodes.size(), "" if _channel_nodes.size() == 1 else "s"]
+		elif _tool == "dig" or _tool == "fill":
+			_carve_hold = true
+			_carve_at(pos)
+		elif _tool.begins_with("vehicle:"):
+			Net.emit_event("placeVehicle", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"kind": _tool.substr(8),
+				"x": pos.x, "y": pos.y + 1.6, "z": pos.z, "ry": 0.0,
+			})
+			_status.text = "%s placed (E mounts it)" % _tool.substr(8)
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -185,9 +209,36 @@ func _unhandled_input(event: InputEvent) -> void:
 			_status.text = "%s pedestal placed" % _tool
 
 
+## Terrain sculpting (god-mode dig/fill): carve at the cursor while the
+## mouse is held. Same brush + sync path as the old in-play Q/F terraform.
+func _terrain() -> Node3D:
+	if _terrain_node == null or not is_instance_valid(_terrain_node):
+		_terrain_node = get_tree().get_first_node_in_group("voxel_terrain")
+	return _terrain_node
+
+
+func _carve_at(pos: Vector3) -> void:
+	var t := _terrain()
+	if t == null:
+		_status.text = "no sculptable terrain on this map"
+		return
+	var s := -1.0 if _tool == "dig" else 1.0
+	if t.apply_brush(pos, CARVE_RADIUS, s, CARVE_STRENGTH):
+		Net.emit_event("terrainEdit", {
+			"x": pos.x, "y": pos.y, "z": pos.z,
+			"r": CARVE_RADIUS, "s": s, "st": CARVE_STRENGTH,
+		})
+
+
 ## Hover feedback: build ghost + grid-point cloud, and the delete tool's
 ## red highlight over whatever a click would remove (web behavior).
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_carve_cd = maxf(0.0, _carve_cd - delta)
+	if _carve_hold and visible and (_tool == "dig" or _tool == "fill") and _carve_cd <= 0.0:
+		var carve_hit := _mouse_ray(get_viewport().get_mouse_position())
+		if not carve_hit.is_empty():
+			_carve_cd = CARVE_INTERVAL
+			_carve_at(carve_hit["position"])
 	var building := visible and _tool.begins_with("build:")
 	if _grid_points:
 		_grid_points.visible = building
@@ -344,6 +395,11 @@ func _find_delete_target(pos: Vector3) -> Dictionary:
 		var cw: Dictionary = castles.nearest_deletable(pos)
 		if not cw.is_empty():
 			candidates.append(cw.merged({"event": "removeCastle", "kind": "castle wall"}))
+	var vehicles: Node = get_tree().get_first_node_in_group("world_vehicles")
+	if vehicles:
+		var vh: Dictionary = vehicles.nearest_deletable(pos)
+		if not vh.is_empty():
+			candidates.append(vh.merged({"event": "removeVehicle", "kind": "vehicle"}))
 	var best: Dictionary = {}
 	for c in candidates:
 		if best.is_empty() or c["dist"] < best["dist"]:
@@ -392,8 +448,10 @@ func _set_tool(tool_name: String) -> void:
 	if _status:
 		if tool_name == "channel":
 			_status.text = "click points along the route, then click CHANNEL again to finish"
+		elif tool_name == "dig" or tool_name == "fill":
+			_status.text = "hold LEFT mouse on the terrain to %s" % tool_name
 		elif tool_name != "":
-			_status.text = "tool: %s - left-click the map" % tool_name.trim_prefix("prop:").trim_suffix(".glb")
+			_status.text = "tool: %s - left-click the map" % tool_name.trim_prefix("prop:").trim_prefix("vehicle:").trim_suffix(".glb")
 		else:
 			_status.text = "GIVE an item, or arm a tool"
 
@@ -427,13 +485,13 @@ func _build_ui() -> void:
 	add_child(root)
 
 	var title := Label.new()
-	title.text = "GOD MODE  (~ to exit)"
+	title.text = "GOD MODE  (Q or ~ to exit)"
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	title.add_theme_font_size_override("font_size", 16)
 	root.add_child(title)
 
 	var help := Label.new()
-	help.text = "fly: WASD + Space/E up, Shift/Q down\nlook: hold RIGHT mouse and drag"
+	help.text = "fly: WASD + Space/E up, Shift down\nlook: hold RIGHT mouse and drag"
 	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	help.add_theme_font_size_override("font_size", 11)
 	root.add_child(help)
@@ -497,6 +555,39 @@ func _build_ui() -> void:
 		bb.pressed.connect(_on_tool_pressed.bind(tool_id))
 		build_row.add_child(bb)
 		_tool_buttons[tool_id] = bb
+
+	var terrain_label := Label.new()
+	terrain_label.text = "TERRAIN (hold LEFT mouse)"
+	terrain_label.add_theme_font_size_override("font_size", 12)
+	terrain_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	root.add_child(terrain_label)
+
+	var terrain_row := HBoxContainer.new()
+	terrain_row.add_theme_constant_override("separation", 6)
+	root.add_child(terrain_row)
+	for entry in TERRAIN_TOOLS:
+		var tb := _mk_button(entry[0], Color(entry[1]))
+		tb.toggle_mode = true
+		tb.pressed.connect(_on_tool_pressed.bind(entry[0]))
+		terrain_row.add_child(tb)
+		_tool_buttons[entry[0]] = tb
+
+	var veh_label := Label.new()
+	veh_label.text = "VEHICLES (E mounts)"
+	veh_label.add_theme_font_size_override("font_size", 12)
+	veh_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	root.add_child(veh_label)
+
+	var veh_row := HBoxContainer.new()
+	veh_row.add_theme_constant_override("separation", 6)
+	root.add_child(veh_row)
+	for entry in VEHICLE_TOOLS:
+		var tool_id: String = "vehicle:" + str(entry[0])
+		var vb := _mk_button(entry[0], Color(entry[1]))
+		vb.toggle_mode = true
+		vb.pressed.connect(_on_tool_pressed.bind(tool_id))
+		veh_row.add_child(vb)
+		_tool_buttons[tool_id] = vb
 
 	var props_label := Label.new()
 	props_label.text = "PROPS"

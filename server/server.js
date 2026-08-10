@@ -145,6 +145,12 @@ const gameSettings = {
 // --- Castle walls (parametric, brick-built) ---
 const activeCastles = [];  // { id, a:{x,y,z}, b:{x,y,z}, arch }
 
+// --- Vehicles (Ghost-style hover + drill) ---
+// driver is a socket id while mounted, null while parked. The driver's client
+// is the physics authority: it relays vehicleMoved at ~20 Hz and everyone
+// else interpolates.
+const activeVehicles = [];  // { id, kind:'ghost'|'drill', x, y, z, ry, driver }
+
 // --- Placeable spawn points ---
 const spawnPoints = [];  // { id, x, y, z }
 
@@ -246,6 +252,7 @@ function rebuildMap() {
   activeModels.length = 0;
   activeChannels.length = 0;
   activeCastles.length = 0;
+  activeVehicles.length = 0;
   for (const id of Object.keys(scores)) scores[id] = 0;
   io.emit('scores', scores);
   io.emit('currentTeleporters', []);
@@ -255,6 +262,7 @@ function rebuildMap() {
   io.emit('currentModels', []);
   io.emit('currentChannels', []);
   io.emit('currentCastles', []);
+  io.emit('currentVehicles', []);
   autoPopulatePedestals();
   pickRandomHolder();
   io.emit('mapRebuilt', { pixels: creativePixels });
@@ -388,6 +396,54 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('placeVehicle', (v) => {
+    if (!v || (v.kind !== 'ghost' && v.kind !== 'drill')) return;
+    const veh = {
+      id: (typeof v.id === 'string' && v.id) ? v.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      kind: v.kind,
+      x: +v.x || 0, y: +v.y || 0, z: +v.z || 0, ry: +v.ry || 0,
+      driver: null
+    };
+    activeVehicles.push(veh);
+    io.emit('vehiclePlaced', veh);
+  });
+
+  socket.on('removeVehicle', (id) => {
+    const idx = activeVehicles.findIndex(v => v.id === id);
+    if (idx !== -1) {
+      activeVehicles.splice(idx, 1);
+      io.emit('vehicleRemoved', id);
+    }
+  });
+
+  socket.on('mountVehicle', (id) => {
+    const veh = activeVehicles.find(v => v.id === id);
+    if (!veh) return;
+    // Taken by someone still connected? Re-assert the real driver so the
+    // optimistic mount on the loser's client rolls back.
+    if (veh.driver && veh.driver !== socket.id && io.sockets.sockets.get(veh.driver)) {
+      socket.emit('vehicleDriver', { id: veh.id, driver: veh.driver });
+      return;
+    }
+    veh.driver = socket.id;
+    io.emit('vehicleDriver', { id: veh.id, driver: veh.driver });
+  });
+
+  socket.on('dismountVehicle', (id) => {
+    const veh = activeVehicles.find(v => v.id === id);
+    if (veh && veh.driver === socket.id) {
+      veh.driver = null;
+      io.emit('vehicleDriver', { id: veh.id, driver: null });
+    }
+  });
+
+  socket.on('vehicleMoved', (d) => {
+    const veh = d && activeVehicles.find(v => v.id === d.id);
+    if (!veh || veh.driver !== socket.id) return;
+    veh.x = +d.x || 0; veh.y = +d.y || 0; veh.z = +d.z || 0; veh.ry = +d.ry || 0;
+    socket.broadcast.emit('vehicleMoved', { id: veh.id, x: veh.x, y: veh.y, z: veh.z, ry: veh.ry });
+  });
+
   socket.on('placeSpawn', (s) => {
     if (!s || typeof s.x !== 'number') return;
     const sp = {
@@ -504,6 +560,7 @@ io.on('connection', (socket) => {
     socket.emit('currentModels', activeModels);
     socket.emit('currentChannels', activeChannels);
     socket.emit('currentCastles', activeCastles);
+    socket.emit('currentVehicles', activeVehicles);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
     socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
 
@@ -820,6 +877,13 @@ io.on('connection', (socket) => {
     delete scores[socket.id];
     readyIds.delete(socket.id);
     delete lastActivity[socket.id];
+    // Park any vehicle this player was driving.
+    for (const veh of activeVehicles) {
+      if (veh.driver === socket.id) {
+        veh.driver = null;
+        io.emit('vehicleDriver', { id: veh.id, driver: null });
+      }
+    }
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
     // Drop the player from any running vote and re-evaluate the tally.
     if (endVote && endVote.voters.has(socket.id)) {
