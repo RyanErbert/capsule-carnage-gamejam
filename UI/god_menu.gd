@@ -26,6 +26,14 @@ var _status: Label
 var _drone: CharacterBody3D
 var _channel_nodes: Array = []
 var _channel_markers: Array = []
+# God build mode (web: godmode build tools + the 9^3 grid-point cloud)
+const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
+var _build_rot := 0
+var _build_target: Dictionary = {}
+var _build_ghosts: Dictionary = {}
+var _ghost_mat: StandardMaterial3D
+var _grid_points: MultiMeshInstance3D
+var _grid_center := Vector3(1e9, 0, 0)
 
 
 func _ready() -> void:
@@ -47,9 +55,11 @@ func _find_refs() -> bool:
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_QUOTELEFT \
 			and get_viewport().gui_get_focus_owner() == null:
-		toggle()
+		if event.keycode == KEY_QUOTELEFT:
+			toggle()
+		elif event.keycode == KEY_R and visible and _tool.begins_with("build:"):
+			_build_rot = (_build_rot + 1) % 4
 
 
 func toggle() -> void:
@@ -134,6 +144,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
 			_status.text = "%d point%s — click CHANNEL again to finish" % [_channel_nodes.size(), "" if _channel_nodes.size() == 1 else "s"]
+		elif _tool.begins_with("build:"):
+			if not _build_target.is_empty():
+				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
+				_status.text = "%s placed (R rotates)" % _tool.substr(6)
 		elif _tool.begins_with("prop:"):
 			Net.emit_event("placeModel", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
@@ -144,6 +158,108 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			Net.emit_event("placePedestal", {"x": pos.x, "y": pos.y, "z": pos.z, "ry": 0.0, "type": _tool})
 			_status.text = "%s pedestal placed" % _tool
+
+
+## Ghost + floating grid-point cloud while a god build tool is armed
+## (web: 9^3 points at 4 u around the build area).
+func _process(_delta: float) -> void:
+	var building := visible and _tool.begins_with("build:")
+	if _grid_points:
+		_grid_points.visible = building
+	for t in _build_ghosts:
+		_build_ghosts[t].visible = false
+	if not building or _player == null:
+		_build_target = {}
+		return
+
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var mpos := get_viewport().get_mouse_position()
+	var from := cam.project_ray_origin(mpos)
+	var to := from + cam.project_ray_normal(mpos) * 200.0
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.exclude = [_player.get_rid()]
+	var hit := _player.get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		_build_target = {}
+		return
+	var target: Vector3 = hit["position"] + hit["normal"] * 0.1
+	var fx := floorf(target.x / 4.0) * 4.0 + 2.0
+	var fy := floorf(target.y / 4.0) * 4.0 + 2.0
+	var fz := floorf(target.z / 4.0) * 4.0 + 2.0
+	var type := _tool.substr(6)
+	if type == "wall":
+		match _build_rot:
+			0: fz -= 2.0
+			1: fx -= 2.0
+			2: fz += 2.0
+			3: fx += 2.0
+	elif type == "platform":
+		fy -= 1.5
+	_build_target = {"x": fx, "y": fy, "z": fz, "ry": _build_rot * (PI / 2.0), "rx": 0.0}
+
+	if not _build_ghosts.has(type):
+		_build_ghosts[type] = _make_build_ghost(type)
+	var ghost: MeshInstance3D = _build_ghosts[type]
+	ghost.visible = true
+	ghost.global_position = Vector3(fx, fy, fz)
+	ghost.rotation = Vector3(0, _build_rot * (PI / 2.0), 0)
+
+	# Grid cloud re-centers when the aimed cell changes
+	var center := Vector3(floorf(target.x / 4.0) * 4.0 + 2.0, floorf(target.y / 4.0) * 4.0 + 2.0, floorf(target.z / 4.0) * 4.0 + 2.0)
+	if _grid_points == null:
+		_grid_points = _make_grid_points()
+	if center.distance_to(_grid_center) > 0.1:
+		_grid_center = center
+		var mm := _grid_points.multimesh
+		var i := 0
+		for gx in range(-4, 5):
+			for gy in range(-4, 5):
+				for gz in range(-4, 5):
+					mm.set_instance_transform(i, Transform3D(Basis(), center + Vector3(gx, gy, gz) * 4.0 + Vector3(2, 2, 2)))
+					i += 1
+
+
+func _make_build_ghost(type: String) -> MeshInstance3D:
+	if _ghost_mat == null:
+		_ghost_mat = StandardMaterial3D.new()
+		_ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_ghost_mat.albedo_color = Color(0.3, 0.6, 1.0, 0.4)
+		_ghost_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var g := MeshInstance3D.new()
+	match type:
+		"ramp":
+			g.mesh = preload("res://Items/builds.gd").wedge_mesh(4.0, 4.0, 4.0)
+		"wall":
+			var wb := BoxMesh.new(); wb.size = Vector3(4, 4, 1); g.mesh = wb
+		"platform":
+			var pb := BoxMesh.new(); pb.size = Vector3(4, 1, 4); g.mesh = pb
+		_:
+			var bb := BoxMesh.new(); bb.size = Vector3(4, 4, 4); g.mesh = bb
+	g.material_override = _ghost_mat
+	_player.get_parent().add_child(g)
+	return g
+
+
+func _make_grid_points() -> MultiMeshInstance3D:
+	var mmi := MultiMeshInstance3D.new()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.07
+	sphere.height = 0.14
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(1, 1, 1, 0.35)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sphere.material = mat
+	mm.mesh = sphere
+	mm.instance_count = 9 * 9 * 9
+	mmi.multimesh = mm
+	_player.get_parent().add_child(mmi)
+	return mmi
 
 
 func _channel_marker(pos: Vector3) -> MeshInstance3D:
@@ -269,6 +385,23 @@ func _build_ui() -> void:
 		b.pressed.connect(_on_tool_pressed.bind(entry[0]))
 		tools.add_child(b)
 		_tool_buttons[entry[0]] = b
+
+	var build_label := Label.new()
+	build_label.text = "BUILD (free — click cells, R rotates)"
+	build_label.add_theme_font_size_override("font_size", 12)
+	build_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	root.add_child(build_label)
+
+	var build_row := HBoxContainer.new()
+	build_row.add_theme_constant_override("separation", 6)
+	root.add_child(build_row)
+	for btype in BUILD_TYPES:
+		var tool_id: String = "build:" + str(btype)
+		var bb := _mk_button(str(btype), Color("#7fb2ff"))
+		bb.toggle_mode = true
+		bb.pressed.connect(_on_tool_pressed.bind(tool_id))
+		build_row.add_child(bb)
+		_tool_buttons[tool_id] = bb
 
 	var props_label := Label.new()
 	props_label.text = "PROPS"
