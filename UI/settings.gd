@@ -14,6 +14,7 @@ var color := Color("#b5651d")
 var model := "bear"            # "bear" | "cube"
 var starting_weapon := "none"
 var infinite_ammo := false
+var movement := "web"          # "web" (Cube Fight physics) | "source" (bhop/air-strafe)
 
 
 func _ready() -> void:

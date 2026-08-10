@@ -34,6 +34,23 @@ const IDLE_SMOOTHING := 0.25
 # --- God mode (web §6.8: free-fly at 40, no gravity/collisions) ---
 const GOD_FLY_SPEED := 40.0
 
+# --- Source-style movement (Settings.movement == "source") ---
+# 1:1 port of the Source SDK ground-friction / Accelerate / AirAccelerate
+# step (gamemovement.cpp lineage — the same math GoldGdt recreates), scaled
+# at SRC_U meters per Hammer unit so the 320 HU/s run speed lands on this
+# map's 18 u/s sprint. Bunny-hopping and air-strafing work: friction is
+# skipped on the frame you jump, and there is no horizontal speed cap.
+const SRC_U := 0.05625
+const SRC_GRAVITY := 800.0 * SRC_U       # 45.0
+const SRC_FRICTION := 4.0
+const SRC_STOPSPEED := 100.0 * SRC_U     # 5.625
+const SRC_ACCEL := 10.0
+const SRC_AIRACCEL := 10.0
+const SRC_AIRCAP := 30.0 * SRC_U         # 1.6875 — the air-strafe magic number
+const SRC_WALKSPEED := 190.0 * SRC_U     # 10.7
+const SRC_RUNSPEED := 320.0 * SRC_U      # 18.0
+const SRC_JUMP := 268.3 * SRC_U          # 15.1 (sqrt(2*800*45) HU/s)
+
 @export var camera_rig: Node3D
 @export var capsuleCollider: CollisionShape3D
 @export var devInfoLabel: Label
@@ -142,68 +159,72 @@ func _physics_process(delta: float) -> void:
 		if sprint_exhausted and sprint_stamina >= SPRINT_DURATION:
 			sprint_exhausted = false
 
-	# --- Horizontal acceleration ---
-	var accel := SPRINT_ACCEL if sprinting else MOVE_ACCEL
-	velocity.x += wish_dir.x * accel * delta
-	velocity.z += wish_dir.z * accel * delta
-
-	# --- Damping (cannon linearDamping 0.1 on all axes) ---
-	var damp := exp(-LINEAR_DAMPING * delta)
-	velocity.x *= damp
-	velocity.z *= damp
-
-	# --- Ground friction when idle (approximates contact friction 0.7) ---
-	if is_on_floor() and input_mag == 0.0:
-		var floor_damp := exp(-FLOOR_FRICTION * delta)
-		velocity.x *= floor_damp
-		velocity.z *= floor_damp
-
-	# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
-	var cap_target := SPRINT_SPEED if sprinting else MAX_SPEED
-	speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
 	var grappling: bool = _items != null and _items.is_grappling
-	var h_vel := Vector2(velocity.x, velocity.z)
-	if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
-		h_vel = h_vel.normalized() * speed_cap
-		velocity.x = h_vel.x
-		velocity.z = h_vel.y
 
-	# --- Gravity ---
-	if not is_on_floor():
-		velocity.y -= GRAVITY * delta
+	if Settings.movement == "source":
+		_source_step(delta, wish_dir, typing)
+	else:
+		# --- Horizontal acceleration ---
+		var accel := SPRINT_ACCEL if sprinting else MOVE_ACCEL
+		velocity.x += wish_dir.x * accel * delta
+		velocity.z += wish_dir.z * accel * delta
 
-	# --- Jump: hold to charge, release to fire (web §3.4) ---
-	jump_cooldown = maxf(0.0, jump_cooldown - delta)
-	jump_buffer = maxf(0.0, jump_buffer - delta)
-	var can_jump := (now - last_grounded_time) < COYOTE_TIME
+		# --- Damping (cannon linearDamping 0.1 on all axes) ---
+		var damp := exp(-LINEAR_DAMPING * delta)
+		velocity.x *= damp
+		velocity.z *= damp
 
-	if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
-		if not charging_jump:
-			charging_jump = true
+		# --- Ground friction when idle (approximates contact friction 0.7) ---
+		if is_on_floor() and input_mag == 0.0:
+			var floor_damp := exp(-FLOOR_FRICTION * delta)
+			velocity.x *= floor_damp
+			velocity.z *= floor_damp
+
+		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
+		var cap_target := SPRINT_SPEED if sprinting else MAX_SPEED
+		speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
+		var h_vel := Vector2(velocity.x, velocity.z)
+		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
+			h_vel = h_vel.normalized() * speed_cap
+			velocity.x = h_vel.x
+			velocity.z = h_vel.y
+
+		# --- Gravity ---
+		if not is_on_floor():
+			velocity.y -= GRAVITY * delta
+
+		# --- Jump: hold to charge, release to fire (web §3.4) ---
+		jump_cooldown = maxf(0.0, jump_cooldown - delta)
+		jump_buffer = maxf(0.0, jump_buffer - delta)
+		var can_jump := (now - last_grounded_time) < COYOTE_TIME
+
+		if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
+			if not charging_jump:
+				charging_jump = true
+				jump_charge = 1.0
+			jump_charge = minf(MAX_CHARGE_MULT, jump_charge + CHARGE_RATE * delta)
+		elif charging_jump:
+			charging_jump = false
+			if can_jump:
+				velocity.y = JUMP_IMPULSE * jump_charge
+				jump_cooldown = jump_charge
+				jump_cooldown_max = jump_charge
+				last_grounded_time = -1000.0
+				Sfx.jump(global_position)
+				Net.emit_event("jump")  # others hear it via playerJumped
+			else:
+				jump_buffer = JUMP_BUFFER_TIME
 			jump_charge = 1.0
-		jump_charge = minf(MAX_CHARGE_MULT, jump_charge + CHARGE_RATE * delta)
-	elif charging_jump:
-		charging_jump = false
-		if can_jump:
-			velocity.y = JUMP_IMPULSE * jump_charge
-			jump_cooldown = jump_charge
-			jump_cooldown_max = jump_charge
+
+		# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
+		if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
+			velocity.y = JUMP_IMPULSE
+			jump_cooldown = 1.0
+			jump_cooldown_max = 1.0
+			jump_buffer = 0.0
 			last_grounded_time = -1000.0
 			Sfx.jump(global_position)
-			Net.emit_event("jump")  # others hear it via playerJumped
-		else:
-			jump_buffer = JUMP_BUFFER_TIME
-		jump_charge = 1.0
-
-	# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
-	if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
-		velocity.y = JUMP_IMPULSE
-		jump_cooldown = 1.0
-		jump_cooldown_max = 1.0
-		jump_buffer = 0.0
-		last_grounded_time = -1000.0
-		Sfx.jump(global_position)
-		Net.emit_event("jump")
+			Net.emit_event("jump")
 
 	# --- Floor snap: off while ascending so jumps aren't eaten ---
 	floor_snap_length = 0.0 if velocity.y > 0.0 else 0.3
@@ -235,6 +256,57 @@ func _physics_process(delta: float) -> void:
 
 	_update_dev_info()
 	move_and_slide()
+
+
+## One tick of Source movement: gravity, hop, friction, accelerate.
+## Hold Space to auto-hop on landing — the friction step is skipped on jump
+## frames, which is exactly what makes bunny-hopping conserve speed.
+func _source_step(delta: float, wish_dir: Vector3, typing: bool) -> void:
+	charging_jump = false
+	jump_cooldown = maxf(0.0, jump_cooldown - delta)
+	if not is_on_floor():
+		velocity.y -= SRC_GRAVITY * delta
+	elif not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
+		velocity.y = SRC_JUMP
+		jump_cooldown = 0.1  # debounce so one landing = one hop
+		jump_cooldown_max = 0.1
+		Sfx.jump(global_position)
+		Net.emit_event("jump")
+	else:
+		_source_friction(delta)
+
+	var maxspeed := SRC_RUNSPEED if sprinting else SRC_WALKSPEED
+	var wish_speed := wish_dir.length() * maxspeed
+	if wish_speed > 0.001:
+		var dirn := wish_dir.normalized()
+		if is_on_floor():
+			_source_accelerate(dirn, wish_speed, wish_speed, SRC_ACCEL, delta)
+		else:
+			_source_accelerate(dirn, wish_speed, SRC_AIRCAP, SRC_AIRACCEL, delta)
+
+
+func _source_friction(delta: float) -> void:
+	var speed := Vector2(velocity.x, velocity.z).length()
+	if speed < 0.001:
+		return
+	var control := maxf(speed, SRC_STOPSPEED)
+	var drop := control * SRC_FRICTION * delta
+	var scale := maxf(speed - drop, 0.0) / speed
+	velocity.x *= scale
+	velocity.z *= scale
+
+
+## Source's Accelerate/AirAccelerate quirk, kept intact: the ADD limit uses
+## the capped wishspeed, but the acceleration RATE uses the uncapped one.
+func _source_accelerate(wishdir: Vector3, wish_speed: float, cap: float, accel: float, delta: float) -> void:
+	var wishspd := minf(wish_speed, cap)
+	var current := velocity.x * wishdir.x + velocity.z * wishdir.z
+	var add_speed := wishspd - current
+	if add_speed <= 0.0:
+		return
+	var accel_speed := minf(accel * wish_speed * delta, add_speed)
+	velocity.x += accel_speed * wishdir.x
+	velocity.z += accel_speed * wishdir.z
 
 
 func _update_dev_info() -> void:

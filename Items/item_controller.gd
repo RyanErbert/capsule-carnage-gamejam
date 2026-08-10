@@ -53,8 +53,13 @@ func _ready() -> void:
 func _on_net_event(event: String, data: Variant) -> void:
 	if event == "itemPickedUp":
 		var item := str(data)
-		if inventory.size() < MAX_INVENTORY and item != "":
-			inventory.append({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
+		if item != "":
+			if inventory.size() < MAX_INVENTORY:
+				inventory.append({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
+			else:
+				# Full: new item becomes active, the rest shift right, slot 3 drops
+				inventory.push_front({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
+				inventory.resize(MAX_INVENTORY)
 			print("[items] picked up %s — inventory: %s" % [item, inventory])
 			inventory_changed.emit(inventory)
 	elif event == "gameEnded" or event == "kicked":

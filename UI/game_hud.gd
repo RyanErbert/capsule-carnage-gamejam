@@ -314,6 +314,7 @@ func _build_esc_menu() -> void:
 	_esc_menu.offset_bottom = 80
 	_esc_menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_esc_menu.grow_vertical = Control.GROW_DIRECTION_BOTH
+	add_child(_esc_menu)
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.03, 0.04, 0.07, 0.92)
 	style.border_color = Color(1, 1, 1, 0.25)

@@ -117,6 +117,14 @@ func _build_ui() -> void:
 	model_opt.item_selected.connect(func(i: int): Settings.model = "cube" if i == 1 else "bear")
 	box.add_child(model_opt)
 
+	box.add_child(_row_label("MOVEMENT"))
+	var move_opt := OptionButton.new()
+	move_opt.add_item("Cube Fight (web physics)")
+	move_opt.add_item("Source-style (bhop / air-strafe)")
+	move_opt.select(1 if Settings.movement == "source" else 0)
+	move_opt.item_selected.connect(func(i: int): Settings.movement = "source" if i == 1 else "web")
+	box.add_child(move_opt)
+
 	box.add_child(_row_label("STARTING WEAPON"))
 	var weapon_opt := OptionButton.new()
 	for w in Settings.WEAPONS:
