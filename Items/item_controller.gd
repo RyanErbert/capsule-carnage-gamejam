@@ -127,6 +127,14 @@ func use_item() -> void:
 			})
 			pending_teleporter = null
 			_shift_inventory()
+		"block", "wall", "ramp", "platform":
+			var builds := get_parent().get_node_or_null("BuildController")
+			if builds:
+				builds.try_place()
+		"bridge_gun":
+			var bridge := get_parent().get_node_or_null("BuildController")
+			if bridge:
+				bridge.fire_bridge_gun()
 		"rocket":
 			if _rocket_cd > 0.0:
 				return
@@ -140,8 +148,7 @@ func use_item() -> void:
 			_rocket_cd = ROCKET_COOLDOWN
 			_use_ammo()
 		_:
-			# block/wall/ramp/platform/bridge_gun: build system is phase 6.
-			print("[items] '%s' not usable yet — comes in a later port phase" % item)
+			print("[items] unknown item '%s'" % item)
 
 
 ## Web getAimDirection: aim at the level hit if it's beyond 15 u, else at a

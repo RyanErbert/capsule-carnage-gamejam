@@ -38,6 +38,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		pitch = clampf(pitch + event.relative.y * MOUSE_SENSITIVITY, CAM_PITCH_MIN, CAM_PITCH_MAX)
 		_mouse_idle_timer = 0.0
 	elif event is InputEventMouseButton and event.pressed:
+		# Scroll adjusts build reach instead of camera zoom while placing builds
+		var builder: Node = _player.get_node_or_null("BuildController")
+		if builder and builder.is_build_active():
+			return
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			base_chain_length = clampf(base_chain_length - 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
