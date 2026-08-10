@@ -5,7 +5,10 @@ extends Control
 ## Map select is omitted — the Godot game plays the TrenchBroom testworld.
 ## FRIENDSLOP_AUTOJOIN=1 skips straight into the game (headless testing).
 
-const GAME_SCENE := "res://Scenes/testworld.tscn"
+const LEVELS := {
+	"testworld": "res://Scenes/testworld.tscn",
+	"creative": "res://Scenes/creative.tscn",
+}
 
 var _status: Label
 var _players_label: Label
@@ -51,7 +54,7 @@ func _refresh_status() -> void:
 func _join() -> void:
 	if _name_edit.text.strip_edges() != "":
 		Settings.player_name = _name_edit.text.strip_edges().left(16)
-	get_tree().change_scene_to_file(GAME_SCENE)
+	get_tree().change_scene_to_file(LEVELS.get(Settings.level, LEVELS["testworld"]))
 
 
 # --- UI (code-built) -------------------------------------------------------
@@ -116,6 +119,14 @@ func _build_ui() -> void:
 	model_opt.select(1 if Settings.model == "cube" else 0)
 	model_opt.item_selected.connect(func(i: int): Settings.model = "cube" if i == 1 else "bear")
 	box.add_child(model_opt)
+
+	box.add_child(_row_label("MAP"))
+	var level_opt := OptionButton.new()
+	level_opt.add_item("Testworld (TrenchBroom map)")
+	level_opt.add_item("Creative (paint your own canyon)")
+	level_opt.select(1 if Settings.level == "creative" else 0)
+	level_opt.item_selected.connect(func(i: int): Settings.level = "creative" if i == 1 else "testworld")
+	box.add_child(level_opt)
 
 	box.add_child(_row_label("MOVEMENT"))
 	var move_opt := OptionButton.new()

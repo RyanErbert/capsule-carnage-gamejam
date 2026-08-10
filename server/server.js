@@ -125,6 +125,12 @@ const LEVEL_SPAWN_POINTS = {
 function getSpawnPoints() { return LEVEL_SPAWN_POINTS[activeLevel] || LEVEL_SPAWN_POINTS['level_1.glb']; }
 function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Math.random() * pts.length)]; }
 
+// --- Creative-level terrain state (Godot client) ---
+// The painted pixel grid (32 ints, one bitmask per row) plus every brush
+// stroke since, replayed to late joiners so everyone sculpts the same world.
+let creativePixels = null;
+let terrainEdits = [];
+
 // --- Pedestal state ---
 const pedestals = [];
 const ITEMS_BY_CATEGORY = {
@@ -263,6 +269,28 @@ io.on('connection', (socket) => {
     holder: holderID,
     build: SERVER_BUILD,
     uptimeMs: Date.now() - STARTED_AT
+  });
+
+  // Creative-level snapshot on plain connection (scenes load after connect,
+  // so this must not wait for 'ready').
+  if (creativePixels) {
+    socket.emit('creativeGrid', creativePixels);
+    socket.emit('terrainEdits', terrainEdits);
+  }
+
+  socket.on('creativeGrid', (rows) => {
+    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return;
+    creativePixels = rows.slice(0, 64).map(Number);
+    terrainEdits = [];
+    io.emit('creativeGrid', creativePixels);
+  });
+
+  socket.on('terrainEdit', (e) => {
+    if (!e || typeof e.x !== 'number' || typeof e.y !== 'number' || typeof e.z !== 'number') return;
+    const edit = { x: +e.x, y: +e.y, z: +e.z, r: Math.min(Math.abs(+e.r) || 3, 12), s: e.s >= 0 ? 1 : -1 };
+    terrainEdits.push(edit);
+    if (terrainEdits.length > 20000) terrainEdits.shift();
+    socket.broadcast.emit('terrainEdit', edit);
   });
 
   // Latency probe for the spectator dashboard (socket.io ack round-trip).

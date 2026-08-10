@@ -15,6 +15,7 @@ var model := "bear"            # "bear" | "cube"
 var starting_weapon := "none"
 var infinite_ammo := false
 var movement := "web"          # "web" (Cube Fight physics) | "source" (bhop/air-strafe)
+var level := "testworld"       # "testworld" | "creative"
 
 
 func _ready() -> void:
@@ -23,6 +24,8 @@ func _ready() -> void:
 		player_name = env_name.left(16)
 	if OS.get_environment("FRIENDSLOP_MODEL").to_lower() == "cube":
 		model = "cube"
+	if OS.get_environment("FRIENDSLOP_LEVEL") != "":
+		level = OS.get_environment("FRIENDSLOP_LEVEL")
 
 
 func color_hex() -> String:

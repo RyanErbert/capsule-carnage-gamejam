@@ -21,6 +21,11 @@ var _ws := WebSocketPeer.new()
 var _url := ""
 var _handshake_done := false
 var _was_open := false
+
+## Creative-level world state, cached so a scene opened later can catch up
+## (the server sends the snapshot on connection, long before scenes exist).
+var creative_grid: Variant = null
+var terrain_edits: Array = []
 var _reconnect_timer := 0.0
 
 
@@ -75,12 +80,20 @@ func is_socket_connected() -> bool:
 	return _handshake_done and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN
 
 
+## Events emitted before the handshake finishes wait here (socket.io buffers
+## the same way) — e.g. the creative level announces its grid right after a
+## main-thread-blocking terrain build, when the handshake may not be done.
+var _outbox: Array = []
+
 func emit_event(event: String, data: Variant = null) -> void:
-	if not is_socket_connected():
-		return
 	var payload: Array = [event]
 	if data != null:
 		payload.append(data)
+	if not is_socket_connected():
+		_outbox.append(payload)
+		if _outbox.size() > 64:
+			_outbox.pop_front()
+		return
 	_ws.send_text("42" + JSON.stringify(payload))
 
 
@@ -112,6 +125,9 @@ func _handle_frame(frame: String) -> void:
 		_ws.send_text("40")  # engine.io open -> join default namespace
 	elif frame.begins_with("40"):
 		_handshake_done = true
+		for payload in _outbox:
+			_ws.send_text("42" + JSON.stringify(payload))
+		_outbox.clear()
 		socket_connected.emit()
 	elif frame == "2":
 		_ws.send_text("3")  # ping -> pong
@@ -120,4 +136,12 @@ func _handle_frame(frame: String) -> void:
 		if parsed is Array and parsed.size() >= 1:
 			var event: String = str(parsed[0])
 			var data: Variant = parsed[1] if parsed.size() > 1 else null
+			match event:
+				"creativeGrid":
+					creative_grid = data
+					terrain_edits.clear()
+				"terrainEdit":
+					terrain_edits.append(data)
+				"terrainEdits":
+					terrain_edits = data if data is Array else []
 			event_received.emit(event, data)

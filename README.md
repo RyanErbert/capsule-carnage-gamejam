@@ -25,8 +25,18 @@ and SFX. `PORT_BLUEPRINT.md` maps every system back to the web source.
 | Tab | Hold for scoreboard |
 | Esc | Pause menu (resume / vote end game / quit) |
 | ~ | God mode: fly (Space/E up, Shift/Q down), give items, place pedestals |
+| Q / F | Creative map only: dig / fill terrain at the crosshair |
 | F9 | Update your game (git pull) when the version banner says you're behind |
 | F10 | Trigger a server redeploy when the banner says the server is behind |
+
+## Maps
+
+- **Testworld** — the TrenchBroom map.
+- **Creative** — paint a 32x32 pixel grid (orange = 16 m rock wall, dark =
+  canyon floor); GENERATE extrudes it into a 128x128 m destructible canyon.
+  Q digs, F fills (Astroneer-style smooth terrain, surface-nets remeshing).
+  The world and every brush stroke sync through the server, so whoever joins
+  later sculpts the same terrain.
 
 ## Version sync
 
