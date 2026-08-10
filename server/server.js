@@ -136,8 +136,14 @@ let paintRows = null;  // in-progress editor canvas, live-synced between painter
 const gameSettings = {
   infiniteAmmo: false,
   selfAssign: true,          // players may give themselves items via the god menu
-  allowMidgameChanges: true  // when false, settings freeze while a game is running
+  allowMidgameChanges: true, // when false, settings freeze while a game is running
+  speedScale: 0.33,          // global movement tuning (Ryan: ~1/3 of web speeds)
+  jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
+  gravityScale: 1.0
 };
+
+// --- Castle walls (parametric, brick-built) ---
+const activeCastles = [];  // { id, a:{x,y,z}, b:{x,y,z}, arch }
 
 // --- Placeable spawn points ---
 const spawnPoints = [];  // { id, x, y, z }
@@ -239,6 +245,7 @@ function rebuildMap() {
   activeBuilds.length = 0;
   activeModels.length = 0;
   activeChannels.length = 0;
+  activeCastles.length = 0;
   for (const id of Object.keys(scores)) scores[id] = 0;
   io.emit('scores', scores);
   io.emit('currentTeleporters', []);
@@ -247,6 +254,7 @@ function rebuildMap() {
   io.emit('currentBuilds', []);
   io.emit('currentModels', []);
   io.emit('currentChannels', []);
+  io.emit('currentCastles', []);
   autoPopulatePedestals();
   pickRandomHolder();
   io.emit('mapRebuilt', { pixels: creativePixels });
@@ -349,10 +357,35 @@ io.on('connection', (socket) => {
       socket.emit('systemMessage', { text: 'Game settings are locked while a game is in progress.' });
       return;
     }
-    gameSettings[u.key] = !!u.value;
+    const numeric = typeof gameSettings[u.key] === 'number';
+    gameSettings[u.key] = numeric
+      ? Math.min(3, Math.max(0.05, Number(u.value) || 1))
+      : !!u.value;
     const who = players[socket.id] ? players[socket.id].name : 'Someone';
     io.emit('gameSettings', gameSettings);
-    sysMsg(`${who} turned ${u.key} ${gameSettings[u.key] ? 'ON' : 'OFF'}`);
+    sysMsg(numeric
+      ? `${who} set ${u.key} to ${gameSettings[u.key].toFixed(2)}`
+      : `${who} turned ${u.key} ${gameSettings[u.key] ? 'ON' : 'OFF'}`);
+  });
+
+  socket.on('placeCastle', (c) => {
+    if (!c || !c.a || !c.b) return;
+    const castle = {
+      id: (typeof c.id === 'string' && c.id) ? c.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      a: { x: +c.a.x || 0, y: +c.a.y || 0, z: +c.a.z || 0 },
+      b: { x: +c.b.x || 0, y: +c.b.y || 0, z: +c.b.z || 0 },
+      arch: !!c.arch
+    };
+    activeCastles.push(castle);
+    io.emit('castlePlaced', castle);
+  });
+
+  socket.on('removeCastle', (id) => {
+    const idx = activeCastles.findIndex(c => c.id === id);
+    if (idx !== -1) {
+      activeCastles.splice(idx, 1);
+      io.emit('castleRemoved', id);
+    }
   });
 
   socket.on('placeSpawn', (s) => {
@@ -470,6 +503,7 @@ io.on('connection', (socket) => {
     socket.emit('currentBuilds', activeBuilds);
     socket.emit('currentModels', activeModels);
     socket.emit('currentChannels', activeChannels);
+    socket.emit('currentCastles', activeCastles);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
     socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
 

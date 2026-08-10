@@ -73,13 +73,13 @@ func _refresh_status() -> void:
 		_status.text = "● server connected"
 		_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	else:
-		_status.text = "● disconnected — retrying... (free tier wakes in ~60 s)"
+		_status.text = "● disconnected - retrying... (free tier wakes in ~60 s)"
 		_status.add_theme_color_override("font_color", Color("#ff8080"))
 	_join_btn.disabled = not Net.is_socket_connected()
 	var lines: Array = []
 	for id in _players:
 		var p: Dictionary = _players[id]
-		lines.append("%s — %d" % [str(p.get("name", "???")), int(_scores.get(id, 0))])
+		lines.append("%s - %d" % [str(p.get("name", "???")), int(_scores.get(id, 0))])
 	_roster.text = "\n".join(lines) if lines.size() > 0 else "nobody in the arena yet"
 
 

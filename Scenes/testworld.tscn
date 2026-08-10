@@ -18,6 +18,7 @@
 [ext_resource type="Script" path="res://Items/projectiles.gd" id="17_proj"]
 [ext_resource type="Script" path="res://Items/builds.gd" id="18_builds"]
 [ext_resource type="Script" path="res://Items/props.gd" id="19_props"]
+[ext_resource type="Script" path="res://Items/castle.gd" id="20_castle"]
 [ext_resource type="PackedScene" path="res://UI/game_hud.tscn" id="15_hud"]
 
 [sub_resource type="Environment" id="Environment_ywrmy"]
@@ -1550,6 +1551,9 @@ script = ExtResource("18_builds")
 
 [node name="WorldProps" type="Node3D" parent="."]
 script = ExtResource("19_props")
+
+[node name="WorldCastles" type="Node3D" parent="."]
+script = ExtResource("20_castle")
 
 [node name="MultiplayerSync" type="Node" parent="." unique_id=203273616 node_paths=PackedStringArray("player")]
 script = ExtResource("14_netsync")

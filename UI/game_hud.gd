@@ -37,6 +37,7 @@ var _esc_menu: PanelContainer
 var _conn_pill: PanelContainer
 var _conn_style: StyleBoxFlat
 var _esc_toggles: Dictionary = {}
+var _esc_sliders: Dictionary = {}
 
 
 func _ready() -> void:
@@ -63,7 +64,7 @@ func _ready() -> void:
 
 func _on_version_mismatch(server_build: String, _client_build: String) -> void:
 	_update_banner.visible = true
-	_update_banner.text = "Version differs from server — checking who's behind..."
+	_update_banner.text = "Version differs from server - checking who's behind..."
 	# Let the banner render before blocking on git.
 	await get_tree().process_frame
 	_diagnose_mismatch(server_build)
@@ -79,13 +80,13 @@ func _diagnose_mismatch(server_build: String) -> void:
 	var we_are_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", "HEAD", server_build], [], true) == 0
 	if server_is_old:
 		_offer_server_kick = true
-		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min) — you'll be reconnected automatically." % [server_build, Net.git_commit()]
+		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min) - you'll be reconnected automatically." % [server_build, Net.git_commit()]
 	elif we_are_old:
 		_offer_pull = true
 		_update_banner.text = "YOUR GAME IS OUT OF DATE (you %s, server %s)\nPress F9 to update (runs git pull), then restart the game." % [Net.git_commit(), server_build]
 	else:
 		_offer_pull = true
-		_update_banner.text = "Your copy and the server have DIVERGED (you %s, server %s)\nPress F9 to try updating — if that fails, sort it out in git together." % [Net.git_commit(), server_build]
+		_update_banner.text = "Your copy and the server have DIVERGED (you %s, server %s)\nPress F9 to try updating - if that fails, sort it out in git together." % [Net.git_commit(), server_build]
 
 
 func _hotkey_input(event: InputEvent) -> void:
@@ -179,6 +180,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if data is Dictionary:
 				for key in _esc_toggles:
 					_esc_toggles[key].set_pressed_no_signal(bool(data.get(key, false)))
+				for key in _esc_sliders:
+					_esc_sliders[key].set_value_no_signal(clampf(float(data.get(key, 1.0)), 0.1, 2.0))
 				_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
 
 
@@ -219,12 +222,17 @@ func _run_git_pull() -> void:
 	var result := "".join(output).strip_edges()
 	if code == 0:
 		if result.contains("Already up to date"):
-			_update_banner.text = "You already have the latest — nothing to pull."
+			_update_banner.text = "You already have the latest - nothing to pull."
 		else:
-			_update_banner.text = "UPDATED — restart the game to play on the new version\n%s" % result.left(200)
+			# Self-restart on the new code: spawn a fresh instance with the
+			# same command line, then quit this one.
+			_update_banner.text = "UPDATED - restarting on the new build..."
+			await get_tree().create_timer(1.5).timeout
+			OS.create_process(OS.get_executable_path(), OS.get_cmdline_args())
+			get_tree().quit()
 	else:
 		_offer_pull = true
-		_update_banner.text = "Update failed (local changes? git missing?) — press F9 to retry\n%s" % result.left(200)
+		_update_banner.text = "Update failed (local changes? git missing?) - press F9 to retry\n%s" % result.left(200)
 
 
 func _trigger_server_deploy() -> void:
@@ -234,15 +242,15 @@ func _trigger_server_deploy() -> void:
 	add_child(req)
 	req.request_completed.connect(func(_r, code, _h, _b):
 		if code >= 200 and code < 300:
-			_update_banner.text = "Server redeploy started — give it ~2 minutes; you'll be reconnected automatically."
+			_update_banner.text = "Server redeploy started - give it ~2 minutes; you'll be reconnected automatically."
 		else:
 			_offer_server_kick = true
-			_update_banner.text = "Deploy hook failed (HTTP %d) — check the Render dashboard.\nPress F10 to retry." % code
+			_update_banner.text = "Deploy hook failed (HTTP %d) - check the Render dashboard.\nPress F10 to retry." % code
 		req.queue_free()
 	)
 	if req.request(DEPLOY_HOOK) != OK:
 		_offer_server_kick = true
-		_update_banner.text = "Could not reach the deploy hook — check your connection. Press F10 to retry."
+		_update_banner.text = "Could not reach the deploy hook - check your connection. Press F10 to retry."
 
 
 ## Sprint + jump-charge meters (web §6.3: 180x10 bars bottom-center).
@@ -329,10 +337,10 @@ func _build_esc_menu() -> void:
 	_esc_menu = PanelContainer.new()
 	_esc_menu.visible = false
 	_esc_menu.set_anchors_preset(Control.PRESET_CENTER)
-	_esc_menu.offset_left = -110
-	_esc_menu.offset_right = 110
-	_esc_menu.offset_top = -80
-	_esc_menu.offset_bottom = 80
+	_esc_menu.offset_left = -140
+	_esc_menu.offset_right = 140
+	_esc_menu.offset_top = -240
+	_esc_menu.offset_bottom = 240
 	_esc_menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_esc_menu.grow_vertical = Control.GROW_DIRECTION_BOTH
 	add_child(_esc_menu)
@@ -362,6 +370,30 @@ func _build_esc_menu() -> void:
 		check.toggled.connect(func(on: bool): Net.emit_event("updateGameSetting", {"key": entry[0], "value": on}))
 		box.add_child(check)
 		_esc_toggles[entry[0]] = check
+
+	# Physics sliders (server-wide)
+	for entry in [["speedScale", "Speed"], ["jumpScale", "Jump"], ["gravityScale", "Gravity"]]:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var lbl := Label.new()
+		lbl.text = entry[1]
+		lbl.custom_minimum_size = Vector2(52, 0)
+		lbl.add_theme_font_size_override("font_size", 12)
+		row.add_child(lbl)
+		var slider := HSlider.new()
+		slider.min_value = 0.1
+		slider.max_value = 2.0
+		slider.step = 0.01
+		slider.custom_minimum_size = Vector2(120, 0)
+		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slider.focus_mode = Control.FOCUS_NONE
+		slider.set_value_no_signal(clampf(float(Net.game_settings.get(entry[0], 1.0)), 0.1, 2.0))
+		slider.drag_ended.connect(func(changed: bool):
+			if changed:
+				Net.emit_event("updateGameSetting", {"key": entry[0], "value": slider.value}))
+		row.add_child(slider)
+		box.add_child(row)
+		_esc_sliders[entry[0]] = slider
 
 	for entry in [
 		["RESUME", func(): _toggle_esc_menu(false)],
@@ -455,5 +487,5 @@ func _refresh(scores: Dictionary) -> void:
 	var lines: Array = []
 	for row in rows:
 		var prefix := "[IT] " if row[0] == holder else ""
-		lines.append("%s%s — %d" % [prefix, sync_node.name_of(row[0]), row[1]])
+		lines.append("%s%s - %d" % [prefix, sync_node.name_of(row[0]), row[1]])
 	_scoreboard_text.text = "\n".join(lines)

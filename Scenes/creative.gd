@@ -178,6 +178,11 @@ func _spawn_gameplay() -> void:
 	props.set_script(load("res://Items/props.gd"))
 	add_child(props)
 
+	var castles := Node3D.new()
+	castles.name = "WorldCastles"
+	castles.set_script(load("res://Items/castle.gd"))
+	add_child(castles)
+
 	var hud := HudScene.instantiate()
 	hud.sync_node = sync
 	add_child(hud)
@@ -300,14 +305,14 @@ func _build_editor_ui() -> void:
 	center.add_child(box)
 
 	var title := Label.new()
-	title.text = "CREATIVE — paint the canyon"
+	title.text = "CREATIVE - paint the canyon"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 22)
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	box.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "orange = rock wall (16 m), dark = canyon floor\nleft-drag paints, right-drag erases — in game: Q digs, F fills"
+	hint.text = "orange = rock wall (16 m), dark = canyon floor\nleft-drag paints, right-drag erases - in game: Q digs, F fills"
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))

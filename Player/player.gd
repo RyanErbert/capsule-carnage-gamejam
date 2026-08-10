@@ -184,11 +184,16 @@ func _physics_process(delta: float) -> void:
 
 	var grappling: bool = _items != null and _items.is_grappling
 
+	# Global tuning sliders (Esc menu, server-synced)
+	var spd := clampf(float(Net.game_settings.get("speedScale", 0.33)), 0.05, 3.0)
+	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 3.0)
+	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 3.0)
+
 	if Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)
 	else:
 		# --- Horizontal acceleration ---
-		var accel := SPRINT_ACCEL if sprinting else MOVE_ACCEL
+		var accel := (SPRINT_ACCEL if sprinting else MOVE_ACCEL) * spd
 		velocity.x += wish_dir.x * accel * delta
 		velocity.z += wish_dir.z * accel * delta
 
@@ -204,7 +209,7 @@ func _physics_process(delta: float) -> void:
 			velocity.z *= floor_damp
 
 		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
-		var cap_target := SPRINT_SPEED if sprinting else MAX_SPEED
+		var cap_target := (SPRINT_SPEED if sprinting else MAX_SPEED) * spd
 		speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
 		var h_vel := Vector2(velocity.x, velocity.z)
 		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
@@ -214,7 +219,7 @@ func _physics_process(delta: float) -> void:
 
 		# --- Gravity ---
 		if not is_on_floor():
-			velocity.y -= GRAVITY * delta
+			velocity.y -= GRAVITY * grv * delta
 
 		# --- Jump: hold to charge, release to fire (web §3.4) ---
 		jump_cooldown = maxf(0.0, jump_cooldown - delta)
@@ -229,7 +234,7 @@ func _physics_process(delta: float) -> void:
 		elif charging_jump:
 			charging_jump = false
 			if can_jump:
-				velocity.y = JUMP_IMPULSE * jump_charge
+				velocity.y = JUMP_IMPULSE * jump_charge * jmp
 				jump_cooldown = jump_charge
 				jump_cooldown_max = jump_charge
 				last_grounded_time = -1000.0
@@ -241,7 +246,7 @@ func _physics_process(delta: float) -> void:
 
 		# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
 		if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
-			velocity.y = JUMP_IMPULSE
+			velocity.y = JUMP_IMPULSE * jmp
 			jump_cooldown = 1.0
 			jump_cooldown_max = 1.0
 			jump_buffer = 0.0
