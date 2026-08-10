@@ -287,7 +287,12 @@ io.on('connection', (socket) => {
 
   socket.on('terrainEdit', (e) => {
     if (!e || typeof e.x !== 'number' || typeof e.y !== 'number' || typeof e.z !== 'number') return;
-    const edit = { x: +e.x, y: +e.y, z: +e.z, r: Math.min(Math.abs(+e.r) || 3, 12), s: e.s >= 0 ? 1 : -1 };
+    const edit = {
+      x: +e.x, y: +e.y, z: +e.z,
+      r: Math.min(Math.abs(+e.r) || 3, 12),
+      s: e.s >= 0 ? 1 : -1,
+      st: Math.min(Math.abs(+e.st) || 1, 2)
+    };
     terrainEdits.push(edit);
     if (terrainEdits.length > 20000) terrainEdits.shift();
     socket.broadcast.emit('terrainEdit', edit);

@@ -12,7 +12,9 @@ extends Node3D
 
 const PIXELS := 32
 const BRUSH_RADIUS := 3.0
-const BRUSH_INTERVAL := 0.12
+const BRUSH_INTERVAL := 0.08    # ~12 soft strokes/s reads as continuous
+const BRUSH_STRENGTH := 0.5     # per stroke — full carve in ~2 ticks at center
+const KILL_Y := -20.0           # below the world: instant respawn backstop
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
@@ -56,7 +58,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if _playing and data is Dictionary and terrain:
 				terrain.apply_brush(
 					Vector3(data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0)),
-					float(data.get("r", BRUSH_RADIUS)), float(data.get("s", -1.0)))
+					float(data.get("r", BRUSH_RADIUS)), float(data.get("s", -1.0)),
+					float(data.get("st", 1.0)))
 
 
 ## JSON round-trips ints as floats — compare numerically, not by hash.
@@ -83,7 +86,7 @@ func _start_play(rows: Array, edits: Array, announce: bool) -> void:
 	for e in edits:
 		if e is Dictionary:
 			terrain.apply_brush(Vector3(e.get("x", 0.0), e.get("y", 0.0), e.get("z", 0.0)),
-				float(e.get("r", BRUSH_RADIUS)), float(e.get("s", -1.0)))
+				float(e.get("r", BRUSH_RADIUS)), float(e.get("s", -1.0)), float(e.get("st", 1.0)))
 	if announce:
 		Net.emit_event("creativeGrid", rows)
 	_editor_layer.visible = false
@@ -161,6 +164,10 @@ func _spawn_point() -> Vector3:
 func _physics_process(delta: float) -> void:
 	if not _playing or player == null:
 		return
+	# Backstop: anything that slips below the world snaps back to spawn
+	if player.global_position.y < KILL_Y:
+		player.global_position = _spawn_point()
+		player.velocity = Vector3.ZERO
 	_brush_cd = maxf(0.0, _brush_cd - delta)
 	var busy: bool = get_viewport().gui_get_focus_owner() != null \
 		or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode
@@ -179,8 +186,11 @@ func _physics_process(delta: float) -> void:
 		return
 	_brush_cd = BRUSH_INTERVAL
 	var s := -1.0 if dig else 1.0
-	if terrain.apply_brush(target, BRUSH_RADIUS, s):
-		Net.emit_event("terrainEdit", {"x": target.x, "y": target.y, "z": target.z, "r": BRUSH_RADIUS, "s": s})
+	if terrain.apply_brush(target, BRUSH_RADIUS, s, BRUSH_STRENGTH):
+		Net.emit_event("terrainEdit", {
+			"x": target.x, "y": target.y, "z": target.z,
+			"r": BRUSH_RADIUS, "s": s, "st": BRUSH_STRENGTH,
+		})
 
 
 func _aim_point() -> Variant:

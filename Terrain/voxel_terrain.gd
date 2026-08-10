@@ -42,10 +42,14 @@ const EDGES := [
 
 
 func _ready() -> void:
+	add_to_group("voxel_terrain")
 	_material = StandardMaterial3D.new()
 	_material.albedo_color = Color(0.78, 0.55, 0.38)  # canyon sandstone
 	_material.roughness = 0.95
 	_material.uv1_triplanar = true
+	# Some quad windings come out flipped per axis; normals are from the
+	# density gradient anyway, so render both sides instead of leaving cracks.
+	_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 
 func _idx(x: int, y: int, z: int) -> int:
@@ -113,14 +117,19 @@ func _seal_boundary() -> void:
 					_density[_idx(x, y, z)] = 0.0
 
 
+# Lattice rows at or below this index are bedrock — brushes can't touch them,
+# so you can dig trenches into the floor but never through it into the void.
+const BEDROCK_Y := 2  # world y = 0 (the canyon floor's top)
+
 ## Astroneer-style brush: add (sign +1) or carve (sign -1) a falloff sphere.
-## Returns true if anything changed (callers decide whether to network it).
-func apply_brush(center: Vector3, radius: float, sign_: float) -> bool:
+## `strength` scales the per-call amount so held-button strokes carve
+## gradually instead of stamping. Returns true if anything changed.
+func apply_brush(center: Vector3, radius: float, sign_: float, strength := 1.0) -> bool:
 	var changed := false
 	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var dirty := {}
-	for y in range(maxi(1, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
+	for y in range(maxi(BEDROCK_Y, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
 		for z in range(maxi(1, floori(lo.z)), mini(NZ - 1, ceili(hi.z)) + 1):
 			for x in range(maxi(1, floori(lo.x)), mini(NX - 1, ceili(hi.x)) + 1):
 				var p := ORIGIN + Vector3(x, y, z) * VOXEL
@@ -129,7 +138,7 @@ func apply_brush(center: Vector3, radius: float, sign_: float) -> bool:
 					continue
 				var falloff := 1.0 - dist / radius
 				var i := _idx(x, y, z)
-				var v := clampf(_density[i] + sign_ * falloff, 0.0, 1.0)
+				var v := clampf(_density[i] + sign_ * falloff * strength, 0.0, 1.0)
 				if not is_equal_approx(v, _density[i]):
 					_density[i] = v
 					changed = true
@@ -266,6 +275,7 @@ func _remesh_chunk(key: Vector2i) -> void:
 	var col := CollisionShape3D.new()
 	var shape := ConcavePolygonShape3D.new()
 	shape.set_faces(verts)
+	shape.backface_collision = true  # concave shapes are one-sided by default
 	col.shape = shape
 	body.add_child(col)
 	add_child(body)

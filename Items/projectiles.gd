@@ -13,6 +13,12 @@ const ROCKET_FUSE := 1.2       # rocket proximity + mine trigger distance
 const COIN_COLLECT_DIST := 1.5
 const COIN_GRAVITY := -20.0
 
+# Weapon terrain damage (Creative level — no-ops when there's no voxel field)
+const ROCKET_CRATER := 5.0
+const MINE_CRATER := 4.5
+const BULLET_CHIP_R := 2.0
+const BULLET_CHIP_ST := 0.25
+
 @export var player: CharacterBody3D
 
 var _sync: Node
@@ -20,6 +26,8 @@ var _bullets: Array = []   # {pos, vel, life, owner, node}
 var _rockets: Array = []   # {pos, vel, life, owner, node}
 var _mines: Dictionary = {}   # id -> {pos, node}
 var _coins: Dictionary = {}   # id -> {pos, vel, collect_timer, node}
+var _terrain_node: Node3D
+var _triggered_mines: Dictionary = {}
 
 
 func _ready() -> void:
@@ -36,6 +44,26 @@ func _remotes() -> Dictionary:
 	if _sync == null:
 		_sync = get_tree().get_first_node_in_group("net_sync")
 	return _sync.remotes() if _sync else {}
+
+
+func _terrain() -> Node3D:
+	if _terrain_node == null or not is_instance_valid(_terrain_node):
+		_terrain_node = get_tree().get_first_node_in_group("voxel_terrain")
+	return _terrain_node
+
+
+## Carve the destructible terrain AND network it, so every client (and every
+## late joiner, via the server's edit log) ends up with the same crater.
+## Only the destruction's owner calls this — others receive the terrainEdit.
+func _carve(pos: Vector3, radius: float, strength: float) -> void:
+	var t := _terrain()
+	if t == null:
+		return
+	if t.apply_brush(pos, radius, -1.0, strength):
+		Net.emit_event("terrainEdit", {
+			"x": pos.x, "y": pos.y, "z": pos.z,
+			"r": radius, "s": -1.0, "st": strength,
+		})
 
 
 func _on_net_event(event: String, data: Variant) -> void:
@@ -58,6 +86,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 			_add_mine(data)
 		"mineTriggered":
 			var id := str(data.get("id", ""))
+			_triggered_mines.erase(id)
 			if _mines.has(id):
 				_mines[id]["node"].queue_free()
 				_mines.erase(id)
@@ -248,11 +277,11 @@ func _explosion_vfx(pos: Vector3, is_mine: bool) -> void:
 
 # --- Simulation ------------------------------------------------------------
 
-func _ray_hit(from: Vector3, dir: Vector3, dist: float) -> bool:
+func _ray_hit(from: Vector3, dir: Vector3, dist: float) -> Dictionary:
 	var q := PhysicsRayQueryParameters3D.create(from, from + dir * dist)
 	if player:
 		q.exclude = [player.get_rid()]
-	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+	return get_world_3d().direct_space_state.intersect_ray(q)
 
 
 func _physics_process(delta: float) -> void:
@@ -266,7 +295,15 @@ func _physics_process(delta: float) -> void:
 		var vel: Vector3 = b["vel"]
 		b["pos"] += vel * delta
 		b["node"].position = b["pos"]
-		var hit: bool = b["pos"].y < 0.0 or _ray_hit(b["pos"], vel.normalized(), vel.length() * delta + 0.1)
+		var hit: bool = b["pos"].y < 0.0
+		if not hit:
+			var rh := _ray_hit(b["pos"], vel.normalized(), vel.length() * delta + 0.1)
+			if rh:
+				hit = true
+				# Owner's bullets chip the destructible terrain (Creative)
+				if b["owner"] == self_id and _terrain() != null \
+						and rh["collider"].get_parent() == _terrain():
+					_carve(rh["position"], BULLET_CHIP_R, BULLET_CHIP_ST)
 		if not hit and b["owner"] == self_id:
 			for id in remotes:
 				if remotes[id].global_position.distance_to(b["pos"]) < HIT_RADIUS:
@@ -294,8 +331,8 @@ func _physics_process(delta: float) -> void:
 		if rvel.length() > 0.01 and absf(rvel.normalized().dot(Vector3.UP)) < 0.999:
 			rnode.look_at(r["pos"] + rvel)
 		var boom: bool = r["pos"].y < 0.0 \
-			or _ray_hit(r["pos"], rvel.normalized(), rvel.length() * delta + 0.5) \
-			or _ray_hit(r["pos"], Vector3.DOWN, 0.5)
+			or not _ray_hit(r["pos"], rvel.normalized(), rvel.length() * delta + 0.5).is_empty() \
+			or not _ray_hit(r["pos"], Vector3.DOWN, 0.5).is_empty()
 		if not boom:
 			for id in remotes:
 				if id != r["owner"] and remotes[id].global_position.distance_to(r["pos"]) < ROCKET_FUSE:
@@ -307,16 +344,22 @@ func _physics_process(delta: float) -> void:
 		if boom or r["life"] <= 0.0:
 			if boom and r["owner"] == self_id:
 				Net.emit_event("triggerExplosion", {"x": r["pos"].x, "y": r["pos"].y, "z": r["pos"].z})
+				_carve(r["pos"], ROCKET_CRATER, 1.0)
 			rnode.queue_free()
 			_rockets.remove_at(i)
 
 	if player == null:
 		return
 
-	# Mines: trigger within 1.2 — web has no owner immunity or arming delay
+	# Mines: trigger within 1.2 — web has no owner immunity or arming delay.
+	# Whoever steps on it owns the crater (deduped: one trigger per mine).
 	for id in _mines:
+		if _triggered_mines.has(id):
+			continue
 		if player.global_position.distance_to(_mines[id]["pos"]) < ROCKET_FUSE:
+			_triggered_mines[id] = true
 			Net.emit_event("triggerMine", id)
+			_carve(_mines[id]["pos"], MINE_CRATER, 1.0)
 
 	# Coins (web §5.6): physics handled by the engine; collect < 1.5 after 1 s
 	var expired: Array = []
