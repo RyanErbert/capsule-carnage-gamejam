@@ -144,7 +144,7 @@ func _physics_process(delta: float) -> void:
 	if _send_accum < 1.0 / SEND_RATE:
 		return
 	_send_accum = 0.0
-	var q := player.global_transform.basis.get_rotation_quaternion()
+	var q: Quaternion = player.visual_quat()
 	Net.emit_event("playerMoved", {
 		"x": player.global_position.x,
 		"y": player.global_position.y,

@@ -67,7 +67,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"coinCollected":
 			var id := str(data)
 			if _coins.has(id):
-				Sfx.boost(_coins[id]["pos"], 0.6)
+				Sfx.boost(_coins[id]["node"].global_position, 0.6)
 				_coins[id]["node"].queue_free()
 				_coins.erase(id)
 
@@ -139,11 +139,23 @@ func _add_mine(m: Dictionary) -> void:
 	_mines[id] = {"pos": _vec3(m), "node": node}
 
 
+## Coins are real rigid bodies (web: cannon Cylinder mass 1) — they bounce,
+## tumble, and can be shoved around before being collected.
 func _add_coin(c: Dictionary) -> void:
 	var id := str(c.get("id", ""))
 	if id == "" or _coins.has(id):
 		return
-	var node := MeshInstance3D.new()
+	var body := RigidBody3D.new()
+	body.mass = 1.0
+	body.linear_damp = 0.1
+	body.angular_damp = 0.1
+	var col := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.3
+	shape.height = 0.1
+	col.shape = shape
+	body.add_child(col)
+	var mesh_inst := MeshInstance3D.new()
 	var cyl := CylinderMesh.new()
 	cyl.top_radius = 0.3
 	cyl.bottom_radius = 0.3
@@ -154,14 +166,16 @@ func _add_coin(c: Dictionary) -> void:
 	mat.emission = Color("#aa8800")
 	mat.emission_energy_multiplier = 1.2
 	cyl.material = mat
-	node.mesh = cyl
-	node.position = _vec3(c)
-	add_child(node)
+	mesh_inst.mesh = cyl
+	body.add_child(mesh_inst)
+	add_child(body)
+	body.global_position = _vec3(c)
+	body.linear_velocity = Vector3(c.get("vx", 0.0), c.get("vy", 0.0), c.get("vz", 0.0))
+	body.angular_velocity = Vector3(c.get("rx", 0.0), c.get("ry", 0.0), c.get("rz", 0.0))
 	_coins[id] = {
-		"pos": _vec3(c),
-		"vel": Vector3(c.get("vx", 0.0), c.get("vy", 0.0), c.get("vz", 0.0)),
 		"collect_timer": 1.0,  # web: uncollectable for the first second
-		"node": node,
+		"life": 15.0,          # server forgets coins after 15 s
+		"node": body,
 	}
 
 
@@ -304,26 +318,19 @@ func _physics_process(delta: float) -> void:
 		if player.global_position.distance_to(_mines[id]["pos"]) < ROCKET_FUSE:
 			Net.emit_event("triggerMine", id)
 
-	# Coins (web §5.6): light manual physics + terrain rest, collect < 1.5
+	# Coins (web §5.6): physics handled by the engine; collect < 1.5 after 1 s
+	var expired: Array = []
 	for id in _coins:
 		var c: Dictionary = _coins[id]
-		c["vel"].y += COIN_GRAVITY * delta
-		c["vel"] *= pow(0.9, delta)  # ~cannon linearDamping 0.1
-		c["pos"] += c["vel"] * delta
-		var cp: Vector3 = c["pos"]
-		var q := PhysicsRayQueryParameters3D.create(cp + Vector3(0, 0.6, 0), cp + Vector3(0, -80, 0))
-		q.exclude = [player.get_rid()]
-		var ground := get_world_3d().direct_space_state.intersect_ray(q)
-		if ground:
-			var rest_y: float = ground["position"].y + 0.06
-			if cp.y < rest_y:
-				c["pos"].y = rest_y
-				if c["vel"].y < 0.0:
-					c["vel"].y *= -0.3
-				c["vel"].x *= 0.6
-				c["vel"].z *= 0.6
-		c["node"].position = c["pos"]
 		c["collect_timer"] -= delta
-		if c["collect_timer"] <= 0.0 and player.global_position.distance_to(c["pos"]) < COIN_COLLECT_DIST:
+		c["life"] -= delta
+		if c["life"] <= 0.0:  # server has forgotten this coin — clean up quietly
+			c["node"].queue_free()
+			expired.append(id)
+			continue
+		if c["collect_timer"] <= 0.0 \
+				and player.global_position.distance_to(c["node"].global_position) < COIN_COLLECT_DIST:
 			c["collect_timer"] = 999.0
 			Net.emit_event("collectCoin", id)
+	for id in expired:
+		_coins.erase(id)

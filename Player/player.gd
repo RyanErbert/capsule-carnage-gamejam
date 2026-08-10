@@ -254,6 +254,13 @@ func _physics_process(delta: float) -> void:
 		smoothing = IDLE_SMOOTHING + (1.0 - IDLE_SMOOTHING) * _sprint_morph_t
 		_cube_visual.set_smoothing(smoothing)
 
+		# Roll with movement like the web's cannon body did: rolling without
+		# slipping, ω = v/r around the axis perpendicular to travel.
+		var h_roll := Vector3(velocity.x, 0.0, velocity.z)
+		if h_roll.length() > 0.3 and is_on_floor():
+			var axis := Vector3.UP.cross(h_roll.normalized()).normalized()
+			_cube_visual.global_rotate(axis, (h_roll.length() / 0.5) * delta)
+
 	_update_dev_info()
 	move_and_slide()
 
@@ -307,6 +314,14 @@ func _source_accelerate(wishdir: Vector3, wish_speed: float, cap: float, accel: 
 	var accel_speed := minf(accel * wish_speed * delta, add_speed)
 	velocity.x += accel_speed * wishdir.x
 	velocity.z += accel_speed * wishdir.z
+
+
+## Rotation sent over the network: the rolling cube's orientation when
+## playing the cube, else the body (bears don't tumble in their marble).
+func visual_quat() -> Quaternion:
+	if use_cube and _cube_visual:
+		return _cube_visual.global_transform.basis.get_rotation_quaternion()
+	return global_transform.basis.get_rotation_quaternion()
 
 
 func _update_dev_info() -> void:
