@@ -40,16 +40,14 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_models.erase(id)
 
 
-## Nearest prop id within `radius` ("" if none) — god menu delete tool.
-func prop_near(pos: Vector3, radius := 4.0) -> String:
-	var best_id := ""
-	var best := radius
+## Nearest prop within `radius` — god menu delete tool. {} if none.
+func nearest_deletable(pos: Vector3, radius := 4.0) -> Dictionary:
+	var best := {}
 	for id in _models:
 		var d: float = _models[id].global_position.distance_to(pos)
-		if d < best:
-			best = d
-			best_id = id
-	return best_id
+		if d < radius and (best.is_empty() or d < best["dist"]):
+			best = {"id": id, "dist": d, "pos": _models[id].global_position}
+	return best
 
 
 func _add_model(m: Dictionary) -> void:

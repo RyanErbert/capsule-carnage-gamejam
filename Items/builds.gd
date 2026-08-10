@@ -54,6 +54,27 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_channels.erase(id)
 
 
+## Nearest build block within `radius` — god menu delete. {} if none.
+func nearest_deletable(pos: Vector3, radius := 3.5) -> Dictionary:
+	var best := {}
+	for id in _builds:
+		var d: float = _builds[id].position.distance_to(pos)
+		if d < radius and (best.is_empty() or d < best["dist"]):
+			best = {"id": id, "dist": d, "pos": _builds[id].position}
+	return best
+
+
+## Nearest channel (by anchor points) within `radius`. {} if none.
+func nearest_channel(pos: Vector3, radius := 3.5) -> Dictionary:
+	var best := {}
+	for id in _channels:
+		for a in _channels[id].get_meta("anchors", []):
+			var d: float = (a as Vector3).distance_to(pos)
+			if d < radius and (best.is_empty() or d < best["dist"]):
+				best = {"id": id, "dist": d, "pos": a}
+	return best
+
+
 ## Web overlap rejection: same cell (<0.1), same type, same rotation.
 func has_build_at(pos: Vector3, type: String, ry: float, rx: float) -> bool:
 	for id in _builds:
@@ -259,6 +280,7 @@ func _add_channel(c: Dictionary) -> void:
 	shape.backface_collision = true
 	col.shape = shape
 	body.add_child(col)
+	body.set_meta("anchors", anchors)
 	add_child(body)
 	_channels[id] = body
 

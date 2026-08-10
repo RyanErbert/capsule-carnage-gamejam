@@ -69,16 +69,15 @@ func _on_net_event(event: String, data: Variant) -> void:
 			_add_teleporter(data)
 
 
-## Nearest pedestal id within `radius` of a point ("" if none) — god menu delete.
-func pedestal_near(pos: Vector3, radius := 2.0) -> String:
-	var best_id := ""
-	var best := radius
+## Nearest pedestal within `radius` — god menu delete. {} if none.
+func nearest_deletable(pos: Vector3, radius := 2.5) -> Dictionary:
+	var best := {}
 	for id in _pedestals:
-		var d: float = _pedestals[id]["node"].position.distance_to(pos)
-		if d < best:
-			best = d
-			best_id = id
-	return best_id
+		var node: Node3D = _pedestals[id]["node"]
+		var d: float = node.position.distance_to(pos)
+		if d < radius and (best.is_empty() or d < best["dist"]):
+			best = {"id": id, "dist": d, "pos": node.position}
+	return best
 
 
 # --- Builders -----------------------------------------------------------

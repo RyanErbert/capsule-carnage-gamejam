@@ -111,35 +111,39 @@ func _make_drone() -> CharacterBody3D:
 	return drone
 
 
+## Mouse ray that ignores our own bodies — CRUCIALLY including the drone,
+## which otherwise sits right in front of the camera and eats every ray.
+func _mouse_ray(mpos: Vector2) -> Dictionary:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or _player == null:
+		return {}
+	var from := cam.project_ray_origin(mpos)
+	var to := from + cam.project_ray_normal(mpos) * 300.0
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	var excl: Array = [_player.get_rid()]
+	if _drone:
+		excl.append(_drone.get_rid())
+	q.exclude = excl
+	return _player.get_world_3d().direct_space_state.intersect_ray(q)
+
+
 ## World clicks (UI clicks never get here — buttons consume them first).
 func _unhandled_input(event: InputEvent) -> void:
 	if not visible or _tool == "":
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var cam := get_viewport().get_camera_3d()
-		if cam == null:
-			return
-		var mpos: Vector2 = event.position
-		var from := cam.project_ray_origin(mpos)
-		var to := from + cam.project_ray_normal(mpos) * 300.0
-		var q := PhysicsRayQueryParameters3D.create(from, to)
-		q.exclude = [_player.get_rid()]
-		var hit := _player.get_world_3d().direct_space_state.intersect_ray(q)
+		var hit := _mouse_ray(event.position)
 		if hit.is_empty():
 			_status.text = "no surface hit — aim at the map"
 			return
 		var pos: Vector3 = hit["position"]
 		if _tool == "delete":
-			var ped: String = _world_items.pedestal_near(pos) if _world_items else ""
-			var prop: String = _world_props.prop_near(pos) if _world_props else ""
-			if ped != "":
-				Net.emit_event("removePedestal", ped)
-				_status.text = "pedestal removed"
-			elif prop != "":
-				Net.emit_event("removeModel", prop)
-				_status.text = "prop removed"
-			else:
+			var target := _find_delete_target(pos)
+			if target.is_empty():
 				_status.text = "nothing deletable near that spot"
+			else:
+				Net.emit_event(target["event"], target["id"])
+				_status.text = "%s removed" % target["kind"]
 		elif _tool == "channel":
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
@@ -160,14 +164,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			_status.text = "%s pedestal placed" % _tool
 
 
-## Ghost + floating grid-point cloud while a god build tool is armed
-## (web: 9^3 points at 4 u around the build area).
+## Hover feedback: build ghost + grid-point cloud, and the delete tool's
+## red highlight over whatever a click would remove (web behavior).
 func _process(_delta: float) -> void:
 	var building := visible and _tool.begins_with("build:")
 	if _grid_points:
 		_grid_points.visible = building
 	for t in _build_ghosts:
 		_build_ghosts[t].visible = false
+	_update_delete_highlight()
 	if not building or _player == null:
 		_build_target = {}
 		return
@@ -176,15 +181,13 @@ func _process(_delta: float) -> void:
 	if cam == null:
 		return
 	var mpos := get_viewport().get_mouse_position()
-	var from := cam.project_ray_origin(mpos)
-	var to := from + cam.project_ray_normal(mpos) * 200.0
-	var q := PhysicsRayQueryParameters3D.create(from, to)
-	q.exclude = [_player.get_rid()]
-	var hit := _player.get_world_3d().direct_space_state.intersect_ray(q)
+	var hit := _mouse_ray(mpos)
+	var target: Vector3
 	if hit.is_empty():
-		_build_target = {}
-		return
-	var target: Vector3 = hit["position"] + hit["normal"] * 0.1
+		# Nothing under the cursor: float the ghost 24 u out so it's always visible
+		target = cam.project_ray_origin(mpos) + cam.project_ray_normal(mpos) * 24.0
+	else:
+		target = hit["position"] + hit["normal"] * 0.1
 	var fx := floorf(target.x / 4.0) * 4.0 + 2.0
 	var fy := floorf(target.y / 4.0) * 4.0 + 2.0
 	var fz := floorf(target.z / 4.0) * 4.0 + 2.0
@@ -219,6 +222,37 @@ func _process(_delta: float) -> void:
 				for gz in range(-4, 5):
 					mm.set_instance_transform(i, Transform3D(Basis(), center + Vector3(gx, gy, gz) * 4.0 + Vector3(2, 2, 2)))
 					i += 1
+
+
+var _delete_marker: MeshInstance3D
+
+func _update_delete_highlight() -> void:
+	var active := visible and _tool == "delete" and _player != null
+	if not active:
+		if _delete_marker:
+			_delete_marker.visible = false
+		return
+	var hit := _mouse_ray(get_viewport().get_mouse_position())
+	var target := _find_delete_target(hit["position"]) if not hit.is_empty() else {}
+	if target.is_empty():
+		if _delete_marker:
+			_delete_marker.visible = false
+		return
+	if _delete_marker == null:
+		_delete_marker = MeshInstance3D.new()
+		var sphere := SphereMesh.new()
+		sphere.radius = 2.4
+		sphere.height = 4.8
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.15, 0.1, 0.3)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		sphere.material = mat
+		_delete_marker.mesh = sphere
+		_player.get_parent().add_child(_delete_marker)
+	_delete_marker.visible = true
+	_delete_marker.global_position = target["pos"]
 
 
 func _make_build_ghost(type: String) -> MeshInstance3D:
@@ -260,6 +294,32 @@ func _make_grid_points() -> MultiMeshInstance3D:
 	mmi.multimesh = mm
 	_player.get_parent().add_child(mmi)
 	return mmi
+
+
+## Everything the delete tool can target, nearest-first.
+func _find_delete_target(pos: Vector3) -> Dictionary:
+	var world_builds: Node = get_tree().get_first_node_in_group("world_builds")
+	var candidates: Array = []
+	if _world_items:
+		var ped: Dictionary = _world_items.nearest_deletable(pos)
+		if not ped.is_empty():
+			candidates.append(ped.merged({"event": "removePedestal", "kind": "pedestal"}))
+	if _world_props:
+		var prop: Dictionary = _world_props.nearest_deletable(pos)
+		if not prop.is_empty():
+			candidates.append(prop.merged({"event": "removeModel", "kind": "prop"}))
+	if world_builds:
+		var build: Dictionary = world_builds.nearest_deletable(pos)
+		if not build.is_empty():
+			candidates.append(build.merged({"event": "removeBuild", "kind": "build"}))
+		var chan: Dictionary = world_builds.nearest_channel(pos)
+		if not chan.is_empty():
+			candidates.append(chan.merged({"event": "removeChannel", "kind": "channel"}))
+	var best: Dictionary = {}
+	for c in candidates:
+		if best.is_empty() or c["dist"] < best["dist"]:
+			best = c
+	return best
 
 
 func _channel_marker(pos: Vector3) -> MeshInstance3D:
