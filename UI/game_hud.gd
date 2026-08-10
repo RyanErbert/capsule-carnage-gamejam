@@ -231,7 +231,12 @@ func _trigger_server_deploy() -> void:
 func _build_meters() -> void:
 	_meters = VBoxContainer.new()
 	_meters.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_meters.position = Vector2(-90, -46)
+	_meters.offset_left = -90
+	_meters.offset_right = 90
+	_meters.offset_top = -46
+	_meters.offset_bottom = -20
+	_meters.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_meters.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_meters.custom_minimum_size = Vector2(180, 26)
 	_meters.add_theme_constant_override("separation", 4)
 	add_child(_meters)
@@ -303,7 +308,12 @@ func _build_esc_menu() -> void:
 	_esc_menu = PanelContainer.new()
 	_esc_menu.visible = false
 	_esc_menu.set_anchors_preset(Control.PRESET_CENTER)
-	_esc_menu.position = Vector2(-110, -80)
+	_esc_menu.offset_left = -110
+	_esc_menu.offset_right = 110
+	_esc_menu.offset_top = -80
+	_esc_menu.offset_bottom = 80
+	_esc_menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_esc_menu.grow_vertical = Control.GROW_DIRECTION_BOTH
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.03, 0.04, 0.07, 0.92)
 	style.border_color = Color(1, 1, 1, 0.25)

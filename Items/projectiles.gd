@@ -101,7 +101,7 @@ func _spawn_bullet(data: Dictionary) -> void:
 	var vel := _vec3(data.get("velocity", {}))
 	var node := _tracer_node(Color.YELLOW, Vector3(0.1, 0.1, 2.0))
 	node.position = pos
-	if vel.length() > 0.01:
+	if vel.length() > 0.01 and absf(vel.normalized().dot(Vector3.UP)) < 0.999:
 		node.look_at_from_position(pos, pos + vel)
 	Sfx.boost(pos, 0.2)
 	_bullets.append({"pos": pos, "vel": vel, "life": BULLET_LIFE, "owner": str(data.get("owner", "")), "node": node})
@@ -112,7 +112,7 @@ func _spawn_rocket(data: Dictionary) -> void:
 	var vel := _vec3(data.get("velocity", {}))
 	var node := _tracer_node(Color(1.0, 0.15, 0.15), Vector3(0.25, 0.25, 0.8), true)
 	node.position = pos
-	if vel.length() > 0.01:
+	if vel.length() > 0.01 and absf(vel.normalized().dot(Vector3.UP)) < 0.999:
 		node.look_at_from_position(pos, pos + vel)
 	Sfx.boost(pos, 1.0)
 	_rockets.append({"pos": pos, "vel": vel, "life": ROCKET_LIFE, "owner": str(data.get("owner", "")), "node": node})
@@ -276,7 +276,8 @@ func _physics_process(delta: float) -> void:
 		r["pos"] += rvel * delta
 		var rnode: MeshInstance3D = r["node"]
 		rnode.position = r["pos"]
-		if rvel.length() > 0.01:
+		# look_at errors out when the direction is parallel to the up vector
+		if rvel.length() > 0.01 and absf(rvel.normalized().dot(Vector3.UP)) < 0.999:
 			rnode.look_at(r["pos"] + rvel)
 		var boom: bool = r["pos"].y < 0.0 \
 			or _ray_hit(r["pos"], rvel.normalized(), rvel.length() * delta + 0.5) \
