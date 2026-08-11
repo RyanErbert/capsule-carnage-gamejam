@@ -150,32 +150,51 @@ function zoneList() {
   return Object.values(spawnZones);
 }
 function homeWorlds() {
-  return zoneList().map(h => ({ x: -64 + h[1] * 4 + 2, z: -64 + h[0] * 4 + 2 }));
+  return zoneList().map(h => ({ x: -halfX() + h[1] * 4 + 2, z: -halfZ() + h[0] * 4 + 2 }));
 }
 function inDeadzone(r, c) {
   return zoneList().some(h => Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2);
+}
+
+// The painted grid is gridW x gridH pixels; each ROW is gridWords() uint32
+// bitmasks laid out flat (row * words + (col >> 5)), bit (31 - col&31) =
+// filled. At 32x32 this is byte-identical to the original one-word rows.
+function gridW() { return gameSettings.gridW || 32; }
+function gridH() { return gameSettings.gridH || 32; }
+function halfX() { return gridW() * 2; }   // pixels are 4 m
+function halfZ() { return gridH() * 2; }
+function gridWords(w) { return Math.ceil((w || gridW()) / 32); }
+function gridBit(rows, r, c) {
+  return (rows[r * gridWords() + (c >> 5)] >>> (31 - (c & 31))) & 1;
 }
 
 // Highest painted layer at a pixel (-1 = pit), and the world Y its surface
 // meshes out at: 8 m slabs stacked over bedrock, surface ~1 m into the slab.
 function pixelTop(r, c) {
   if (!creativeLayers) return 0;
-  const bit = 31 - c;
   let top = -1;
-  for (let li = 0; li < 4; li++) if ((creativeLayers[li][r] >>> bit) & 1) top = li;
+  for (let li = 0; li < 4; li++) if (gridBit(creativeLayers[li], r, c)) top = li;
   return top;
 }
 function surfaceY(top) { return top < 0 ? -7 : top * 8 + 1; }
 
 function normLayers(g) {
   if (!g || !Array.isArray(g.layers) || g.layers.length !== 4) return null;
+  // A canvas painted at a stale size is dropped; clients resize on the
+  // gameSettings broadcast and repaint fresh.
+  const gs = Array.isArray(g.gs) ? g.gs : [32, 32];
+  if (Number(gs[0]) !== gridW() || Number(gs[1]) !== gridH()) return null;
+  const expect = gridH() * gridWords();
   const out = [];
   for (const rows of g.layers) {
-    if (!Array.isArray(rows) || rows.length === 0 || rows.length > 64) return null;
-    out.push(rows.slice(0, 64).map(n => Number(n) >>> 0));
+    if (!Array.isArray(rows) || rows.length !== expect) return null;
+    out.push(rows.map(n => Number(n) >>> 0));
   }
   return out;
 }
+
+// Every layers payload carries its shape so clients can resize with it.
+function gridShape() { return [gridW(), gridH()]; }
 
 // --- Global game settings (server-authoritative, alert on change) ---
 // These belong to the GAMEMODE: they're chosen in the lobby and frozen once a
@@ -189,8 +208,13 @@ const gameSettings = {
   pedestals: true,           // auto item pedestals when a map generates
   speedScale: 0.7,           // movement tuning
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
-  gravityScale: 1.0
+  gravityScale: 1.0,
+  gridW: 32,                 // painted map size in pixels (see GRID_OPTIONS)
+  gridH: 32
 };
+// Selectable map shapes: square and rectangular. Pixels are 4 m, so 96x48
+// is a 384x192 m arena.
+const GRID_OPTIONS = [[32, 32], [48, 48], [64, 64], [96, 96], [64, 32], [96, 48], [96, 64]];
 
 // --- Slayer: coins ARE health. Players spawn with 100, damage sheds coins,
 // zero triggers a death explosion (clients carve + scorch) and a respawn
@@ -352,17 +376,17 @@ function autoPlaceGenerator() {
   activeGenerators.length = 0;
   if (creativeLayers) {
     let best = null;
-    for (let r = 1; r < 31; r++) {
-      for (let c = 1; c < 31; c++) {
+    for (let r = 1; r < gridH() - 1; r++) {
+      for (let c = 1; c < gridW() - 1; c++) {
         const top = pixelTop(r, c);
         if (top < 0 || inDeadzone(r, c)) continue;
-        const d = Math.hypot(r - 16, c - 16);
+        const d = Math.hypot(r - gridH() / 2, c - gridW() / 2);
         if (!best || d < best.d) best = { r, c, top, d };
       }
     }
     if (best) activeGenerators.push({
       id: 'gen-auto',
-      x: -64 + best.c * 4 + 2, y: surfaceY(best.top) + 0.4, z: -64 + best.r * 4 + 2,
+      x: -halfX() + best.c * 4 + 2, y: surfaceY(best.top) + 0.4, z: -halfZ() + best.r * 4 + 2,
       holder: null, energy: GEN_ENERGY, mini: false
     });
   }
@@ -513,8 +537,8 @@ function autoPopulatePedestals() {
   // Candidates: any pixel with a floor, clear of the home deadzone, whose
   // 4 neighbours are no taller than it (so nothing to clip into).
   const candidates = [];
-  for (let r = 1; r < 31; r++) {
-    for (let c = 1; c < 31; c++) {
+  for (let r = 1; r < gridH() - 1; r++) {
+    for (let c = 1; c < gridW() - 1; c++) {
       const top = pixelTop(r, c);
       if (top < 0 || inDeadzone(r, c)) continue;
       if (pixelTop(r - 1, c) > top || pixelTop(r + 1, c) > top) continue;
@@ -528,8 +552,8 @@ function autoPopulatePedestals() {
   }
   for (const cand of candidates) {
     if (pedestals.length >= PED_COUNT) break;
-    const x = -64 + cand.c * 4 + 2;
-    const z = -64 + cand.r * 4 + 2;
+    const x = -halfX() + cand.c * 4 + 2;
+    const z = -halfZ() + cand.r * 4 + 2;
     if (pedestals.some(p => Math.hypot(p.x - x, p.z - z) < PED_SPACING)) continue;
     pedestals.push({
       id: 'auto-' + cand.r + '-' + cand.c,
@@ -557,7 +581,7 @@ function endGame() {
   editors.clear();
   for (const id of Object.keys(spawnZones)) delete spawnZones[id];
   io.emit('spawnZones', spawnZones);
-  if (editVote) { clearTimeout(editVote.timer); editVote = null; io.emit('editVote', null); }
+  io.emit('editVote', null);   // legacy clients still hide their vote bar on this
   pedestals.length = 0;
   spawnPoints.length = 0;
   activeTeleporters.length = 0;
@@ -589,61 +613,28 @@ function endGame() {
   io.emit('gameEnded');
 }
 
-// --- Editor votes ---
-// GENERATE and CLEAR wipe or replace what everyone in the editor is working
-// on, so they need unanimous agreement. Alone, they just happen.
-let editVote = null;   // { kind, voters:Set, yes:Set, timer }
-const EDIT_VOTE_MS = 25000;
 // Sockets sitting in the map editor. They haven't 'ready'd yet, so readyIds
-// doesn't see them - the editor announces itself instead.
+// doesn't see them - the editor announces itself instead. (GENERATE and
+// CLEAR used to need a unanimous vote; they just apply now.)
 const editors = new Set();
 
 // Lobby start countdown: one shared timer so every menu counts in sync.
-const START_COUNTDOWN_MS = 5000;
+const START_COUNTDOWN_MS = 3000;
 let startTimer = null;
 
 function defaultLayers() {
+  const w = gridW(), words = gridWords(w);
   const out = [[], [], [], []];
   for (let li = 0; li < 4; li++)
-    for (let r = 0; r < 32; r++) out[li].push(li === 0 ? 0xFFFFFFFF >>> 0 : 0);
+    for (let r = 0; r < gridH(); r++)
+      for (let wi = 0; wi < words; wi++) {
+        const bits = Math.min(32, w - wi * 32);
+        out[li].push(li === 0 ? ((0xFFFFFFFF << (32 - bits)) >>> 0) : 0);
+      }
   return out;
 }
 
-function broadcastEditVote() {
-  if (!editVote) { io.emit('editVote', null); return; }
-  io.emit('editVote', {
-    kind: editVote.kind, yes: editVote.yes.size, need: editVote.voters.size
-  });
-}
-
-function startEditVote(socket, kind) {
-  if (editVote) return;
-  // Only people actually at the canvas vote - an in-game player can't see
-  // the confirmation bar, so counting them would deadlock it.
-  const voters = new Set([...editors]);
-  voters.add(socket.id);
-  if (voters.size <= 1) { applyEditVote(kind); return; }
-  editVote = { kind, voters, yes: new Set([socket.id]), timer: null };
-  editVote.timer = setTimeout(() => {
-    editVote = null;
-    sysMsg('Vote timed out.');
-    broadcastEditVote();
-  }, EDIT_VOTE_MS);
-  const who = players[socket.id] ? players[socket.id].name : 'Player';
-  sysMsg(`${who} wants to ${kind === 'clear' ? 'clear the canvas' : 'start the game'}.`);
-  broadcastEditVote();
-  checkEditVote();
-}
-
-function checkEditVote() {
-  if (!editVote || editVote.yes.size < editVote.voters.size) return;
-  const kind = editVote.kind;
-  clearTimeout(editVote.timer);
-  editVote = null;
-  io.emit('editVote', null);
-  applyEditVote(kind);
-}
-
+// Whoever presses GENERATE or CLEAR does it: no vote, no confirmation bar.
 function applyEditVote(kind) {
   if (kind === 'clear') {
     paintLayers = null;
@@ -652,7 +643,7 @@ function applyEditVote(kind) {
   }
   creativeLayers = paintLayers || defaultLayers();
   terrainEdits = [];
-  io.emit('creativeGrid', { layers: creativeLayers });
+  io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
   autoPopulatePedestals();
   autoPlaceGenerator();
 }
@@ -731,10 +722,10 @@ io.on('connection', (socket) => {
   // Creative-level snapshot on plain connection (scenes load after connect,
   // so this must not wait for 'ready').
   if (creativeLayers) {
-    socket.emit('creativeGrid', { layers: creativeLayers });
+    socket.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
     socket.emit('terrainEdits', terrainEdits);
   }
-  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers });
+  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
   socket.emit('spawnZones', spawnZones);
   socket.emit('hello', { id: socket.id });
   socket.emit('gameSettings', gameSettings);
@@ -788,6 +779,21 @@ io.on('connection', (socket) => {
       gameSettings.slayer = u.value === 'slayer';
       io.emit('gameSettings', gameSettings);
       sysMsg(`${who} set the gamemode to ${u.value}`);
+      return;
+    }
+    if (u.key === 'gridW' || u.key === 'gridH') {
+      // Both axes travel together: value is [w, h] from the size dropdown
+      const v = Array.isArray(u.value) ? u.value : [Number(u.value), Number(u.value)];
+      const w = Number(v[0]), h = Number(v[1]);
+      if (!GRID_OPTIONS.some(o => o[0] === w && o[1] === h)) return;
+      if (w === gameSettings.gridW && h === gameSettings.gridH) return;
+      gameSettings.gridW = w;
+      gameSettings.gridH = h;
+      // The canvas is meaningless at a different size: start fresh
+      paintLayers = null;
+      io.emit('paintCleared');
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${who} set the map size to ${w}x${h}`);
       return;
     }
     const numeric = typeof gameSettings[u.key] === 'number';
@@ -1045,8 +1051,8 @@ io.on('connection', (socket) => {
       io.emit('spawnZones', spawnZones);
       return;
     }
-    const r = Math.max(0, Math.min(31, Math.floor(Number(p.r) || 0)));
-    const c = Math.max(0, Math.min(31, Math.floor(Number(p.c) || 0)));
+    const r = Math.max(0, Math.min(gridH() - 1, Math.floor(Number(p.r) || 0)));
+    const c = Math.max(0, Math.min(gridW() - 1, Math.floor(Number(p.c) || 0)));
     for (const [id, z] of Object.entries(spawnZones)) {
       if (id === socket.id) continue;
       if (Math.abs(r - z[0]) <= ZONE_SEPARATION && Math.abs(c - z[1]) <= ZONE_SEPARATION) {
@@ -1059,22 +1065,8 @@ io.on('connection', (socket) => {
   });
 
   // GENERATE and CLEAR need everyone still in the editor to agree.
-  socket.on('requestGenerate', () => startEditVote(socket, 'generate'));
-  socket.on('requestClear', () => startEditVote(socket, 'clear'));
-  socket.on('castEditVote', (yes) => {
-    if (!editVote || !editVote.voters.has(socket.id)) return;
-    const who = players[socket.id] ? players[socket.id].name : 'Player';
-    if (!yes) {
-      sysMsg(`${who} declined.`);
-      clearTimeout(editVote.timer);
-      editVote = null;
-      io.emit('editVote', null);
-      return;
-    }
-    editVote.yes.add(socket.id);
-    broadcastEditVote();
-    checkEditVote();
-  });
+  socket.on('requestGenerate', () => applyEditVote('generate'));
+  socket.on('requestClear', () => applyEditVote('clear'));
 
   // Live co-painting of the creative editor canvas (full 32-int grid per
   // stroke burst — tiny and idempotent).
@@ -1082,7 +1074,7 @@ io.on('connection', (socket) => {
     const layers = normLayers(g);
     if (!layers) return;
     paintLayers = layers;
-    socket.broadcast.emit('creativePaint', { layers: paintLayers });
+    socket.broadcast.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
   });
 
   socket.on('creativeGrid', (g) => {
@@ -1090,7 +1082,7 @@ io.on('connection', (socket) => {
     if (!layers) return;
     creativeLayers = layers;
     terrainEdits = [];
-    io.emit('creativeGrid', { layers: creativeLayers });
+    io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
     autoPlaceGenerator();     // and one heal generator near the center
   });
@@ -1535,12 +1527,6 @@ io.on('connection', (socket) => {
     delete deadUntil[socket.id];
     editors.delete(socket.id);
     if (spawnZones[socket.id]) { delete spawnZones[socket.id]; io.emit('spawnZones', spawnZones); }
-    if (editVote && editVote.voters.has(socket.id)) {
-      editVote.voters.delete(socket.id);
-      editVote.yes.delete(socket.id);
-      broadcastEditVote();
-      checkEditVote();
-    }
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
     // Drop the player from any running vote and re-evaluate the tally.
     if (endVote && endVote.voters.has(socket.id)) {
@@ -1554,8 +1540,32 @@ io.on('connection', (socket) => {
     // Last player leaving re-opens the lobby for level/setting changes.
     if (readyIds.size === 0 && levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
     io.emit('playerDisconnected', socket.id);
+    checkIdleReset();
   });
+
+  clearIdleReset();   // someone is here again
 });
+
+// An empty server drops its world after a grace period: the next person to
+// connect gets a clean lobby instead of somebody's abandoned map.
+const IDLE_RESET_MS = 30000;
+let idleTimer = null;
+
+function clearIdleReset() {
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+}
+
+function checkIdleReset() {
+  clearIdleReset();
+  if (io.sockets.sockets.size > 0) return;
+  if (!creativeLayers && !paintLayers && readyIds.size === 0) return;  // nothing to wipe
+  idleTimer = setTimeout(() => {
+    idleTimer = null;
+    if (io.sockets.sockets.size > 0) return;
+    console.log('Server empty for 30s — resetting the map');
+    endGame();
+  }, IDLE_RESET_MS);
+}
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));

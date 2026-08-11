@@ -14,6 +14,11 @@ const LEVELS := {
 }
 const MODES := ["slayer", "sandbox", "build"]
 const MODE_NAMES := ["Slayer", "Sandbox", "Build"]
+# Map shapes, mirroring the server's GRID_OPTIONS (pixels are 4 m)
+const GRID_OPTIONS := [
+	Vector2i(32, 32), Vector2i(48, 48), Vector2i(64, 64), Vector2i(96, 96),
+	Vector2i(64, 32), Vector2i(96, 48), Vector2i(96, 64),
+]
 const Style := preload("res://UI/ui_style.gd")
 const SettingsPanel := preload("res://UI/settings_panel.gd")
 
@@ -22,9 +27,10 @@ var _name_edit: LineEdit
 var _roster: Label
 var _join_btn: Button
 var _gamemode_opt: OptionButton
+var _size_opt: OptionButton
 var _settings_box: PanelContainer
 var _players: Dictionary = {}   # id -> {name, skinColor, x, y, z}
-var _map: LiveMap
+var _map: BirdseyeMap
 var _preview_model: Node3D
 var _countdown: Label            # shared 5 s pre-editor countdown
 var _countdown_left := 0.0
@@ -60,16 +66,14 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if data is Dictionary and _players.has(str(data.get("id", ""))):
 				var p: Dictionary = _players[str(data["id"])]
 				p["x"] = data.get("x", 0.0)
+				p["y"] = data.get("y", 0.0)
 				p["z"] = data.get("z", 0.0)
 		"gameSettings":
 			_apply_game_settings(data)
-		"creativeGrid", "gameEnded":
-			if _map:
-				_map.queue_redraw()
 		"startCountdown":
-			# Every lobby counts the same 5 seconds down together
+			# Every lobby counts the same countdown down together
 			if data is Dictionary:
-				_countdown_left = float(data.get("ms", 5000)) / 1000.0
+				_countdown_left = float(data.get("ms", 3000)) / 1000.0
 				_countdown.text = str(ceili(_countdown_left))
 				_countdown.visible = true
 				_join_btn.disabled = true
@@ -82,6 +86,9 @@ func _apply_game_settings(gs: Variant) -> void:
 		return
 	if _gamemode_opt:
 		_gamemode_opt.select(maxi(0, MODES.find(str(gs.get("mode", "slayer")))))
+	if _size_opt:
+		var shape := Vector2i(int(gs.get("gridW", 32)), int(gs.get("gridH", 32)))
+		_size_opt.select(maxi(0, GRID_OPTIONS.find(shape)))
 
 
 func _refresh_status() -> void:
@@ -122,8 +129,8 @@ func _join() -> void:
 
 
 func _process(_delta: float) -> void:
-	if _map and not _players.is_empty():
-		_map.queue_redraw()
+	if _map:
+		_map.tick(_delta)
 	if _preview_model:
 		_preview_model.rotate_y(_delta * 0.7)
 	if _countdown_left > 0.0:
@@ -158,11 +165,17 @@ func _build_ui() -> void:
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
-	_map = LiveMap.new()
+	_map = BirdseyeMap.new()
 	_map.menu = self
 	_map.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_map.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_map)
+	# Scrim over the 3D view so the panels stay readable on top of it
+	var scrim := ColorRect.new()
+	scrim.color = Color(0.047, 0.055, 0.071, 0.55)
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(scrim)
 
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -223,8 +236,8 @@ func _build_ui() -> void:
 	row.add_child(_make_model_viewport())
 	_build_model_preview()
 
-	# --- GAMEMODE (server-wide, gear holds the settings) ---
-	var settings_col := _panel("GAMEMODE")
+	# --- GAME (mode + map + size in one panel; gear holds the settings) ---
+	var settings_col := _panel("GAME")
 	grid.add_child(settings_col.get_meta("panel"))
 	var mode_row := HBoxContainer.new()
 	mode_row.add_theme_constant_override("separation", 6)
@@ -243,6 +256,28 @@ func _build_ui() -> void:
 	gear.custom_minimum_size = Vector2(34, 0)
 	mode_row.add_child(gear)
 
+	var map_row := HBoxContainer.new()
+	map_row.add_theme_constant_override("separation", 6)
+	settings_col.add_child(map_row)
+	var level_opt := OptionButton.new()
+	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	level_opt.add_item("Canyon Sandbox")
+	level_opt.add_item("Testworld")
+	level_opt.select(1 if Settings.level == "testworld" else 0)
+	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")
+	map_row.add_child(level_opt)
+	# Painted-map size (server-wide, like the mode). Bigger = slower generate.
+	_size_opt = OptionButton.new()
+	_size_opt.custom_minimum_size = Vector2(120, 0)
+	for s: Vector2i in GRID_OPTIONS:
+		_size_opt.add_item("%d x %d" % [s.x, s.y])
+	_size_opt.select(maxi(0, GRID_OPTIONS.find(Vector2i(
+		int(Net.game_settings.get("gridW", 32)), int(Net.game_settings.get("gridH", 32))))))
+	_size_opt.item_selected.connect(func(i: int):
+		Net.emit_event("updateGameSetting",
+			{"key": "gridW", "value": [GRID_OPTIONS[i].x, GRID_OPTIONS[i].y]}))
+	map_row.add_child(_size_opt)
+
 	_settings_box = PanelContainer.new()
 	_settings_box.visible = false
 	_settings_box.add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.3), 8))
@@ -250,19 +285,9 @@ func _build_ui() -> void:
 	settings_col.add_child(_settings_box)
 	gear.pressed.connect(func(): _settings_box.visible = not _settings_box.visible)
 
-	# --- MAP ---
-	var map_box := _panel("MAP")
-	grid.add_child(map_box.get_meta("panel"))
-	var level_opt := OptionButton.new()
-	level_opt.add_item("Canyon Sandbox")
-	level_opt.add_item("Testworld")
-	level_opt.select(1 if Settings.level == "testworld" else 0)
-	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")
-	map_box.add_child(level_opt)
-
-	# --- PLAYERS (live roster) ---
+	# --- PLAYERS (live roster, full width under the 2x2) ---
 	var roster_box := _panel("PLAYERS")
-	grid.add_child(roster_box.get_meta("panel"))
+	root.add_child(roster_box.get_meta("panel"))
 	_roster = Label.new()
 	_roster.add_theme_font_size_override("font_size", 16)
 	roster_box.add_child(_roster)
@@ -366,41 +391,143 @@ func _build_model_preview() -> void:
 
 # --- Live overhead map -------------------------------------------------------
 
-class LiveMap extends Control:
-	## Top-down view of the map currently being played, drawn straight from
-	## the painted layer stack the server broadcast, with a dot per player.
+class BirdseyeMap extends SubViewportContainer:
+	## A real 3D birdseye view of the map behind the lobby: the painted layer
+	## stack extruded into blocks in its own little world, slowly orbiting,
+	## with a marker per player. Rebuilt whenever the grid changes.
 	const LAYER_TINT := [Color("#8a5a3a"), Color("#c78b5e"), Color("#dfa878"), Color("#f0cb96")]
-	var menu: Node
+	const SLAB := 8.0
 
-	func _draw() -> void:
+	var menu: Node
+	var _vp: SubViewport
+	var _cam: Camera3D
+	var _world: Node3D
+	var _blocks: MultiMeshInstance3D
+	var _dots: Dictionary = {}     # player id -> marker
+	var _built := ""               # signature of the grid we rendered
+	var _orbit := 0.0
+	var _span := 128.0
+
+	func _init() -> void:
+		stretch = true
+		_vp = SubViewport.new()
+		_vp.own_world_3d = true
+		_vp.transparent_bg = false
+		_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		add_child(_vp)
+		_world = Node3D.new()
+		_vp.add_child(_world)
+		var env := WorldEnvironment.new()
+		var e := Environment.new()
+		e.background_mode = Environment.BG_COLOR
+		e.background_color = Color("#0c0e12")
+		e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		e.ambient_light_color = Color(0.5, 0.55, 0.68)
+		e.ambient_light_energy = 0.7
+		e.fog_enabled = true
+		e.fog_light_color = Color("#0c0e12")
+		e.fog_density = 0.006
+		env.environment = e
+		_world.add_child(env)
+		var sun := DirectionalLight3D.new()
+		sun.rotation_degrees = Vector3(-58, -34, 0)
+		sun.light_energy = 1.1
+		sun.light_color = Color(1.0, 0.94, 0.84)
+		_world.add_child(sun)
+		_cam = Camera3D.new()
+		_cam.fov = 58.0
+		_world.add_child(_cam)
+		_blocks = MultiMeshInstance3D.new()
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		var box := BoxMesh.new()
+		box.size = Vector3(4.0, SLAB, 4.0)
+		var mat := StandardMaterial3D.new()
+		mat.vertex_color_use_as_albedo = true
+		mat.roughness = 0.95
+		box.material = mat
+		mm.mesh = box
+		_blocks.multimesh = mm
+		_world.add_child(_blocks)
+
+	func tick(delta: float) -> void:
+		if _vp.size != Vector2i(size):
+			_vp.size = Vector2i(size)
+		_rebuild_if_needed()
+		_orbit += delta * 0.05
+		# Slow high orbit, steep enough to read as a birdseye view
+		var r := _span * 0.7
+		_cam.position = Vector3(cos(_orbit) * r, _span * 1.05, sin(_orbit) * r)
+		_cam.look_at(Vector3(0, 0, 0))
+		_update_dots()
+
+	## Extrude the painted grid into one MultiMesh of slab blocks (top layer
+	## per pixel only — the stack below is hidden anyway from up here).
+	func _rebuild_if_needed() -> void:
 		var grid: Variant = Net.creative_grid
-		if not (grid is Dictionary) or not (grid.get("layers") is Array):
+		var sig := str(grid).md5_text() if grid is Dictionary else "empty"
+		if sig == _built:
 			return
-		var layers: Array = grid["layers"]
-		if layers.size() != 4:
-			return
-		var span := minf(size.x, size.y) * 0.92
-		var cell := span / 32.0
-		var origin := (size - Vector2(span, span)) / 2.0
-		for r in 32:
-			for c in 32:
+		_built = sig
+		var live := grid is Dictionary and (grid.get("layers") is Array) \
+			and (grid["layers"] as Array).size() == 4
+		var layers: Array = grid["layers"] if live else []
+		var raw: Variant = grid.get("gs", [32, 32]) if live else [32, 32]
+		var gw := int(raw[0]) if raw is Array else 32
+		var gh := int(raw[1]) if raw is Array else 32
+		var words := (gw + 31) >> 5
+		_span = maxf(gw, gh) * 4.0
+		# No map yet: a seeded idle skyline so the lobby is never an empty void
+		var idle := RandomNumberGenerator.new()
+		idle.seed = 20260811
+		var xforms: Array = []
+		var cols: Array = []
+		for r in gh:
+			for c in gw:
 				var top := -1
-				for li in 4:
-					if (int(layers[li][r]) >> (31 - c)) & 1:
-						top = li
+				if live:
+					var wi := r * words + (c >> 5)
+					for li in 4:
+						if wi < (layers[li] as Array).size() \
+								and (int(layers[li][wi]) >> (31 - (c & 31))) & 1:
+							top = li
+				else:
+					# Rolling mounds: ground everywhere, occasional stacks
+					var n := sin(r * 0.31) * cos(c * 0.27) + idle.randf() * 0.55
+					top = 0 if n < 0.75 else (1 if n < 1.05 else 2)
 				if top < 0:
 					continue
-				var col: Color = LAYER_TINT[top]
-				col.a = 0.16 + 0.06 * top
-				draw_rect(Rect2(origin + Vector2(c, r) * cell, Vector2(cell, cell)), col)
-		# Players, in their own colors
+				var x := -gw * 2.0 + c * 4.0 + 2.0
+				var z := -gh * 2.0 + r * 4.0 + 2.0
+				xforms.append(Transform3D(Basis(), Vector3(x, top * SLAB - SLAB * 0.5, z)))
+				cols.append(LAYER_TINT[top])
+		var mm := _blocks.multimesh
+		mm.instance_count = xforms.size()
+		for i in xforms.size():
+			mm.set_instance_transform(i, xforms[i])
+			mm.set_instance_color(i, cols[i])
+
+	## One floating marker per player, in their own color.
+	func _update_dots() -> void:
+		for id in _dots.keys():
+			if not menu._players.has(id):
+				(_dots[id] as Node).queue_free()
+				_dots.erase(id)
 		for id in menu._players:
 			var p: Dictionary = menu._players[id]
-			var px := (float(p.get("x", 0.0)) + 64.0) / 128.0
-			var pz := (float(p.get("z", 0.0)) + 64.0) / 128.0
-			if px < 0.0 or px > 1.0 or pz < 0.0 or pz > 1.0:
-				continue
-			var dot := origin + Vector2(px, pz) * span
-			var col := Color(str(p.get("skinColor", "#ffffff")))
-			col.a = 0.85
-			draw_circle(dot, maxf(3.0, cell * 0.4), col)
+			var dot: MeshInstance3D = _dots.get(id)
+			if dot == null:
+				dot = MeshInstance3D.new()
+				var sphere := SphereMesh.new()
+				sphere.radius = 2.2
+				sphere.height = 4.4
+				var m := StandardMaterial3D.new()
+				m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				m.albedo_color = Color(str(p.get("skinColor", "#ffffff")))
+				sphere.material = m
+				dot.mesh = sphere
+				_world.add_child(dot)
+				_dots[id] = dot
+			dot.position = Vector3(float(p.get("x", 0.0)),
+				float(p.get("y", 0.0)) + 3.0, float(p.get("z", 0.0)))

@@ -44,13 +44,15 @@ const CROWBOT_SPEED := 14.0   # full-3D flight, camera-directed
 const CROWBOT_ACCEL := 5.0    # velocity chase rate (soft, floaty)
 const RATBOT_SPEED := 11.0
 const RATBOT_STICK := 4.0     # adhesion pull along the surface normal
-# Parked crow-bots don't freeze mid-air: they loiter on a lazy ring around the
-# park spot. Client-local and cosmetic, like the boids — the synced park
-# position is the ring's anchor, so every client watches the same patch of sky.
+# A parked crow-bot doesn't freeze mid-air: it flies a lazy loiter ring while
+# it sinks, then settles on the ground. Client-local and cosmetic, like the
+# boids — the synced park position anchors the ring, so every client watches
+# the same patch of sky.
 const AMBIENT_R := 2.6
 const AMBIENT_RATE := 0.8     # rad/s around the loiter ring
 const AMBIENT_SPEED := 4.0
-const AMBIENT_LIFT := 2.2     # ring height above the ground
+const AMBIENT_SINK := 1.6     # m/s the ring drifts down toward the ground
+const AMBIENT_LIFT := 2.2     # ring height where it starts descending from
 
 var id := ""
 var kind := "ghost"
@@ -369,29 +371,42 @@ func _climb_bot(delta: float) -> void:
 		global_transform.basis = global_transform.basis.slerp(target, minf(1.0, 8.0 * delta)).orthonormalized()
 
 
+## Ground height under a parked crow-bot (its own current y if nothing's there).
+func _ambient_ground() -> float:
+	var from := global_position + Vector3(0, 1.0, 0)
+	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3(0, -60.0, 0))
+	q.exclude = [get_rid()]
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return float(hit["position"].y) if hit else global_position.y
+
+
 func _climb_ray(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dictionary:
 	var q := PhysicsRayQueryParameters3D.create(from, to)
 	q.exclude = [get_rid()]
 	return space.intersect_ray(q)
 
 
-## Parked crow-bot: take off and fly a lazy loiter ring over the park spot,
-## bobbing and scanning. Pure ambience — the moment anyone pilots it (any
-## client), the ring is abandoned.
+## Parked crow-bot: circle down on a lazy loiter ring and settle on the
+## ground — leaving one in the air makes it glide home rather than hover
+## forever. Pure ambience; the moment anyone pilots it, the ring is dropped.
 func _ambient_fly(delta: float) -> void:
 	if wrecked:
 		return
 	if _ambient_anchor == Vector3.INF:
 		_ambient_anchor = global_position
-		var g := _ground_ray()
-		if not g.is_empty():
-			_ambient_anchor.y = maxf(_ambient_anchor.y, float(g["position"].y) + AMBIENT_LIFT)
+		_ambient_anchor.y = maxf(_ambient_anchor.y, _ambient_ground() + AMBIENT_LIFT)
 		_ambient_t = randf() * TAU
+	# Sink the ring until the bot is resting just off the ground
+	var floor_y := _ambient_ground() + 0.35
+	_ambient_anchor.y = maxf(floor_y, _ambient_anchor.y - AMBIENT_SINK * delta)
+	var landed := _ambient_anchor.y <= floor_y + 0.05
 	_ambient_t += AMBIENT_RATE * delta
+	# On the ground it stops circling and just sits there
+	var ring := 0.0 if landed else AMBIENT_R
 	var target := _ambient_anchor + Vector3(
-		cos(_ambient_t) * AMBIENT_R,
-		sin(_ambient_t * 2.3) * 0.5,
-		sin(_ambient_t) * AMBIENT_R)
+		cos(_ambient_t) * ring,
+		0.0 if landed else sin(_ambient_t * 2.3) * 0.5,
+		sin(_ambient_t) * ring)
 	velocity = velocity.lerp((target - global_position).limit_length(4.0) * (AMBIENT_SPEED / 4.0),
 		minf(1.0, 2.0 * delta))
 	move_and_slide()

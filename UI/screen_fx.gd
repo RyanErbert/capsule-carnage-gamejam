@@ -9,7 +9,8 @@ extends Node
 ##   genuinely melts and smears while you're taking damage, then heals.
 ## Everything sits below the HUD layer so menus stay readable.
 
-const GLITCH_DECAY := 1.9
+const GLITCH_DECAY := 0.85   # slow decay: a big hit melts for ~4 s
+const DEAD_HP := 0.35        # below this health fraction, dead pixels set in
 
 var _scifi_rect: ColorRect
 # Ping-pong feedback pair: reading the render target you're writing is
@@ -70,7 +71,7 @@ float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 void fragment() {
 	vec2 uv = UV;
-	vec2 bsize = vec2(64.0, 36.0);
+	vec2 bsize = vec2(48.0, 27.0);
 	vec2 block = floor(uv * bsize);
 	vec2 buv = (block + 0.5) / bsize;
 	// One-step gradient optical flow at the macroblock center
@@ -83,24 +84,35 @@ void fragment() {
 	// P-frame step: carry the held image along the estimated motion
 	vec3 held = texture(prev_tex, uv - flow).rgb;
 	vec3 cur = texture(live_tex, uv).rgb;
-	// Sparse I-frame refresh: a few blocks re-key each frame
-	float refresh = step(rnd(block + floor(t * 20.0)), mix(1.0, 0.03, amount));
+	// Sparse I-frame refresh: barely any blocks re-key while the mosh is hot,
+	// so held frames drag long smears before the image heals
+	float refresh = step(rnd(block + floor(t * 20.0)), mix(1.0, 0.012, amount));
 	COLOR = vec4(mix(held, cur, max(refresh, 1.0 - amount)), 1.0);
 }
 "
 
 ## On the main screen: fade the mosh buffer in over the live image. The
 ## luminance guard falls back to the live frame if the buffer is dead.
+## `dead` (0..1) permanently kills a scattering of macroblocks — stuck sensor
+## pixels that stay on screen while your health is critical.
 const MOSH_DISPLAY_SHADER := "
 shader_type canvas_item;
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
 uniform sampler2D mosh_tex : filter_linear;
 uniform float amount = 0.0;
+uniform float dead = 0.0;
+float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 void fragment() {
 	vec3 live = texture(screen_tex, SCREEN_UV).rgb;
 	vec3 mosh = texture(mosh_tex, SCREEN_UV).rgb;
 	float ok = step(0.005, dot(mosh, vec3(1.0)));
-	COLOR = vec4(mix(live, mosh, clamp(amount * 1.6, 0.0, 1.0) * ok), 1.0);
+	vec3 col = mix(live, mosh, clamp(amount * 2.2, 0.0, 1.0) * ok);
+	// Dead pixels: a static mask of stuck blocks, flat corrupted color
+	vec2 block = floor(SCREEN_UV * vec2(96.0, 54.0));
+	float dp = step(1.0 - dead, rnd(block * 1.37));
+	vec3 stuck = vec3(rnd(block), rnd(block + 4.2), rnd(block + 9.1));
+	stuck = mix(vec3(0.02), stuck * vec3(0.5, 0.9, 0.4), step(0.6, stuck.g)) * 0.4;
+	COLOR = vec4(mix(col, stuck, dp), 1.0);
 }
 "
 
@@ -196,18 +208,35 @@ func pulse(strength: float) -> void:
 	_glitch_amount = clampf(maxf(_glitch_amount, strength), 0.0, 1.0)
 
 
+## Health fraction (0..1). Critical health burns dead pixels into the screen;
+## they stay until you heal back over the threshold.
+var _health := 1.0
+
+func set_health(frac: float) -> void:
+	_health = clampf(frac, 0.0, 1.0)
+
+
+func _dead_amount() -> float:
+	return clampf((DEAD_HP - _health) / DEAD_HP, 0.0, 1.0) * 0.12
+
+
 func _process(delta: float) -> void:
 	if _mosh_display == null:
 		return
 	_t += delta
 	_glitch_amount *= exp(-GLITCH_DECAY * delta)
+	var dead := _dead_amount()
 	var active := _glitch_amount > 0.03
-	_mosh_display.visible = active
+	_mosh_display.visible = active or dead > 0.001
+	(_mosh_display.material as ShaderMaterial).set_shader_parameter("dead", dead)
 	if not active:
 		_was_active = false
 		_mosh_a.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		_mosh_b.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		_copy_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		if _mosh_display.visible:
+			# Dead pixels only: keep the melt off the live image
+			(_mosh_display.material as ShaderMaterial).set_shader_parameter("amount", 0.0)
 		return
 	# Track window size so the buffers never stretch
 	if _mosh_a.size != Vector2i(get_viewport().size):

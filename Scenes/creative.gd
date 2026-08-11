@@ -13,18 +13,23 @@ extends Node3D
 ## Terraforming is gated: god mode has DIG/FILL tools (god_menu.gd) and the
 ## drill vehicle carves while driving — no free sculpting during normal play.
 
-const PIXELS := 32
 const LAYERS := 4
 const LAYER_NAMES := ["GROUND", "MAIN", "+1", "+2"]  # index 0..3, bottom up
 const BRUSH_RADIUS := 3.0       # default radius for replayed edits
 const KILL_Y := -20.0           # below the world: instant respawn backstop
 
+# Painted grid size in pixels — server-authoritative (gameSettings gridW/gridH,
+# and every layers payload carries its gs [w, h]). Rows are packed uint32
+# bitmask words, (PX_W+31)/32 of them per row, laid out flat row-major.
+var PX_W := 32
+var PX_H := 32
+
 # Stage bounds: a base haze sits over the whole world, visible fog banks
-# stand just outside the 128x128 play area, and the closer you get to the
-# edge the thicker it reads — full white ~38 m out, where you're turned
-# around to face the center.
-const FOG_START := 72.0    # partway up the boundary bowl (max-norm)
-const FOG_WHITE := 108.0
+# stand just outside the play area, and the closer you get to the edge the
+# thicker it reads — full white ~38 m out, where you're turned around to
+# face the center. Derived from the grid size when the world generates.
+var _fog_start := 72.0     # partway up the boundary bowl (max-norm)
+var _fog_white := 108.0
 const FOG_BASE := 0.0015   # always-on depth-fog density inside the arena
 
 # Unshaded white haze sheet for the boundary fog banks: solid near the
@@ -72,8 +77,6 @@ var _hover_sent := Vector2i(-1, -1)
 var _cursor_send_cd := 0.0
 var _spawn_mode := false       # SPAWN chip armed: clicks claim your zone
 var _spawn_button: Button
-var _vote_bar: PanelContainer
-var _vote_label: Label
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
@@ -89,6 +92,9 @@ var _probe_cd := 0.0
 
 func _ready() -> void:
 	_setup_environment()
+	var gs0 := _settings_gs()
+	PX_W = gs0.x
+	PX_H = gs0.y
 	_layers = _default_layers()
 	_zones = Net.spawn_zones.duplicate()
 	_build_editor_ui()
@@ -98,12 +104,53 @@ func _ready() -> void:
 	var live := _norm_layers(Net.creative_grid)
 	var painting := _norm_layers(Net.paint_rows)
 	if not live.is_empty():
-		_start_play(live, Net.terrain_edits.duplicate(), false)
+		_adopt_size(live["gs"])
+		_start_play(live["layers"], Net.terrain_edits.duplicate(), false)
 	elif OS.get_environment("FRIENDSLOP_AUTOJOIN") == "1":
 		_start_play.call_deferred(_layers, [], true)  # headless testing
 	elif not painting.is_empty():
 		# Someone is mid-painting: adopt their canvas
-		_adopt_paint(painting)
+		_adopt_size(painting["gs"])
+		_adopt_paint(painting["layers"])
+
+
+## Selectable map shapes (mirrors the server's GRID_OPTIONS).
+const GRID_OPTIONS := [
+	Vector2i(32, 32), Vector2i(48, 48), Vector2i(64, 64), Vector2i(96, 96),
+	Vector2i(64, 32), Vector2i(96, 48), Vector2i(96, 64),
+]
+
+
+static func _valid_gs(gs: Vector2i) -> Vector2i:
+	return gs if gs in GRID_OPTIONS else Vector2i(32, 32)
+
+
+## The size the server currently wants.
+static func _settings_gs() -> Vector2i:
+	return _valid_gs(Vector2i(
+		int(Net.game_settings.get("gridW", 32)), int(Net.game_settings.get("gridH", 32))))
+
+
+## Words per bitmask row.
+func _wc() -> int:
+	return (PX_W + 31) >> 5
+
+
+func _bit_at(rows: Array, r: int, c: int) -> bool:
+	return bool((int(rows[r * _wc() + (c >> 5)]) >> (31 - (c & 31))) & 1)
+
+
+## The canvas (and the world) changed size: fresh layers at the new size.
+func _adopt_size(gs: Vector2i) -> void:
+	gs = _valid_gs(gs)
+	if gs == Vector2i(PX_W, PX_H):
+		return
+	PX_W = gs.x
+	PX_H = gs.y
+	_layers = _default_layers()
+	if _painter:
+		_painter.fit()
+		_painter.queue_redraw()
 
 
 ## Back to the menu, or any other exit: stop counting toward editor votes.
@@ -113,35 +160,44 @@ func _exit_tree() -> void:
 
 ## Ground layer full (the flat plain you walk on), everything above empty.
 func _default_layers() -> Array:
+	var w := _wc()
 	var out := []
 	for li in LAYERS:
 		var rows := []
-		for r in PIXELS:
-			rows.append(0xFFFFFFFF if li == 0 else 0)
+		for _r in PX_H:
+			for wi in w:
+				var bits := mini(32, PX_W - wi * 32)
+				rows.append((0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if li == 0 else 0)
 		out.append(rows)
 	return out
 
 
-## Validate + int-normalize a {layers:[4x32]} payload (or a raw 4x32 Array).
-## Returns [] when the shape is wrong.
-func _norm_layers(data: Variant) -> Array:
-	if data is Dictionary:
-		data = data.get("layers")
-	if not (data is Array) or data.size() != LAYERS:
-		return []
+## Validate + int-normalize a {layers, gs:[w,h]} payload. Returns {} when the
+## shape is wrong, else {"gs": Vector2i, "layers": Array}.
+func _norm_layers(data: Variant) -> Dictionary:
+	if not data is Dictionary:
+		return {}
+	var raw: Variant = data.get("gs", [32, 32])
+	if not (raw is Array) or (raw as Array).size() != 2:
+		return {}
+	var gs := _valid_gs(Vector2i(int(raw[0]), int(raw[1])))
+	var layers: Variant = data.get("layers")
+	if not (layers is Array) or layers.size() != LAYERS:
+		return {}
+	var expect := gs.y * ((gs.x + 31) >> 5)
 	var out := []
-	for rows in data:
-		if not (rows is Array) or rows.size() != PIXELS:
-			return []
+	for rows in layers:
+		if not (rows is Array) or rows.size() != expect:
+			return {}
 		var ints := []
 		for v in rows:
 			ints.append(int(v))
 		out.append(ints)
-	return out
+	return {"gs": gs, "layers": out}
 
 
 func _grid_payload() -> Dictionary:
-	return {"layers": _layers}
+	return {"layers": _layers, "gs": [PX_W, PX_H]}
 
 
 func _adopt_paint(layers: Array) -> void:
@@ -184,11 +240,18 @@ func _on_net_event(event: String, data: Variant) -> void:
 	match event:
 		"creativePaint":
 			var painted := _norm_layers(data)
-			if not _playing and not painted.is_empty() and not _same_layers(painted):
-				_adopt_paint(painted)
+			if not _playing and not painted.is_empty():
+				_adopt_size(painted["gs"])
+				if not _same_layers(painted["layers"]):
+					_adopt_paint(painted["layers"])
 		"paintCleared":
 			if not _playing:
+				# A size change also lands here; pick up the new size first
+				_adopt_size(_settings_gs())
 				_adopt_paint(_default_layers())
+		"gameSettings":
+			if not _playing:
+				_adopt_size(_settings_gs())
 		"spawnZones":
 			_zones = data if data is Dictionary else {}
 			if _painter:
@@ -201,12 +264,11 @@ func _on_net_event(event: String, data: Variant) -> void:
 					"r": int(data.get("r", 0)), "c": int(data.get("c", 0)),
 					"t": Time.get_ticks_msec(),
 				}
-		"editVote":
-			_show_vote(data)
 		"creativeGrid":
 			var grid := _norm_layers(data)
-			if not grid.is_empty() and (not _playing or not _same_layers(grid)):
-				_start_play(grid, [], false)
+			if not grid.is_empty() and (not _playing or not _same_layers(grid["layers"])):
+				_adopt_size(grid["gs"])
+				_start_play(grid["layers"], [], false)
 		"gameEnded":
 			# Full wipe, grid included: everyone goes back to the lobby so the
 			# next map starts from a blank canvas.
@@ -249,6 +311,9 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 	if terrain == null:
 		terrain = VoxelTerrain.new()
 		add_child(terrain)
+	terrain.configure(PX_W, PX_H)
+	_fog_start = maxf(_half_x(), _half_z()) + 8.0
+	_fog_white = _fog_start + 36.0
 	terrain.deadzone_centers = _home_pixels().map(_px_world)
 	terrain.build_from_layers(_layers)
 	_make_deadzone_marker()
@@ -383,9 +448,13 @@ func _make_fog_shells() -> void:
 	shader.code = FOG_WALL_SHADER
 	var wall_h := 90.0
 	var wall_y := wall_h * 0.5 - 16.0  # from below the slabs up past their tops
+	# Square banks sized off the LONGER axis, so a rectangular map is still
+	# ringed (the fog line itself is max-norm, same as _update_fog_bounds).
+	var half := maxf(_half_x(), _half_z())
 	# [half-extent, opacity] — denser the deeper into the fog you are
-	# (first bank stands just past the boundary bowl's rim at 80)
-	for ring in [[82.0, 0.05], [90.0, 0.08], [98.0, 0.12], [107.0, 0.16], [120.0, 0.24]]:
+	# (first bank stands just past the boundary bowl's rim at half+16)
+	for ring in [[half + 18.0, 0.05], [half + 26.0, 0.08], [half + 34.0, 0.12],
+			[half + 43.0, 0.16], [half + 56.0, 0.24]]:
 		var r: float = ring[0]
 		var mat := ShaderMaterial.new()
 		mat.shader = shader
@@ -407,16 +476,25 @@ func _make_fog_shells() -> void:
 ## 3x3 block (web randomSpawn equivalent).
 func _spawn_points() -> Array:
 	var points: Array = []
-	for r in range(1, PIXELS - 1, 3):
-		for c in range(1, PIXELS - 1, 3):
-			if (int(_layers[1][r]) >> (31 - c)) & 1:
+	for r in range(1, PX_H - 1, 3):
+		for c in range(1, PX_W - 1, 3):
+			if _bit_at(_layers[1], r, c):
 				continue  # wall column
-			if not ((int(_layers[0][r]) >> (31 - c)) & 1):
+			if not _bit_at(_layers[0], r, c):
 				continue  # pit
-			points.append(Vector3(-64.0 + c * 4.0 + 2.0, 2.0, -64.0 + r * 4.0 + 2.0))
+			points.append(Vector3(-_half_x() + c * 4.0 + 2.0, 2.0, -_half_z() + r * 4.0 + 2.0))
 	if points.is_empty():
 		points.append(Vector3(2.0, 27.0, 2.0))  # all filled: spawn on the stack top
 	return points
+
+
+## Half-extents of the painted region in meters (pixels are 4 m).
+func _half_x() -> float:
+	return PX_W * 2.0
+
+
+func _half_z() -> float:
+	return PX_H * 2.0
 
 
 # --- Home base deadzone ------------------------------------------------------
@@ -437,7 +515,7 @@ func _my_px() -> Variant:
 
 
 func _px_world(h: Array) -> Vector3:
-	return Vector3(-64.0 + int(h[1]) * 4.0 + 2.0, 0.0, -64.0 + int(h[0]) * 4.0 + 2.0)
+	return Vector3(-_half_x() + int(h[1]) * 4.0 + 2.0, 0.0, -_half_z() + int(h[0]) * 4.0 + 2.0)
 
 
 func _in_deadzone(r: int, c: int) -> bool:
@@ -455,21 +533,21 @@ func _zone_respawn() -> Variant:
 	if not mine is Array or _layers.is_empty():
 		return null
 	for _i in 16:
-		var rr := clampi(int(mine[0]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PIXELS - 1)
-		var cc := clampi(int(mine[1]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PIXELS - 1)
-		if not ((int(_layers[0][rr]) >> (31 - cc)) & 1):
+		var rr := clampi(int(mine[0]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_H - 1)
+		var cc := clampi(int(mine[1]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_W - 1)
+		if not _bit_at(_layers[0], rr, cc):
 			continue  # pit
-		return Vector3(-64.0 + cc * 4.0 + 2.0, _surface_y(rr, cc) + 1.0, -64.0 + rr * 4.0 + 2.0)
+		return Vector3(-_half_x() + cc * 4.0 + 2.0, _surface_y(rr, cc) + 1.0, -_half_z() + rr * 4.0 + 2.0)
 	return null
 
 
 ## Painted surface height at a pixel: 8 m slabs, surface ~1 m into the slab.
 func _surface_y(r: int, c: int) -> float:
-	if _layers.is_empty() or not ((int(_layers[0][r]) >> (31 - c)) & 1):
+	if _layers.is_empty() or not _bit_at(_layers[0], r, c):
 		return 1.0
 	var top := 0
 	for li in range(1, LAYERS):
-		if (int(_layers[li][r]) >> (31 - c)) & 1:
+		if _bit_at(_layers[li], r, c):
 			top = li
 	return top * 8.0 + 1.0
 
@@ -541,7 +619,7 @@ func _update_fog_bounds() -> void:
 	var hpos := Vector2(player.global_position.x, player.global_position.z)
 	# Max-norm distance so the fog line hugs the SQUARE play area exactly
 	var d := maxf(absf(hpos.x), absf(hpos.y))
-	var f := clampf((d - FOG_START) / (FOG_WHITE - FOG_START), 0.0, 1.0)
+	var f := clampf((d - _fog_start) / (_fog_white - _fog_start), 0.0, 1.0)
 	if player.godmode or player.dead:
 		f = 0.0
 	_fog_f = f
@@ -786,6 +864,7 @@ func _build_editor_ui() -> void:
 
 	_painter = PixelPainter.new()
 	_painter.owner_scene = self
+	_painter.fit()
 	canvas_row.add_child(_painter)
 
 	# Layer chips beside the canvas, top slab first; click or scroll to switch
@@ -826,25 +905,6 @@ func _build_editor_ui() -> void:
 	layer_col.add_child(_spawn_button)
 	_set_layer(_active_layer)
 
-	# Confirmation bar: GENERATE and CLEAR need everyone at the canvas to agree
-	_vote_bar = PanelContainer.new()
-	_vote_bar.visible = false
-	_vote_bar.add_theme_stylebox_override("panel",
-		preload("res://UI/ui_style.gd").panel_box(Color(0.25, 0.06, 0.08, 0.9), 8))
-	box.add_child(_vote_bar)
-	var vrow := HBoxContainer.new()
-	vrow.add_theme_constant_override("separation", 10)
-	_vote_bar.add_child(vrow)
-	_vote_label = Label.new()
-	_vote_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	vrow.add_child(_vote_label)
-	for entry in [["YES", true], ["NO", false]]:
-		var vb := Button.new()
-		vb.text = entry[0]
-		vb.focus_mode = Control.FOCUS_NONE
-		vb.pressed.connect(func(): Net.emit_event("castEditVote", entry[1]))
-		vrow.add_child(vb)
-
 	var buttons := HBoxContainer.new()
 	buttons.alignment = BoxContainer.ALIGNMENT_CENTER
 	buttons.add_theme_constant_override("separation", 10)
@@ -870,19 +930,6 @@ func _build_editor_ui() -> void:
 	box.add_child(_status)
 
 
-## The server relays who still has to confirm a GENERATE or CLEAR.
-func _show_vote(data: Variant) -> void:
-	if _vote_bar == null:
-		return
-	if not data is Dictionary:
-		_vote_bar.visible = false
-		return
-	_vote_bar.visible = true
-	_vote_label.text = "%s?   %d/%d" % [
-		"CLEAR" if str(data.get("kind", "")) == "clear" else "START",
-		int(data.get("yes", 0)), int(data.get("need", 0))]
-
-
 func _set_layer(li: int) -> void:
 	_active_layer = clampi(li, 0, LAYERS - 1)
 	_spawn_mode = false
@@ -905,29 +952,42 @@ func change_layer(dir: int) -> void:
 func paint_cell(r: int, c: int, fill: bool) -> void:
 	if _in_deadzone(r, c):
 		return
-	var bit := 1 << (31 - c)
+	var i := r * _wc() + (c >> 5)
+	var bit := 1 << (31 - (c & 31))
 	var rows: Array = _layers[_active_layer]
 	if fill:
-		rows[r] = int(rows[r]) | bit
+		rows[i] = int(rows[i]) | bit
 		if _spire_mode:
 			for li in _active_layer:
-				_layers[li][r] = int(_layers[li][r]) | bit
+				_layers[li][i] = int(_layers[li][i]) | bit
 	else:
-		rows[r] = int(rows[r]) & ~bit
+		rows[i] = int(rows[i]) & ~bit
 
 
 class PixelPainter extends Control:
-	const CELL := 14
 	# Fill colors bottom-up: ground, main, +1, +2 (lighter = higher)
 	const LAYER_FILL := ["#8a5a3a", "#c78b5e", "#dfa878", "#f0cb96"]
 	const BG := Color("#1a2030")
 	const PIT := Color("#07080c")
 	const GHOST_ALPHA := 0.3
 	var owner_scene: Node
+	var cell := 14.0   # canvas cell size, shrinks to fit big grids on screen
 	var _paint_value := -1  # -1 idle, 1 fill, 0 erase
 
-	func _init() -> void:
-		custom_minimum_size = Vector2(32 * CELL, 32 * CELL)
+	## Size the canvas to the CURRENT grid: big maps get smaller cells so the
+	## whole board still fits the screen. Call after owner_scene is set and
+	## whenever the grid size changes.
+	func fit() -> void:
+		var w: int = owner_scene.PX_W if owner_scene else 32
+		var h: int = owner_scene.PX_H if owner_scene else 32
+		cell = maxf(5.0, floorf(560.0 / maxi(w, h)))
+		custom_minimum_size = Vector2(w * cell, h * cell)
+
+	func _col(v: float) -> int:
+		return clampi(int(v / cell), 0, (owner_scene.PX_W if owner_scene else 32) - 1)
+
+	func _row(v: float) -> int:
+		return clampi(int(v / cell), 0, (owner_scene.PX_H if owner_scene else 32) - 1)
 
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton:
@@ -947,38 +1007,39 @@ class PixelPainter extends Control:
 				_paint_value = -1
 			_paint_at(event.position)
 		elif event is InputEventMouseMotion:
-			owner_scene._on_hover(
-				clampi(int(event.position.y) / CELL, 0, 31),
-				clampi(int(event.position.x) / CELL, 0, 31))
+			owner_scene._on_hover(_row(event.position.y), _col(event.position.x))
 			if _paint_value != -1:
 				_paint_at(event.position)
 
 	func _paint_at(pos: Vector2) -> void:
 		if _paint_value == -1:
 			return
-		var c := clampi(int(pos.x) / CELL, 0, 31)
-		var r := clampi(int(pos.y) / CELL, 0, 31)
+		var c := _col(pos.x)
+		var r := _row(pos.y)
 		if owner_scene._spawn_mode:
 			# The server owns zones: it rejects overlaps and broadcasts the set
 			Net.emit_event("setSpawn", {"r": r, "c": c} if _paint_value == 1 else null)
 			return
+		var w: int = owner_scene.PX_W
+		var h: int = owner_scene.PX_H
 		var reach: int = owner_scene._brush - 1
 		for rr in range(r - reach, r + reach + 1):
 			for cc in range(c - reach, c + reach + 1):
-				if rr >= 0 and rr < 32 and cc >= 0 and cc < 32:
+				if rr >= 0 and rr < h and cc >= 0 and cc < w:
 					owner_scene.paint_cell(rr, cc, _paint_value == 1)
 		owner_scene._on_painted()
 		queue_redraw()
 
 	func _bit(li: int, r: int, c: int) -> bool:
-		return bool((int(owner_scene._layers[li][r]) >> (31 - c)) & 1)
+		return owner_scene._bit_at(owner_scene._layers[li], r, c)
 
 	## Active layer at full color; every other layer ghosted underneath so
 	## you can line slabs up. Missing ground reads as a near-black pit.
 	func _draw() -> void:
 		var active: int = owner_scene._active_layer
-		for r in 32:
-			for c in 32:
+		var CELL := cell
+		for r in owner_scene.PX_H:
+			for c in owner_scene.PX_W:
 				var rect := Rect2(c * CELL, r * CELL, CELL - 1, CELL - 1)
 				var col := BG if _bit(0, r, c) else PIT
 				for li in range(1, 4):

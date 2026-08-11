@@ -643,6 +643,11 @@ func _refresh(scores: Dictionary) -> void:
 	var slayer := bool(Net.game_settings.get("slayer", true))
 	# Damage feedback: datamosh pulse + music sting when your health drops
 	var my_hp := int(scores.get(sync_node.self_id, 0))
+	if slayer and sync_node.self_id != "":
+		var hfx: Node = get_tree().get_first_node_in_group("screen_fx")
+		if hfx:
+			# Critical health burns dead pixels into the pilot's view
+			hfx.set_health(float(my_hp) / 100.0)
 	if slayer and sync_node.self_id != "" and _last_hp >= 0 and my_hp < _last_hp:
 		var fx: Node = get_tree().get_first_node_in_group("screen_fx")
 		if fx:

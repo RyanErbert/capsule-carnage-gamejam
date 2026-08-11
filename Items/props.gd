@@ -159,9 +159,13 @@ func _scatter_grass() -> void:
 		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(str(Net.creative_grid))
+	# Scatter across whatever the painted region actually spans
+	var t: Node = get_tree().get_first_node_in_group("voxel_terrain")
+	var hx: float = (t.paint_half_x() if t else 64.0) - 2.0
+	var hz: float = (t.paint_half_z() if t else 64.0) - 2.0
 	for _i in GRASS_CLUMPS:
-		var cx := rng.randf_range(-62.0, 62.0)
-		var cz := rng.randf_range(-62.0, 62.0)
+		var cx := rng.randf_range(-hx, hx)
+		var cz := rng.randf_range(-hz, hz)
 		for _j in rng.randi_range(3, 6):
 			var x := cx + rng.randf_range(-2.4, 2.4)
 			var z := cz + rng.randf_range(-2.4, 2.4)

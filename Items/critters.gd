@@ -28,6 +28,20 @@ const GUIDED_CROW_SPEED := 15.0   # a hair over CROWBOT_SPEED (14)
 const GUIDED_RAT_SPEED := 12.0    # a hair over RATBOT_SPEED (11)
 const HUNT_TIME := 10.0     # how long a rat-attack mark keeps the pack on someone
 
+# Perching: crows tire of flying and settle on high edges (terrain rims, wall
+# tops, tower caps) for a while. Anything that scrambles the flock — a
+# piloted crow-bot, a strike, a grudge, a dive — puts them all back up.
+const PERCH_MAX := 120.0    # longest a bird rests before taking off again
+const PERCH_MIN_AIR := 12.0 # minimum airtime between perches
+const PERCH_SEARCH_R := 26.0
+const PERCH_TRIES := 14
+const PERCH_MIN_DROP := 1.5  # how much a ledge must stand above its neighbour
+# Sag while crawling a wall. Deliberately larger than the idle wander and
+# smaller than a chase/hunt drive: ambient rats stay on the floor, but one
+# with a reason to climb (prey or its pack home up a ledge) goes up.
+const RAT_SLIDE := 1.5
+const RAT_CLIMB := 3.0       # how hard an into-the-wall push converts to climb
+
 # Combat: critters are shootable (one hit kills a boid) and hold a grudge —
 # a flock that loses a member turns on whatever killed it for a while.
 const HIT_R := {"crows": 1.0, "rats": 0.8}   # generous per-boid hit radius
@@ -261,6 +275,17 @@ func _add_flock(f: Variant) -> void:
 			"vel": Vector3(randf_range(-2, 2), 0, randf_range(-2, 2)),
 			"diving": false,
 			"dead": is_dead,
+			# Per-bird flight personality, so a flock spreads out instead of
+			# orbiting as one ring
+			"ring_r": randf_range(0.45, 1.25),
+			"ring_y": randf_range(-5.0, 6.0),
+			"spin": 1.0 if randf() < 0.7 else -1.0,
+			"bob": randf_range(0.15, 0.5),
+			"phase": randf() * TAU,
+			"perch": null,
+			"perch_to": null,
+			"perch_t": 0.0,
+			"perch_cd": randf_range(4.0, 30.0),
 		})
 	_flocks[id] = {"kind": kind, "anchor": anchor, "boids": boids, "bite_cd": 0.0, "dive_cd": randf_range(3.0, 7.0)}
 
@@ -286,7 +311,10 @@ func _physics_process(delta: float) -> void:
 
 
 ## Classic three-rule boids plus an anchor pull; one crow at a time breaks
-## formation to dive at the player, then climbs back into the wheel.
+## formation to dive at the player, then climbs back into the wheel. Birds
+## that have been up a while go look for a high edge to PERCH on, sit there
+## for up to PERCH_MAX, then take off again — so a flock reads as scattered
+## individuals rather than one synchronized ring.
 func _tick_crows(flock: Dictionary, delta: float) -> void:
 	var boids: Array = flock["boids"]
 	var anchor: Vector3 = flock["anchor"]
@@ -311,18 +339,54 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 		if not alive.is_empty():
 			var pick: Dictionary = alive.pick_random()
 			pick["diving"] = true
+	# Anything that scrambles the flock (a bot, a strike, a grudge, a dive)
+	# also puts every perched bird back in the air.
+	var scramble: bool = bot != null or striking or can_aggro
 	for b in boids:
 		if bool(b.get("dead", false)):
 			continue
 		var pos: Vector3 = b["pos"]
 		var vel: Vector3 = b["vel"]
+		# --- Perching: sit still on a found spot until the rest timer runs out
+		if b.get("perch") != null and not scramble:
+			b["perch_t"] = float(b.get("perch_t", 0.0)) - delta
+			var seat: Vector3 = b["perch"]
+			pos = pos.lerp(seat, minf(1.0, 4.0 * delta))
+			b["pos"] = pos
+			b["vel"] = Vector3.ZERO
+			var pnode: Node3D = b["node"]
+			pnode.global_position = pos
+			# Idle fidget: the odd hop of the head, wings folded
+			var wl0: Node3D = pnode.get_node("WingL")
+			var fold := -0.15 + sin(Time.get_ticks_msec() / 1000.0 * 0.7 + pos.x) * 0.05
+			wl0.rotation.z = fold
+			(pnode.get_node("WingR") as Node3D).rotation.z = -fold
+			if float(b["perch_t"]) <= 0.0:
+				b["perch"] = null
+				b["vel"] = Vector3(randf_range(-3, 3), 3.0, randf_range(-3, 3))
+				b["perch_cd"] = randf_range(PERCH_MIN_AIR, PERCH_MIN_AIR * 2.5)
+			continue
+		if b.get("perch") != null and scramble:
+			b["perch"] = null
+			b["perch_cd"] = randf_range(6.0, 14.0)
+			b["vel"] = Vector3(randf_range(-4, 4), 4.0, randf_range(-4, 4))
+		# Been flying a while: go look for somewhere high to sit
+		b["perch_cd"] = float(b.get("perch_cd", 8.0)) - delta
+		if not scramble and float(b["perch_cd"]) <= 0.0 and b.get("perch_to") == null:
+			var spot: Variant = _find_perch(pos)
+			if spot != null:
+				b["perch_to"] = spot
+			else:
+				b["perch_cd"] = randf_range(4.0, 9.0)  # nothing nearby, try later
+		if b.get("perch_to") != null and scramble:
+			b["perch_to"] = null
 		var accel := Vector3.ZERO
 		# Separation / cohesion / alignment
 		var center := Vector3.ZERO
 		var heading := Vector3.ZERO
 		var mates := 0
 		for o in boids:
-			if o == b or bool(o.get("dead", false)):
+			if o == b or bool(o.get("dead", false)) or o.get("perch") != null:
 				continue
 			var d: float = pos.distance_to(o["pos"])
 			if d < SEP_R and d > 0.001:
@@ -335,7 +399,16 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 			accel += (center / mates - pos) * 0.8
 			accel += (heading / mates - vel) * 0.6
 		var speed := CROW_SPEED
-		if striking:
+		if b.get("perch_to") != null and not scramble:
+			# Glide in and land: close enough and slow enough = perched
+			var seat_to: Vector3 = b["perch_to"]
+			accel += (seat_to - pos).normalized() * 14.0
+			speed = CROW_SPEED * 0.8
+			if pos.distance_to(seat_to) < 1.0:
+				b["perch"] = seat_to
+				b["perch_to"] = null
+				b["perch_t"] = randf_range(PERCH_MAX * 0.25, PERCH_MAX)
+		elif striking:
 			# Torrent: the whole flock funnels into the strike point
 			b["diving"] = false
 			accel += (strike_p - pos).normalized() * 30.0
@@ -361,14 +434,21 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 					Sfx.jump(pos)  # sharp flap-snap on the hit
 		else:
 			b["diving"] = false
-			# Wheel around home: pull toward the ring, hold altitude. A guided
-			# flock rides a tighter, harder wheel so it visibly obeys the bot.
-			var out := pos - home
-			var ring := 6.0 if bot else ANCHOR_R
+			# Wheel around home. Each bird keeps its OWN ring radius, height
+			# offset and orbit direction (rolled at spawn), so a loose flock
+			# drifts around the area instead of collapsing into one halo. A
+			# guided flock tightens up so it visibly obeys the bot.
+			var out := pos - home - Vector3(0, float(b.get("ring_y", 0.0)), 0)
+			var ring: float = 6.0 if bot else ANCHOR_R * float(b.get("ring_r", 1.0))
 			if out.length() > ring:
 				accel += -out.normalized() * (16.0 if bot else 10.0)
-			accel += Vector3(-out.z, 0, out.x).normalized() * 3.0  # orbit bias
-			accel.y += clampf(home.y - pos.y, -6.0 if bot else -4.0, 6.0 if bot else 4.0)
+			elif not bot and out.length() < ring * 0.45:
+				accel += out.normalized() * 4.0   # don't pile into the middle
+			accel += Vector3(-out.z, 0, out.x).normalized() * 3.0 * float(b.get("spin", 1.0))
+			# Lazy vertical wander so they aren't all on one plane
+			var want_y: float = home.y + float(b.get("ring_y", 0.0)) \
+				+ sin(Time.get_ticks_msec() / 1000.0 * float(b.get("bob", 0.3)) + float(b.get("phase", 0.0))) * 3.0
+			accel.y += clampf(want_y - pos.y, -6.0 if bot else -4.0, 6.0 if bot else 4.0)
 			if bot:
 				speed = GUIDED_CROW_SPEED  # match the machine's pace
 		vel += accel * delta
@@ -449,31 +529,91 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 				accel += -out.normalized() * (14.0 if bot else 8.0)
 			# Idle scurry: wander noise
 			accel += Vector3(randf_range(-3, 3), 0, randf_range(-3, 3))
-		accel.y = 0.0
+		# Rats climb like the rat-attack: they crawl in the plane of whatever
+		# surface they're on (walls and ceilings included), and the part of
+		# their drive pushing INTO a surface becomes a climb UP it. Gravity
+		# along the surface pulls them back down when they stop pushing, so
+		# they don't end up living on the ceiling.
+		var n: Vector3 = b.get("n", Vector3.UP)
+		var up_t := Vector3.UP - n * Vector3.UP.dot(n)
+		if up_t.length() > 0.05:
+			up_t = up_t.normalized()
+			var into := -accel.dot(n)
+			if into > 0.0:
+				accel += up_t * into * RAT_CLIMB
+			accel -= up_t * RAT_SLIDE   # sag back down the wall
 		vel += accel * delta
-		vel.y = 0.0
 		# Guided or on a hunt: run hot enough to pace the machine
 		var cap := GUIDED_RAT_SPEED if (bot or hunt_p != null) else RAT_SPEED
-		vel = vel.limit_length(cap)
-		# Rats obey walls too: clip the step at ankle height and slide along
-		var lift := Vector3(0, 0.25, 0)
-		var clip := _clip_move(pos + lift, pos + lift + vel * delta)
+		vel = (vel - n * vel.dot(n)).limit_length(cap)
+		var clip := _clip_move(pos + n * 0.25, pos + n * 0.25 + vel * delta)
 		if not clip.is_empty():
-			vel = vel.slide(clip["normal"])
+			n = clip["normal"]
+			b["n"] = n
+			vel = vel.slide(n)
 		pos += vel * delta
-		pos.y = _ground_y(pos) + 0.12
+		# Re-seat on the surface along -n; nothing there = back to open ground
+		var sq := PhysicsRayQueryParameters3D.create(pos + n * 0.6, pos - n * 1.4)
+		if player:
+			sq.exclude = [player.get_rid()]
+		var seat := get_world_3d().direct_space_state.intersect_ray(sq)
+		if seat.is_empty():
+			b["n"] = Vector3.UP
+			pos.y = _ground_y(pos) + 0.12
+		else:
+			b["n"] = seat["normal"]
+			pos = (seat["position"] as Vector3) + (seat["normal"] as Vector3) * 0.12
 		b["pos"] = pos
 		b["vel"] = vel
 		var node: Node3D = b["node"]
 		node.global_position = pos
 		if vel.length() > 0.3:
-			node.rotation.y = atan2(-vel.x, -vel.z)
+			var nn: Vector3 = b.get("n", Vector3.UP)
+			var f := vel - nn * vel.dot(nn)
+			if f.length() > 0.05 and absf(f.normalized().dot(nn)) < 0.99:
+				node.global_transform.basis = Basis.looking_at(f.normalized(), nn)
 
 
 func _ground_y(pos: Vector3) -> float:
 	var q := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 4, 0), pos + Vector3(0, -12, 0))
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
 	return hit["position"].y if hit else pos.y
+
+
+## Hunt for somewhere high to sit near `pos`: sample points around the bird,
+## drop a ray, and take a hit that is an EDGE — flat-ish on top, with open air
+## just beside it (a wall cap, a rim, a tower top), well above the ground
+## below it. Returns a seat position, or null when nothing suitable is close.
+func _find_perch(pos: Vector3) -> Variant:
+	var space := get_world_3d().direct_space_state
+	var best: Variant = null
+	var best_h := PERCH_MIN_DROP   # must stand this far above its surroundings
+	for _i in PERCH_TRIES:
+		var a := randf() * TAU
+		var d := randf_range(4.0, PERCH_SEARCH_R)
+		var probe := pos + Vector3(cos(a) * d, 0, sin(a) * d)
+		var from := probe + Vector3(0, 6.0, 0)
+		var q := PhysicsRayQueryParameters3D.create(from, from + Vector3(0, -40.0, 0))
+		if player:
+			q.exclude = [player.get_rid()]
+		var hit := space.intersect_ray(q)
+		if hit.is_empty() or float(hit["normal"].y) < 0.6:
+			continue   # nothing there, or too steep to stand on
+		var top: Vector3 = hit["position"]
+		# Is it an EDGE? Sample the four neighbours and take the BIGGEST drop —
+		# one side falling away is what makes a ledge, wall cap or rim.
+		var drop := 0.0
+		for step: Vector3 in [Vector3(1.6, 0, 0), Vector3(-1.6, 0, 0), Vector3(0, 0, 1.6), Vector3(0, 0, -1.6)]:
+			var nf := top + step + Vector3(0, 1.0, 0)
+			var nq := PhysicsRayQueryParameters3D.create(nf, nf + Vector3(0, -40.0, 0))
+			if player:
+				nq.exclude = [player.get_rid()]
+			var nh := space.intersect_ray(nq)
+			drop = maxf(drop, top.y - float(nh["position"].y) if nh else 40.0)
+		if drop > best_h:
+			best_h = drop
+			best = top + Vector3(0, 0.16, 0)
+	return best
 
 
 ## Segment cast for a boid step (with a little skin), ignoring our own player

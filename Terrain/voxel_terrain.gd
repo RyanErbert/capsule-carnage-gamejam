@@ -14,17 +14,25 @@ extends Node3D
 ## ConcavePolygonShape3D collider.
 
 const VOXEL := 2.0                 # meters per lattice step
-const NX := 80                     # cells along X  (world 160 m incl. the bowl)
 const NY := 20                     # cells along Y  (world 40 m: -12 .. +28)
-const NZ := 80                     # cells along Z
-const ORIGIN := Vector3(-80.0, -12.0, -80.0)
 const ISO := 0.5
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
 
-# Uneditable BOWL around the painted 128x128 region: MARGIN cells (16 m) per
-# side whose ground ramps from the adjacent edge pixel's height to ground
-# level — pits at the rim rise from their own floor instead of opening into
-# the void, flat ground gets a seamless apron. Brushes may sculpt the inner
+# Horizontal extent follows the painted grid (configure(w, h)): pixels are
+# 4 m = 2 lattice cells each, plus the bowl margin per side. NX/NZ stay
+# divisible by CHUNK as long as the pixel counts are multiples of 4.
+var PX_W := 32                     # painted pixels across X
+var PX_H := 32                     # painted pixels across Z
+var NX := 80                       # cells along X  (world 160 m incl. the bowl)
+var NZ := 80                       # cells along Z
+var ORIGIN := Vector3(-80.0, -12.0, -80.0)
+var FRAME_INNER_X := 78.0          # butts against the bowl's outer shelf
+var FRAME_INNER_Z := 78.0
+
+# Uneditable BOWL around the painted region: MARGIN cells (16 m) per side
+# whose ground ramps from the adjacent edge pixel's height to ground level —
+# pits at the rim rise from their own floor instead of opening into the
+# void, flat ground gets a seamless apron. Brushes may sculpt the inner
 # BRUSH_REACH cells of it; the rest is world boundary and stays locked.
 const MARGIN := 8
 const BRUSH_REACH := 3
@@ -35,10 +43,9 @@ const BRUSH_REACH := 3
 # A flat ground surface meshes out at y ~= 1.0 (crossing + smoothing).
 const SLAB := 8.0
 
-# The world beyond the paintable 128x128 region: a flat unmodifiable
-# CIRCULAR plain level with the ground layer, so the map has no rim dropoff.
-# The fog boundary (creative.gd) turns players around long before the edge.
-const FRAME_INNER := 78.0          # butts against the bowl's outer shelf
+# The world beyond the paintable region: a flat unmodifiable CIRCULAR plain
+# level with the ground layer, so the map has no rim dropoff. The fog
+# boundary (creative.gd) turns players around long before the edge.
 const STAGE_RADIUS := 640.0        # outer edge of the circular plain
 const FRAME_TOP := 0.48            # a hair under the bowl apron's ~0.5 surface
 const FRAME_SEGMENTS := 128
@@ -128,6 +135,39 @@ func _ready() -> void:
 	_material.set_shader_parameter("rock_tex", load("res://Terrain/textures/rock.jpg"))
 
 
+## Size the lattice to a painted grid of `w` x `h` pixels. Call before
+## build_from_layers; a size change throws away every chunk and the frame.
+func configure(w: int, h: int) -> void:
+	if w == PX_W and h == PX_H and not _chunks.is_empty():
+		return
+	PX_W = w
+	PX_H = h
+	NX = w * 2 + 2 * MARGIN
+	NZ = h * 2 + 2 * MARGIN
+	var half_x := float(w * 2) + MARGIN * VOXEL
+	var half_z := float(h * 2) + MARGIN * VOXEL
+	ORIGIN = Vector3(-half_x, -12.0, -half_z)
+	FRAME_INNER_X = half_x - 2.0
+	FRAME_INNER_Z = half_z - 2.0
+	for key in _chunks:
+		_chunks[key]["body"].queue_free()
+	_chunks.clear()
+	if _frame_body and is_instance_valid(_frame_body):
+		_frame_body.queue_free()
+	_frame_body = null
+	_frame_built = false
+
+
+## Half-extents of the painted (brushable) region in meters — world queries
+## like the grass scatter size themselves off these.
+func paint_half_x() -> float:
+	return PX_W * 2.0
+
+
+func paint_half_z() -> float:
+	return PX_H * 2.0
+
+
 func _idx(x: int, y: int, z: int) -> int:
 	return (y * (NZ + 1) + z) * (NX + 1) + x
 
@@ -138,17 +178,19 @@ func _d(x: int, y: int, z: int) -> float:
 	return _density[_idx(x, y, z)]
 
 
-## Build the field from the editor's layer stack: `layers` is 4 Arrays of 32
-## ints (ground, main, +1, +2 — bottom to top), bit (31-col) = filled pixel.
-## Each pixel is a 4x4 m column within its 8 m slab; bedrock fills [-12,-8]
-## beneath everything regardless of paint. What's painted is what you get,
-## floating slabs included — SPIRE MODE in the painter fills the columns
-## underneath at paint time instead (creative.gd), so the canvas never lies.
+## Build the field from the editor's layer stack: `layers` is 4 flat Arrays
+## of PX rows x (PX+31)/32 uint32 words (ground, main, +1, +2 — bottom to
+## top), bit (31 - col&31) = filled pixel. Each pixel is a 4x4 m column
+## within its 8 m slab; bedrock fills [-12,-8] beneath everything regardless
+## of paint. What's painted is what you get, floating slabs included — SPIRE
+## MODE in the painter fills the columns underneath at paint time instead
+## (creative.gd), so the canvas never lies.
 func build_from_layers(layers: Array) -> void:
 	var eff: Array = layers
 	_density.resize((NX + 1) * (NY + 1) * (NZ + 1))
 	_density.fill(0.0)
 	var points_per_pixel := int(4.0 / VOXEL)  # 2
+	var w := (PX_W + 31) >> 5   # bitmask words per pixel row
 	# Bowl heights around the rim: per edge pixel, the topmost solid row
 	var bowl_top := _bowl_tops(eff)
 	for y in NY + 1:
@@ -158,7 +200,7 @@ func build_from_layers(layers: Array) -> void:
 		var li := ((y - 3) >> 2) if (y >= 3 and y <= 18) else -1
 		for z in NZ + 1:
 			var dz := maxi(MARGIN - z, z - (NZ - MARGIN))
-			var pz := clampi((z - MARGIN) / points_per_pixel, 0, 31)
+			var pz := clampi((z - MARGIN) / points_per_pixel, 0, PX_H - 1)
 			for x in NX + 1:
 				var dx := maxi(MARGIN - x, x - (NX - MARGIN))
 				var d := maxi(dx, dz)
@@ -167,15 +209,16 @@ func build_from_layers(layers: Array) -> void:
 					# Bowl band: solid up to a row that blends from the edge
 					# pixel's own top toward ground level (row 6) outward.
 					if not solid and y >= 1:
-						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, 31)
-						var top: int = bowl_top[pz * 32 + px_e]
+						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, PX_W - 1)
+						var top: int = bowl_top[pz * PX_W + px_e]
 						var band := roundi(lerpf(float(top), 6.0, clampf(d / float(MARGIN), 0.0, 1.0)))
 						solid = y <= band
 				elif not solid and li >= 0 and li < eff.size():
 					var rows: Array = eff[li]
-					var px := clampi((x - MARGIN) / points_per_pixel, 0, 31)
-					if pz < rows.size():
-						solid = (int(rows[pz]) >> (31 - px)) & 1
+					var px := clampi((x - MARGIN) / points_per_pixel, 0, PX_W - 1)
+					var wi := pz * w + (px >> 5)
+					if wi < rows.size():
+						solid = (int(rows[wi]) >> (31 - (px & 31))) & 1
 				if solid:
 					_density[_idx(x, y, z)] = 1.0
 	var t0 := Time.get_ticks_msec()
@@ -194,32 +237,46 @@ func build_from_layers(layers: Array) -> void:
 ## Topmost solid lattice row per pixel (bedrock top 2 if fully erased) — the
 ## bowl ramps outward from these, so a rim pit rises from its own floor.
 func _bowl_tops(eff: Array) -> PackedInt32Array:
+	var w := (PX_W + 31) >> 5
 	var tops := PackedInt32Array()
-	tops.resize(32 * 32)
+	tops.resize(PX_W * PX_H)
 	tops.fill(BEDROCK_Y)
 	for li in range(mini(4, eff.size()) - 1, -1, -1):
 		var rows: Array = eff[li]
-		for pz in mini(32, rows.size()):
-			var bits := int(rows[pz])
-			for px in 32:
-				if tops[pz * 32 + px] == BEDROCK_Y and (bits >> (31 - px)) & 1:
-					tops[pz * 32 + px] = 6 + li * 4
+		for pz in PX_H:
+			for px in PX_W:
+				var wi := pz * w + (px >> 5)
+				if wi >= rows.size():
+					continue
+				if tops[pz * PX_W + px] == BEDROCK_Y and (int(rows[wi]) >> (31 - (px & 31))) & 1:
+					tops[pz * PX_W + px] = 6 + li * 4
 	return tops
 
 
-## One 3x3x3 box blur pass: turns the binary field into chamfered slopes so
-## surface nets produces bevels instead of razor voxel edges.
+## One 3x3x3 box blur pass, run SEPARABLY (three 3-tap passes): identical
+## chamfered slopes, but 9 reads per point instead of 27 — the difference
+## between seconds and half a minute on the big grid sizes.
 func _smooth_once() -> void:
 	var src := _density.duplicate()
 	for y in range(1, NY):
 		for z in range(1, NZ):
 			for x in range(1, NX):
-				var acc := 0.0
-				for dy in range(-1, 2):
-					for dz in range(-1, 2):
-						for dx in range(-1, 2):
-							acc += src[_idx(x + dx, y + dy, z + dz)]
-				_density[_idx(x, y, z)] = acc / 27.0
+				var i := _idx(x, y, z)
+				_density[i] = (src[i - 1] + src[i] + src[i + 1]) / 3.0
+	src = _density.duplicate()
+	var zstride := NX + 1
+	for y in range(1, NY):
+		for z in range(1, NZ):
+			for x in range(1, NX):
+				var i := _idx(x, y, z)
+				_density[i] = (src[i - zstride] + src[i] + src[i + zstride]) / 3.0
+	src = _density.duplicate()
+	var ystride := (NZ + 1) * (NX + 1)
+	for y in range(1, NY):
+		for z in range(1, NZ):
+			for x in range(1, NX):
+				var i := _idx(x, y, z)
+				_density[i] = (src[i - ystride] + src[i] + src[i + ystride]) / 3.0
 
 
 ## Outermost lattice shell forced empty: every solid region is watertight,
@@ -240,14 +297,16 @@ const BEDROCK_Y := 2
 
 ## The flat plain surrounding the paintable region: an annulus mesh with a
 ## square inner hole (hugging the voxel region) and a circular outer edge.
-## Built once; survives map rebuilds untouched.
+## Built once per size; survives same-size map rebuilds untouched.
 var _frame_built := false
+var _frame_body: StaticBody3D
 
 ## Point on the square inner perimeter in the direction of angle `a`.
 func _square_point(a: float) -> Vector3:
 	var c := cos(a)
 	var s := sin(a)
-	var t := FRAME_INNER / maxf(absf(c), absf(s))
+	# Rectangle, not square: whichever axis the ray leaves through wins
+	var t := minf(FRAME_INNER_X / maxf(absf(c), 0.0001), FRAME_INNER_Z / maxf(absf(s), 0.0001))
 	return Vector3(c * t, FRAME_TOP, s * t)
 
 
@@ -285,6 +344,7 @@ func _build_frame() -> void:
 	col.shape = shape
 	body.add_child(col)
 	add_child(body)
+	_frame_body = body
 
 ## Density at a world position (nearest lattice point) — used to detect a
 ## player embedded by a fill brush so they can be popped out upward.
