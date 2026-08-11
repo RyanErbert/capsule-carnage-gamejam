@@ -71,9 +71,10 @@ func _on_net_event(event: String, data: Variant) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
 		_mg_firing = false
-	# Weapons are offline in god mode AND while riding a vehicle (the drill's
-	# left-click carve owns the mouse there)
-	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode or player.vehicle != null:
+	# Weapons are offline in god mode, riding a vehicle (the drill's left-click
+	# carve owns the mouse there), and piloting a bot (click = swarm strike)
+	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode \
+			or player.vehicle != null or player.piloting:
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		# Web: mousedown starts the machinegun loop; anything else is consumeItem()
@@ -166,6 +167,14 @@ func use_item() -> void:
 			var bridge := get_parent().get_node_or_null("BuildController")
 			if bridge:
 				bridge.fire_bridge_gun()
+		"crowbot":
+			# Deploys a crow-bot machine ahead of you and takes the stick.
+			# Single use; the machine stays in the world afterwards (E re-pilots).
+			var wv: Node = get_tree().get_first_node_in_group("world_vehicles")
+			if wv == null or player.piloting or player.vehicle != null:
+				return
+			wv.deploy_bot("crowbot")
+			_shift_inventory()
 		"rocket":
 			if _rocket_cd > 0.0:
 				return

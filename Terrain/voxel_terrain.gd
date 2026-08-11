@@ -14,12 +14,20 @@ extends Node3D
 ## ConcavePolygonShape3D collider.
 
 const VOXEL := 2.0                 # meters per lattice step
-const NX := 64                     # cells along X  (world 128 m)
+const NX := 80                     # cells along X  (world 160 m incl. the bowl)
 const NY := 20                     # cells along Y  (world 40 m: -12 .. +28)
-const NZ := 64                     # cells along Z
-const ORIGIN := Vector3(-64.0, -12.0, -64.0)
+const NZ := 80                     # cells along Z
+const ORIGIN := Vector3(-80.0, -12.0, -80.0)
 const ISO := 0.5
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
+
+# Uneditable BOWL around the painted 128x128 region: MARGIN cells (16 m) per
+# side whose ground ramps from the adjacent edge pixel's height to ground
+# level — pits at the rim rise from their own floor instead of opening into
+# the void, flat ground gets a seamless apron. Brushes may sculpt the inner
+# BRUSH_REACH cells of it; the rest is world boundary and stays locked.
+const MARGIN := 8
+const BRUSH_REACH := 3
 
 # Vertical layout: 8 m slabs (tall extrusion). Bedrock [-12,-8] is implicit
 # and uneditable; the 4 painted layers stack above it: ground [-8,0]
@@ -30,7 +38,7 @@ const SLAB := 8.0
 # The world beyond the paintable 128x128 region: a flat unmodifiable
 # CIRCULAR plain level with the ground layer, so the map has no rim dropoff.
 # The fog boundary (creative.gd) turns players around long before the edge.
-const FRAME_INNER := 60.0          # butts against the voxel region's rim
+const FRAME_INNER := 78.0          # butts against the bowl's outer shelf
 const STAGE_RADIUS := 640.0        # outer edge of the circular plain
 const FRAME_TOP := 0.98            # a hair under the voxel floor's ~1.0
 const FRAME_SEGMENTS := 128
@@ -141,21 +149,33 @@ func build_from_layers(layers: Array) -> void:
 	_density.resize((NX + 1) * (NY + 1) * (NZ + 1))
 	_density.fill(0.0)
 	var points_per_pixel := int(4.0 / VOXEL)  # 2
+	# Bowl heights around the rim: per edge pixel, the topmost solid row
+	var bowl_top := _bowl_tops(eff)
 	for y in NY + 1:
 		# Lattice rows: 1-2 bedrock, then 4 rows per slab: 3-6 ground,
 		# 7-10 main, 11-14 (+1), 15-18 (+2); 19-20 stay air for the seal.
 		var bedrock := y >= 1 and y <= 2
 		var li := ((y - 3) >> 2) if (y >= 3 and y <= 18) else -1
-		if not bedrock and (li < 0 or li >= eff.size()):
-			continue
-		var rows: Array = eff[li] if li >= 0 else []
 		for z in NZ + 1:
-			var pz := clampi(z / points_per_pixel, 0, 31)
+			var dz := maxi(MARGIN - z, z - (NZ - MARGIN))
+			var pz := clampi((z - MARGIN) / points_per_pixel, 0, 31)
 			for x in NX + 1:
-				var px := clampi(x / points_per_pixel, 0, 31)
+				var dx := maxi(MARGIN - x, x - (NX - MARGIN))
+				var d := maxi(dx, dz)
 				var solid := bedrock
-				if not solid and pz < rows.size():
-					solid = (int(rows[pz]) >> (31 - px)) & 1
+				if d > 0:
+					# Bowl band: solid up to a row that blends from the edge
+					# pixel's own top toward ground level (row 6) outward.
+					if not solid and y >= 1:
+						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, 31)
+						var top: int = bowl_top[pz * 32 + px_e]
+						var band := roundi(lerpf(float(top), 6.0, clampf(d / float(MARGIN), 0.0, 1.0)))
+						solid = y <= band
+				elif not solid and li >= 0 and li < eff.size():
+					var rows: Array = eff[li]
+					var px := clampi((x - MARGIN) / points_per_pixel, 0, 31)
+					if pz < rows.size():
+						solid = (int(rows[pz]) >> (31 - px)) & 1
 				if solid:
 					_density[_idx(x, y, z)] = 1.0
 	var t0 := Time.get_ticks_msec()
@@ -169,6 +189,22 @@ func build_from_layers(layers: Array) -> void:
 		tris += mi.mesh.surface_get_array_len(0) / 3
 	print("[terrain] built %dx%dx%d field in %d ms — %d chunks, %d tris" % [
 		NX, NY, NZ, Time.get_ticks_msec() - t0, _chunks.size(), tris])
+
+
+## Topmost solid lattice row per pixel (bedrock top 2 if fully erased) — the
+## bowl ramps outward from these, so a rim pit rises from its own floor.
+func _bowl_tops(eff: Array) -> PackedInt32Array:
+	var tops := PackedInt32Array()
+	tops.resize(32 * 32)
+	tops.fill(BEDROCK_Y)
+	for li in range(mini(4, eff.size()) - 1, -1, -1):
+		var rows: Array = eff[li]
+		for pz in mini(32, rows.size()):
+			var bits := int(rows[pz])
+			for px in 32:
+				if tops[pz * 32 + px] == BEDROCK_Y and (bits >> (31 - px)) & 1:
+					tops[pz * 32 + px] = 6 + li * 4
+	return tops
 
 
 ## One 3x3x3 box blur pass: turns the binary field into chamfered slopes so
@@ -280,9 +316,11 @@ func apply_brush(center: Vector3, radius: float, sign_: float, strength := 1.0) 
 	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var dirty := {}
+	# Brushes reach a little past the painted region; the outer bowl is locked
+	var e0 := MARGIN - BRUSH_REACH
 	for y in range(maxi(BEDROCK_Y + 1, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
-		for z in range(maxi(1, floori(lo.z)), mini(NZ - 1, ceili(hi.z)) + 1):
-			for x in range(maxi(1, floori(lo.x)), mini(NX - 1, ceili(hi.x)) + 1):
+		for z in range(maxi(e0, floori(lo.z)), mini(NZ - e0, ceili(hi.z)) + 1):
+			for x in range(maxi(e0, floori(lo.x)), mini(NX - e0, ceili(hi.x)) + 1):
 				var p := ORIGIN + Vector3(x, y, z) * VOXEL
 				var dist := p.distance_to(center)
 				if dist >= radius:
@@ -320,9 +358,10 @@ func smooth_brush(center: Vector3, radius: float, strength := 1.0) -> bool:
 	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var targets: Array = []   # [Vector3i, new value]
+	var e0 := MARGIN - BRUSH_REACH
 	for y in range(maxi(BEDROCK_Y + 1, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
-		for z in range(maxi(1, floori(lo.z)), mini(NZ - 1, ceili(hi.z)) + 1):
-			for x in range(maxi(1, floori(lo.x)), mini(NX - 1, ceili(hi.x)) + 1):
+		for z in range(maxi(e0, floori(lo.z)), mini(NZ - e0, ceili(hi.z)) + 1):
+			for x in range(maxi(e0, floori(lo.x)), mini(NX - e0, ceili(hi.x)) + 1):
 				var p := ORIGIN + Vector3(x, y, z) * VOXEL
 				var dist := p.distance_to(center)
 				if dist >= radius:

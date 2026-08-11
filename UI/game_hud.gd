@@ -23,7 +23,7 @@ const SettingsPanel := preload("res://UI/settings_panel.gd")
 # Web getColorForItem: category border colors
 const ITEM_COLORS := {
 	"grapple": "#44ff44", "launch_pad": "#44ff44", "boost_pad": "#44ff44", "teleporter": "#44ff44",
-	"machinegun": "#ff4444", "rocket": "#ff4444", "mines": "#ff4444",
+	"machinegun": "#ff4444", "rocket": "#ff4444", "mines": "#ff4444", "crowbot": "#ff4444",
 	"block": "#ffff44", "wall": "#ffff44", "ramp": "#ffff44", "platform": "#ffff44", "bridge_gun": "#ffff44",
 }
 
@@ -522,11 +522,10 @@ func _build_esc_menu() -> void:
 
 func _toggle_esc_menu(open: bool) -> void:
 	_esc_menu.visible = open
-	# Only Build mode can change settings live; elsewhere the gear is dead
+	# The tuning sliders work live in every mode; the rest of the settings
+	# only unlock in Build mode, so gray them out elsewhere.
 	var buildable := str(Net.game_settings.get("mode", "slayer")) == "build"
-	_gear_btn.disabled = not buildable
-	if not buildable:
-		_settings_box.visible = false
+	(_settings_box.get_child(0) as Node).set_tuning_only(not buildable)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
 
 

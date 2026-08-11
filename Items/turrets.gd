@@ -67,6 +67,16 @@ func _on_net_event(event: String, data: Variant) -> void:
 					_turrets[aid]["ry"] = float(data.get("ry", 0.0))
 
 
+## Position of a live turret, or null — critters resolving their grudge.
+func turret_pos(id: String) -> Variant:
+	return _turrets[id]["node"].global_position if _turrets.has(id) else null
+
+
+## Whether this client owns the turret (single-authority gnaw damage).
+func my_turret(id: String) -> bool:
+	return _turrets.has(id) and _turrets[id]["owner"] == _self_id()
+
+
 ## Nearest turret within `radius` — god menu delete/select. {} if none.
 func nearest_deletable(pos: Vector3, radius := 4.0) -> Dictionary:
 	var best := {}
@@ -131,15 +141,23 @@ func _run_brain(id: String, t: Dictionary, remotes: Dictionary, delta: float) ->
 	var muzzle: Vector3 = node.global_position + Vector3(0, MUZZLE_H, 0)
 	var target := Vector3.INF
 	var best := RANGE
+	var fauna := false
 	for rid in remotes:
 		var rpos: Vector3 = remotes[rid].global_position
 		var d: float = rpos.distance_to(node.global_position)
 		if d < best:
 			best = d
 			target = rpos
+	# Aggressive fauna is fair game too: whatever's closest gets the burst
+	var wc: Node = get_tree().get_first_node_in_group("world_critters")
+	if wc:
+		var boid: Dictionary = wc.nearest_boid(node.global_position, best)
+		if not boid.is_empty():
+			target = boid["pos"]
+			fauna = true
 	if target == Vector3.INF:
 		return false
-	var to := target + Vector3(0, 0.4, 0) - muzzle
+	var to := target + (Vector3.ZERO if fauna else Vector3(0, 0.4, 0)) - muzzle
 	var want_yaw := atan2(-to.x, -to.z)
 	head.rotation.y = lerp_angle(head.rotation.y, want_yaw, minf(1.0, AIM_RATE * delta))
 	if absf(angle_difference(head.rotation.y, want_yaw)) > AIM_TOLERANCE:
@@ -157,9 +175,12 @@ func _run_brain(id: String, t: Dictionary, remotes: Dictionary, delta: float) ->
 	dir += Vector3(randf() - 0.5, randf() - 0.5, randf() - 0.5) * 0.05
 	dir = dir.normalized()
 	var start := muzzle + dir * 1.2
+	# "tid" tags the tracer as turret fire, so a killed critter's flock
+	# aggros the TURRET, not the player whose client relayed the shot
 	Net.emit_event("fireMachinegun", {
 		"start": {"x": start.x, "y": start.y, "z": start.z},
 		"velocity": {"x": dir.x * MG_SPEED, "y": dir.y * MG_SPEED, "z": dir.z * MG_SPEED},
+		"tid": id,
 	})
 	return true
 
@@ -237,6 +258,24 @@ func _make_turret_node(id: String) -> Node3D:
 		barrel.rotation.x = -PI / 2.0
 		barrel.position = Vector3(cos(ang) * 0.13, sin(ang) * 0.13, -0.45)
 		barrels.add_child(barrel)
+
+	# Attack range, outlined on the floor as a thin flat band
+	var ring := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+	for i in 73:
+		var a := TAU * i / 72.0
+		im.surface_add_vertex(Vector3(cos(a) * (RANGE - 0.5), 0.06, sin(a) * (RANGE - 0.5)))
+		im.surface_add_vertex(Vector3(cos(a) * RANGE, 0.06, sin(a) * RANGE))
+	im.surface_end()
+	var ring_mat := StandardMaterial3D.new()
+	ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	ring_mat.albedo_color = Color(1.0, 0.62, 0.36, 0.35)
+	ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	ring.mesh = im
+	ring.material_override = ring_mat
+	root.add_child(ring)
 
 	# HP bar riding above the head
 	var back := MeshInstance3D.new()

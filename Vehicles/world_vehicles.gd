@@ -10,14 +10,18 @@ extends Node3D
 const RELAY_INTERVAL := 0.05
 const MOUNT_RANGE := 4.0
 const RESCUE_Y := -20.0   # vehicle fell out of the world: teleport it back up
+const STRIKE_CD := 4.0    # crow-bot swarm strike cooldown
 const VehicleScript := preload("res://Vehicles/vehicle.gd")
 
 @export var player: CharacterBody3D
 
 var _vehicles: Dictionary = {}   # id -> vehicle node
 var _mounted: CharacterBody3D = null
+var _piloting := false           # _mounted is a bot flown drone-style
+var _pending_pilot_id := ""      # weapon-deployed bot: pilot it on vehiclePlaced
 var _wrecking: Dictionary = {}   # id -> vehicle whose wreck WE are simulating
 var _relay_cd := 0.0
+var _strike_cd := 0.0
 var _sync: Node
 
 
@@ -121,6 +125,12 @@ func _add_vehicle(v: Variant) -> void:
 	if bool(v.get("wrecked", false)):
 		veh.enter_wreck(false)
 	_vehicles[id] = veh
+	# A bot WE deployed as a weapon: take the stick the moment it exists
+	if id == _pending_pilot_id:
+		_pending_pilot_id = ""
+		if veh.is_bot() and _mounted == null and player \
+				and not player.godmode and not player.dead:
+			_pilot(veh)
 
 
 ## Nearest vehicle within `radius` — god menu delete tool. {} if none.
@@ -136,11 +146,12 @@ func nearest_deletable(pos: Vector3, radius := 5.0) -> Dictionary:
 # --- Mounting ---------------------------------------------------------------
 
 func _unhandled_input(event: InputEvent) -> void:
+	if get_viewport().gui_get_focus_owner() != null \
+			or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED \
+			or player == null or player.godmode or player.dead:
+		return
 	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_E \
-			and get_viewport().gui_get_focus_owner() == null \
-			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
-			and player != null and not player.godmode and not player.dead:
+			and event.keycode == KEY_E:
 		if _mounted:
 			_dismount(true)
 			get_viewport().set_input_as_handled()
@@ -148,6 +159,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		elif _try_mount():
 			get_viewport().set_input_as_handled()
+	# Crow-bot pilot clicks: send the guided flock at whatever the crosshair
+	# is on (a torrent of birds, synced via swarmStrike).
+	elif event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT \
+			and _piloting and _mounted and _mounted.kind == "crowbot":
+		_swarm_strike()
+		get_viewport().set_input_as_handled()
 
 
 ## E next to a wreck rights it: the server reparks it where it lies.
@@ -176,6 +194,9 @@ func _try_mount() -> bool:
 			best = veh
 	if best == null:
 		return false
+	if best.is_bot():
+		_pilot(best)
+		return true
 	_mounted = best
 	best.driver_id = _self_id()
 	best.driven_by_me = true
@@ -188,9 +209,71 @@ func _try_mount() -> bool:
 	return true
 
 
+## Bots aren't ridden — they're flown drone-style: the body stays where it
+## stands (vulnerable), the camera and inputs move to the machine, and the
+## drone's sci-fi overlay comes up.
+func _pilot(veh: CharacterBody3D) -> void:
+	_mounted = veh
+	_piloting = true
+	veh.driver_id = _self_id()
+	veh.driven_by_me = true
+	veh.camera_rig = player.camera_rig
+	player.set_piloting(true)
+	if player.camera_rig:
+		player.camera_rig.follow_target = veh
+	_set_scifi(true)
+	Net.emit_event("mountVehicle", veh.id)
+	Sfx.boost(veh.global_position, 0.5)
+
+
+func _set_scifi(on: bool) -> void:
+	var fx: Node = get_tree().get_first_node_in_group("screen_fx")
+	if fx:
+		fx.set_scifi(on)
+
+
+## Deploy a bot just ahead of the player (weapon activation) and pilot it as
+## soon as the server echoes it back.
+func deploy_bot(kind: String) -> void:
+	if _mounted != null or player == null:
+		return
+	var yaw: float = player.camera_rig.yaw if player.camera_rig else 0.0
+	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	var pos: Vector3 = player.global_position + fwd * 2.5 \
+		+ Vector3(0, 2.2 if kind == "crowbot" else 0.5, 0)
+	_pending_pilot_id = "%d-%d" % [Time.get_ticks_msec(), randi() % 10000]
+	Net.emit_event("placeVehicle", {
+		"id": _pending_pilot_id, "kind": kind,
+		"x": pos.x, "y": pos.y, "z": pos.z, "ry": yaw,
+	})
+
+
+func _swarm_strike() -> void:
+	if _strike_cd > 0.0:
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var dir := -cam.global_transform.basis.z
+	var to := cam.global_position + dir * 80.0
+	var q := PhysicsRayQueryParameters3D.create(cam.global_position, to)
+	q.exclude = [_mounted.get_rid(), player.get_rid()]
+	var hit := _mounted.get_world_3d().direct_space_state.intersect_ray(q)
+	var target: Vector3 = hit["position"] if hit else cam.global_position + dir * 40.0
+	_strike_cd = STRIKE_CD
+	Net.emit_event("swarmStrike", {"x": target.x, "y": target.y, "z": target.z})
+	Sfx.boost(_mounted.global_position, 0.9)
+
+
 func _dismount(tell_server: bool) -> void:
 	var veh := _mounted
+	var was_piloting := _piloting
 	_mounted = null
+	_piloting = false
+	if was_piloting:
+		_set_scifi(false)
+		if player:
+			player.set_piloting(false)
 	if veh and is_instance_valid(veh):
 		veh.driven_by_me = false
 		veh.camera_rig = null
@@ -207,13 +290,15 @@ func _dismount(tell_server: bool) -> void:
 			})
 			Net.emit_event("dismountVehicle", veh.id)
 	if player:
-		player.exit_vehicle()
+		if not was_piloting:
+			player.exit_vehicle()  # piloting never moved the body
 		if player.camera_rig:
 			player.camera_rig.follow_target = null
 
 
 func _process(delta: float) -> void:
 	_relay_cd -= delta
+	_strike_cd = maxf(0.0, _strike_cd - delta)
 	var relay := _relay_cd <= 0.0
 	if relay:
 		_relay_cd = RELAY_INTERVAL
@@ -234,8 +319,10 @@ func _process(delta: float) -> void:
 		_dismount(true)
 		return
 	# Fell out of the world: rescue vehicle and driver to a spawn point.
+	# A piloted bot instead pops back up beside its pilot's body.
 	if _mounted.global_position.y < RESCUE_Y:
-		_mounted.global_position = player.respawn_point() + Vector3(0, 2.5, 0)
+		_mounted.global_position = (player.global_position + Vector3(0, 2.5, 0)) if _piloting \
+			else (player.respawn_point() + Vector3(0, 2.5, 0))
 		_mounted.velocity = Vector3.ZERO
 	if relay:
 		Net.emit_event("vehicleMoved", {

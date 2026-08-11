@@ -139,7 +139,11 @@ func _spawn_bullet(data: Dictionary) -> void:
 	if vel.length() > 0.01 and absf(vel.normalized().dot(Vector3.UP)) < 0.999:
 		node.look_at_from_position(pos, pos + vel)
 	Sfx.boost(pos, 0.2)
-	_bullets.append({"pos": pos, "vel": vel, "life": BULLET_LIFE, "owner": str(data.get("owner", "")), "node": node})
+	_bullets.append({
+		"pos": pos, "vel": vel, "life": BULLET_LIFE,
+		"owner": str(data.get("owner", "")), "node": node,
+		"tid": str(data.get("tid", "")),  # non-empty = fired by that turret
+	})
 
 
 func _spawn_rocket(data: Dictionary) -> void:
@@ -231,10 +235,10 @@ func _on_explosion(data: Dictionary) -> void:
 	if is_mine:
 		dir.y = maxf(0.3, dir.y + 0.4)
 	else:
-		dir.y = maxf(0.5, dir.y + 1.0)
+		dir.y = maxf(0.35, dir.y + 0.6)
 	dir = dir.normalized()
-	var force := (radius - dist) * (9.0 if is_mine else 7.0)
-	player.global_position.y += 1.0 if is_mine else 1.5  # pop off the ground
+	var force := (radius - dist) * (9.0 if is_mine else 4.2)
+	player.global_position.y += 1.0 if is_mine else 0.8  # pop off the ground
 	player.velocity.x += dir.x * force
 	player.velocity.y = maxf(player.velocity.y, 0.0) + dir.y * force
 	player.velocity.z += dir.z * force
@@ -326,6 +330,15 @@ func _physics_process(delta: float) -> void:
 						and (rh["collider"] as Node).is_in_group("turret_body"):
 					Net.emit_event("turretHit", {
 						"id": str((rh["collider"] as Node).get_meta("turret_id", "")), "dmg": 10})
+		# Critters: shooter's client is the hit authority, same as player hits
+		if not hit and b["owner"] == self_id:
+			var wc: Node = get_tree().get_first_node_in_group("world_critters")
+			if wc:
+				var ch: Dictionary = wc.hit_test(b["pos"])
+				if not ch.is_empty():
+					hit = true
+					var src := {"t": "turret", "id": b["tid"]} if b["tid"] != "" else {"t": "player"}
+					Net.emit_event("critterHit", {"id": ch["id"], "idx": ch["idx"], "src": src})
 		if not hit and b["owner"] == self_id:
 			for id in remotes:
 				if remotes[id].global_position.distance_to(b["pos"]) < HIT_RADIUS:

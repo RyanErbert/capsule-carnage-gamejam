@@ -442,7 +442,7 @@ const spawnPoints = [];  // { id, x, y, z }
 const pedestals = [];
 const ITEMS_BY_CATEGORY = {
   green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
-  red: ['machinegun', 'rocket', 'mines'],
+  red: ['machinegun', 'rocket', 'mines', 'crowbot'],
   yellow: ['block', 'wall', 'ramp', 'platform', 'bridge_gun']
 };
 
@@ -775,7 +775,9 @@ io.on('connection', (socket) => {
     if (u.key === 'slayer') return;  // derived from mode, never set directly
     // Settings are part of the gamemode: picked in the lobby, frozen once a
     // game is live. Build mode exists precisely to change them mid-game.
-    if (readyIds.size > 0 && gameSettings.mode !== 'build') {
+    // EXCEPT the physics tuning sliders — those stay live in every mode.
+    const TUNABLE = ['speedScale', 'jumpScale', 'gravityScale'];
+    if (readyIds.size > 0 && gameSettings.mode !== 'build' && !TUNABLE.includes(u.key)) {
       socket.emit('systemMessage', { text: 'Settings are locked once a game starts. Build mode can change them live.' });
       return;
     }
@@ -890,8 +892,31 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Critters are shootable: boids are client-simulated but IDENTITY is by
+  // index, so a kill is just "flock X, boid N is dead" + who did it (the
+  // flock aggros its attacker). Shooter's client is the hit authority.
+  const FLOCK_N = { crows: 11, rats: 9 };
+  socket.on('critterHit', (d) => {
+    if (!d || typeof d.id !== 'string') return;
+    const flock = activeFlocks.find(f => f.id === d.id);
+    if (!flock) return;
+    const n = FLOCK_N[flock.kind] || 11;
+    const idx = Math.floor(Number(d.idx));
+    if (!(idx >= 0 && idx < n)) return;
+    flock.dead = flock.dead || [];
+    if (flock.dead.includes(idx)) return;
+    flock.dead.push(idx);
+    const src = (d.src && d.src.t === 'turret' && typeof d.src.id === 'string')
+      ? { t: 'turret', id: d.src.id } : { t: 'player', id: socket.id };
+    io.emit('critterDied', { id: flock.id, idx, src });
+    if (flock.dead.length >= n) {
+      activeFlocks.splice(activeFlocks.indexOf(flock), 1);
+      io.emit('flockRemoved', flock.id);
+    }
+  });
+
   socket.on('placeVehicle', (v) => {
-    if (!v || (v.kind !== 'ghost' && v.kind !== 'drill')) return;
+    if (!v || !['ghost', 'drill', 'crowbot', 'ratbot'].includes(v.kind)) return;
     const veh = {
       id: (typeof v.id === 'string' && v.id) ? v.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
       kind: v.kind,
@@ -900,6 +925,15 @@ io.on('connection', (socket) => {
     };
     activeVehicles.push(veh);
     io.emit('vehiclePlaced', veh);
+  });
+
+  // Crow-bot pilot points at a spot: every client's guided crow flocks surge
+  // there for a few seconds (boids are client-local; this only syncs intent).
+  socket.on('swarmStrike', (d) => {
+    if (!d || typeof d.x !== 'number') return;
+    const bot = activeVehicles.find(v => v.kind === 'crowbot' && v.driver === socket.id);
+    if (!bot) return;
+    io.emit('swarmStrike', { id: socket.id, x: +d.x, y: +d.y, z: +d.z });
   });
 
   socket.on('removeVehicle', (id) => {

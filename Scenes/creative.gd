@@ -23,8 +23,8 @@ const KILL_Y := -20.0           # below the world: instant respawn backstop
 # stand just outside the 128x128 play area, and the closer you get to the
 # edge the thicker it reads — full white ~38 m out, where you're turned
 # around to face the center.
-const FOG_START := 64.0    # the paint region's edge (max-norm)
-const FOG_WHITE := 102.0
+const FOG_START := 72.0    # partway up the boundary bowl (max-norm)
+const FOG_WHITE := 108.0
 const FOG_BASE := 0.0015   # always-on depth-fog density inside the arena
 
 # Unshaded white haze sheet for the boundary fog banks: solid near the
@@ -384,7 +384,8 @@ func _make_fog_shells() -> void:
 	var wall_h := 90.0
 	var wall_y := wall_h * 0.5 - 16.0  # from below the slabs up past their tops
 	# [half-extent, opacity] — denser the deeper into the fog you are
-	for ring in [[70.0, 0.05], [80.0, 0.08], [90.0, 0.12], [101.0, 0.16], [114.0, 0.24]]:
+	# (first bank stands just past the boundary bowl's rim at 80)
+	for ring in [[82.0, 0.05], [90.0, 0.08], [98.0, 0.12], [107.0, 0.16], [120.0, 0.24]]:
 		var r: float = ring[0]
 		var mat := ShaderMaterial.new()
 		mat.shader = shader

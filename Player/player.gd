@@ -5,16 +5,16 @@ extends CharacterBody3D
 
 # --- Movement (web §1.1 / §3.2) ---
 const MOVE_ACCEL := 60.0          # walking force (mass 1 → accel)
-const SPRINT_ACCEL := 120.0
+const SPRINT_ACCEL := 180.0
 const MAX_SPEED := 9.0            # walk speed cap
-const SPRINT_SPEED := 18.0        # sprint speed cap
+const SPRINT_SPEED := 27.0        # sprint speed cap (1.5x the web's 18)
 const SPEED_CAP_LERP_RATE := 2.5  # soft cap approach rate per second
 const LINEAR_DAMPING := 0.1       # cannon body damping equivalent
 const FLOOR_FRICTION := 6.0       # approximates cannon ground contact friction 0.7
 const GRAVITY := 20.0             # web world gravity (not the project default 9.8)
 
 # --- Jump charge system (web §3.4) ---
-const JUMP_IMPULSE := 8.0
+const JUMP_IMPULSE := 9.6         # 1.2x the web's 8
 const CHARGE_RATE := 3.0          # charge multiplier growth per second held
 const MAX_CHARGE_MULT := 4.0
 const COYOTE_TIME := 0.28
@@ -74,6 +74,7 @@ var spawn_points: Array = []  # optional; respawns pick randomly (web randomSpaw
 var respawn_provider := Callable()
 var godmode := false
 var vehicle: Node3D = null    # riding: body glued to the seat, collider off
+var piloting := false         # flying a machine-animal bot: body stays, idles
 var dragging_generator := false  # rope-tied to a generator: heavy slowdown
 var dead := false             # Slayer: exploded, waiting out the countdown
 var dead_timer := 0.0
@@ -147,7 +148,7 @@ func exit_vehicle() -> void:
 ## normal death flow runs (explosion, scorch, countdown). Sandbox: blow up,
 ## shed score as coins, instant respawn.
 func suicide() -> void:
-	if godmode or vehicle != null or dead:
+	if godmode or piloting or vehicle != null or dead:
 		return
 	if bool(Net.game_settings.get("slayer", true)):
 		Net.emit_event("suicide")
@@ -207,6 +208,17 @@ func set_godmode(on: bool) -> void:
 		_items.is_grappling = false
 
 
+## Remote-piloting a crow-bot/rat-bot: same deal as the drone — the body
+## stands here under gravity, fully vulnerable, ignoring input.
+func set_piloting(on: bool) -> void:
+	piloting = on
+	velocity = Vector3.ZERO
+	air_time = 0.0
+	charging_jump = false
+	if _items:
+		_items.is_grappling = false
+
+
 ## While the god-mode DRONE is out, the body just stands here — under
 ## gravity, physical, and fully vulnerable. No input reaches it.
 func _god_idle(delta: float) -> void:
@@ -230,7 +242,7 @@ func _physics_process(delta: float) -> void:
 		vehicle = null
 		if capsuleCollider:
 			capsuleCollider.disabled = false
-	if godmode:
+	if godmode or piloting:
 		_god_idle(delta)
 		return
 

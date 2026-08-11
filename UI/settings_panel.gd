@@ -17,6 +17,16 @@ const SLIDERS := [["speedScale", "Speed"], ["jumpScale", "Jump"], ["gravityScale
 
 var _checks: Dictionary = {}
 var _sliders: Dictionary = {}
+var _weapon_btn: OptionButton
+
+
+## Mid-game outside Build mode: only the tuning sliders stay usable — the
+## server refuses everything else, so gray it out instead of lying.
+func set_tuning_only(on: bool) -> void:
+	for key in _checks:
+		_checks[key].disabled = on
+	if _weapon_btn:
+		_weapon_btn.disabled = on
 
 
 func _ready() -> void:
@@ -31,6 +41,7 @@ func _ready() -> void:
 		_checks[entry[0]] = check
 
 	var weapon := OptionButton.new()
+	_weapon_btn = weapon
 	weapon.focus_mode = Control.FOCUS_NONE
 	for w in Settings.WEAPONS:
 		weapon.add_item("start: " + str(w))

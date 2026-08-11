@@ -15,7 +15,7 @@ const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "
 const NPC_TOOLS := [["turret", "#ff9d5c"], ["crows", "#9db4c9"], ["rats", "#b7a08c"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb", "lamp.glb"]
 const NO_SCALE := ["lamp.glb"]   # fixed-size props; scroll does nothing
-const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
+const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"], ["crowbot", "#9adcff"], ["ratbot", "#ff9db4"]]
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
 const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"], ["smooth", "#9fd0ff"]]
 const CARVE_SIZES := [3.0, 6.0, 10.0]   # scroll picks one while a terrain tool is armed
@@ -303,12 +303,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			_carve_hold = true
 			_carve_at(pos)
 		elif _tool.begins_with("vehicle:"):
+			var vkind := _tool.substr(8)
 			Net.emit_event("placeVehicle", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
-				"kind": _tool.substr(8),
-				"x": pos.x, "y": pos.y + 1.6, "z": pos.z, "ry": 0.0,
+				"kind": vkind,
+				"x": pos.x, "y": pos.y + (0.4 if vkind == "ratbot" else 1.6), "z": pos.z, "ry": 0.0,
 			})
-			_status.text = "%s  [E - mount]" % _tool.substr(8)
+			_status.text = "%s  [E - %s]" % [vkind, "pilot" if vkind in ["crowbot", "ratbot"] else "mount"]
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -615,10 +616,14 @@ func _make_hover_ghost(tool_name: String) -> Node3D:
 		mi.mesh = ncyl
 		mi.position.y = 0.8
 	elif tool_name.begins_with("vehicle:"):
+		var vkind := tool_name.substr(8)
 		var box := BoxMesh.new()
-		box.size = Vector3(2.4, 1.1, 3.2)
+		match vkind:
+			"crowbot": box.size = Vector3(1.0, 0.5, 1.2)
+			"ratbot": box.size = Vector3(0.7, 0.45, 1.3)
+			_: box.size = Vector3(2.4, 1.1, 3.2)
 		mi.mesh = box
-		mi.position.y = 1.2
+		mi.position.y = 1.2 if vkind in ["ghost", "drill"] else 0.6
 	elif tool_name == "generator":
 		var cyl := CylinderMesh.new()
 		cyl.top_radius = 0.6
