@@ -39,11 +39,10 @@ void fragment() {
 	ALPHA = alpha_max * fade;
 }
 "
-# Home base: every map has one whether or not anyone places it, and the
-# 5x5-pixel block around it is a DEADZONE — unpaintable here, unsculptable
-# in play, marked faint red in both. Mirrors server.js HOME_PIXEL/DEADZONE_R.
-const HOME_PIXEL := [16, 16]
-const DEADZONE_PX := 2          # pixels either side of the home pixel
+# Spawn zones: each painter can claim one. The 5x5-pixel block around a claim
+# is a DEADZONE — unpaintable here, unsculptable in play — so respawns always
+# land on known ground. No claims = no deadzones. Mirrors server DEADZONE_R.
+const DEADZONE_PX := 2          # pixels either side of the claimed pixel
 
 # Confined spaces duck the wind and fade in a cave drone; venturing past the
 # bounds ramps in a gale over the top of it.
@@ -67,6 +66,10 @@ var _layer_buttons: Array = []
 var _brush := 1                # painter brush size, in cells across
 var _spire_mode := true        # painting high fills the column underneath
 var _zones: Dictionary = {}    # socket id -> [r, c]; one spawn zone each
+var _cursors: Dictionary = {}  # socket id -> {r, c, t}; co-painters' hovers
+var _hover_px := Vector2i(-1, -1)
+var _hover_sent := Vector2i(-1, -1)
+var _cursor_send_cd := 0.0
 var _spawn_mode := false       # SPAWN chip armed: clicks claim your zone
 var _spawn_button: Button
 var _vote_bar: PanelContainer
@@ -79,6 +82,7 @@ var _env_ref: Environment
 var _wind: AudioStreamPlayer    # base ambience
 var _gale: AudioStreamPlayer    # boundary wind, ramps in past the bounds
 var _cave: AudioStreamPlayer    # low drone for confined spaces
+var _motes: CPUParticles3D      # cave dust, fades in with confinement
 var _confine := 0.0             # 0 open sky .. 1 fully enclosed
 var _probe_cd := 0.0
 
@@ -162,6 +166,18 @@ func _process(delta: float) -> void:
 		_paint_dirty = false
 		_paint_send_cd = 0.12
 		Net.emit_event("creativePaint", _grid_payload())
+	# Hover cursor, relayed so co-painters can see where you are
+	_cursor_send_cd = maxf(0.0, _cursor_send_cd - delta)
+	if _cursor_send_cd <= 0.0 and _hover_px.x >= 0 and _hover_px != _hover_sent:
+		_cursor_send_cd = 0.1
+		_hover_sent = _hover_px
+		Net.emit_event("editCursor", {"r": _hover_px.y, "c": _hover_px.x})
+	if not _cursors.is_empty() and _painter:
+		_painter.queue_redraw()  # keeps stale cursors fading out
+
+
+func _on_hover(r: int, c: int) -> void:
+	_hover_px = Vector2i(c, r)
 
 
 func _on_net_event(event: String, data: Variant) -> void:
@@ -179,6 +195,12 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_painter.queue_redraw()
 			if _playing:
 				_make_deadzone_marker()
+		"editCursor":
+			if not _playing and data is Dictionary:
+				_cursors[str(data.get("id", ""))] = {
+					"r": int(data.get("r", 0)), "c": int(data.get("c", 0)),
+					"t": Time.get_ticks_msec(),
+				}
 		"editVote":
 			_show_vote(data)
 		"creativeGrid":
@@ -248,8 +270,10 @@ func _spawn_gameplay() -> void:
 	player = PlayerScene.instantiate()
 	player.name = "player"
 	var spawns := _spawn_points()
-	player.position = spawns.pick_random()
 	player.spawn_points = spawns
+	player.respawn_provider = _zone_respawn
+	var zp: Variant = _zone_respawn()
+	player.position = zp if zp is Vector3 else spawns.pick_random()
 	add_child(player)
 
 	var sync := Node.new()
@@ -297,9 +321,46 @@ func _spawn_gameplay() -> void:
 	generators.player = player
 	add_child(generators)
 
+	var turrets := Node3D.new()
+	turrets.name = "WorldTurrets"
+	turrets.set_script(load("res://Items/turrets.gd"))
+	turrets.player = player
+	add_child(turrets)
+
+	var critters := Node3D.new()
+	critters.name = "WorldCritters"
+	critters.set_script(load("res://Items/critters.gd"))
+	critters.player = player
+	add_child(critters)
+
 	var hud := HudScene.instantiate()
 	hud.sync_node = sync
 	add_child(hud)
+
+	# Dust motes: drift around the player while enclosed, catching the light
+	# where a cave opens up (the Compatibility renderer has no real volumetrics)
+	_motes = CPUParticles3D.new()
+	_motes.amount = 70
+	_motes.lifetime = 7.0
+	_motes.preprocess = 3.0
+	_motes.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	_motes.emission_box_extents = Vector3(8, 4.5, 8)
+	_motes.gravity = Vector3(0, -0.05, 0)
+	_motes.direction = Vector3(0, 0, 0)
+	_motes.spread = 180.0
+	_motes.initial_velocity_min = 0.05
+	_motes.initial_velocity_max = 0.35
+	var mote_mesh := QuadMesh.new()
+	mote_mesh.size = Vector2(0.05, 0.05)
+	var mote_mat := StandardMaterial3D.new()
+	mote_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mote_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mote_mat.albedo_color = Color(1.0, 0.97, 0.85, 0.4)
+	mote_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	mote_mesh.material = mote_mat
+	_motes.mesh = mote_mesh
+	_motes.emitting = false
+	add_child(_motes)
 
 	# White-out overlay for the fog boundary (above the 3D world, below the HUD)
 	var fog_layer := CanvasLayer.new()
@@ -359,14 +420,12 @@ func _spawn_points() -> Array:
 
 # --- Home base deadzone ------------------------------------------------------
 
-## The home pixel: whatever was painted with the SPAWN chip, else the default.
+## Every claimed spawn pixel (possibly none).
 func _home_pixels() -> Array:
 	var out: Array = []
 	for id in _zones:
 		var z: Array = _zones[id]
 		out.append([int(z[0]), int(z[1])])
-	if out.is_empty():
-		out.append(HOME_PIXEL)
 	return out
 
 
@@ -387,9 +446,35 @@ func _in_deadzone(r: int, c: int) -> bool:
 	return false
 
 
-## The protected square, drawn as a faint red volume you can see through:
-## terrain tools do nothing inside it, so it needs to read as off-limits
-## without hiding the base.
+## Respawns land somewhere random inside YOUR zone. The zone is edit-protected,
+## so the painted layer stack is still the truth about its surface height.
+## Returns null with no claim — respawn_point() falls back to spawn_points.
+func _zone_respawn() -> Variant:
+	var mine: Variant = _my_px()
+	if not mine is Array or _layers.is_empty():
+		return null
+	for _i in 16:
+		var rr := clampi(int(mine[0]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PIXELS - 1)
+		var cc := clampi(int(mine[1]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PIXELS - 1)
+		if not ((int(_layers[0][rr]) >> (31 - cc)) & 1):
+			continue  # pit
+		return Vector3(-64.0 + cc * 4.0 + 2.0, _surface_y(rr, cc) + 1.0, -64.0 + rr * 4.0 + 2.0)
+	return null
+
+
+## Painted surface height at a pixel: 8 m slabs, surface ~1 m into the slab.
+func _surface_y(r: int, c: int) -> float:
+	if _layers.is_empty() or not ((int(_layers[0][r]) >> (31 - c)) & 1):
+		return 1.0
+	var top := 0
+	for li in range(1, LAYERS):
+		if (int(_layers[li][r]) >> (31 - c)) & 1:
+			top = li
+	return top * 8.0 + 1.0
+
+
+## In play a zone is just the patch respawns land on — no monolith. A faint
+## boundary line on the ground marks where terrain tools stop working.
 var _deadzone_node: Node3D
 
 func _make_deadzone_marker() -> void:
@@ -400,40 +485,28 @@ func _make_deadzone_marker() -> void:
 	if terrain:
 		terrain.deadzone_centers = _home_pixels().map(_px_world)
 	for h in _home_pixels():
-		_deadzone_box(_px_world(h))
+		var at := _px_world(h)
+		at.y = _surface_y(int(h[0]), int(h[1]))
+		_deadzone_edge(at)
 
 
-func _deadzone_box(at: Vector3) -> void:
+func _deadzone_edge(at: Vector3) -> void:
 	var size := VoxelTerrain.DEADZONE_R * 2.0
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 0.15, 0.18, 0.16)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
-	var walls := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(size, 26.0, size)
-	walls.mesh = box
-	walls.material_override = mat
-	walls.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	walls.position = at + Vector3(0, 5.0, 0)
-	_deadzone_node.add_child(walls)
-	# A solid band on the ground so the boundary is unmistakable on foot
 	var edge_mat := StandardMaterial3D.new()
 	edge_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	edge_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	edge_mat.albedo_color = Color(1.0, 0.2, 0.22, 0.55)
+	edge_mat.albedo_color = Color(0.55, 1.0, 0.75, 0.2)
 	edge_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var h := VoxelTerrain.DEADZONE_R
 	for side in 4:
 		var band := MeshInstance3D.new()
 		var quad := QuadMesh.new()
-		quad.size = Vector2(size + 1.4, 1.4)
+		quad.size = Vector2(size + 0.6, 0.6)
 		band.mesh = quad
 		band.material_override = edge_mat
+		band.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		band.rotation = Vector3(-PI / 2.0, side * PI / 2.0, 0)
-		band.position = at + Vector3(0, 1.1, 0) \
+		band.position = at + Vector3(0, 0.08, 0) \
 			+ Basis(Vector3.UP, side * PI / 2.0) * Vector3(0, 0, -h)
 		_deadzone_node.add_child(band)
 
@@ -629,6 +702,10 @@ func _update_ambience(delta: float) -> void:
 	_cave.volume_db = -60.0 if _confine < 0.02 else lerpf(-40.0, -13.0, _confine)
 	# The gale ignores confinement: outside the bounds there's nothing to hide in
 	_gale.volume_db = -60.0 if _fog_f < 0.01 else lerpf(-30.0, -5.0, _fog_f)
+	# Dust hangs in enclosed air
+	if _motes:
+		_motes.emitting = _confine > 0.35
+		_motes.global_position = player.global_position
 
 
 # --- Editor UI ---------------------------------------------------------------
@@ -699,6 +776,12 @@ func _build_editor_ui() -> void:
 	canvas_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	canvas_row.add_theme_constant_override("separation", 14)
 	box.add_child(canvas_row)
+
+	# Chat docked beside the canvas, so painters talk in the same column
+	var chat := PanelContainer.new()
+	chat.set_script(load("res://UI/chat_box.gd"))
+	chat.custom_minimum_size = Vector2(250, 0)
+	canvas_row.add_child(chat)
 
 	_painter = PixelPainter.new()
 	_painter.owner_scene = self
@@ -785,16 +868,6 @@ func _build_editor_ui() -> void:
 	_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	box.add_child(_status)
 
-	# Chat, so painters can talk before the map exists
-	var chat := PanelContainer.new()
-	chat.set_script(load("res://UI/chat_box.gd"))
-	chat.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	chat.offset_left = 12
-	chat.offset_top = -206
-	chat.offset_bottom = -12
-	chat.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_editor_layer.add_child(chat)
-
 
 ## The server relays who still has to confirm a GENERATE or CLEAR.
 func _show_vote(data: Variant) -> void:
@@ -872,8 +945,12 @@ class PixelPainter extends Control:
 			elif not event.pressed:
 				_paint_value = -1
 			_paint_at(event.position)
-		elif event is InputEventMouseMotion and _paint_value != -1:
-			_paint_at(event.position)
+		elif event is InputEventMouseMotion:
+			owner_scene._on_hover(
+				clampi(int(event.position.y) / CELL, 0, 31),
+				clampi(int(event.position.x) / CELL, 0, 31))
+			if _paint_value != -1:
+				_paint_at(event.position)
 
 	func _paint_at(pos: Vector2) -> void:
 		if _paint_value == -1:
@@ -924,3 +1001,13 @@ class PixelPainter extends Control:
 			draw_rect(srect, col)
 			draw_rect(srect.grow(-3), Color("#0c2018"))
 			draw_rect(srect.grow(-5), col)
+		# Co-painters' live cursors: an outline where they're hovering
+		var now := Time.get_ticks_msec()
+		for cid in owner_scene._cursors:
+			var cur: Dictionary = owner_scene._cursors[cid]
+			var age := now - int(cur["t"])
+			if age > 2500:
+				continue
+			var ccol := Color("#7fb2ff", clampf(1.0 - age / 2500.0 * 0.6, 0.0, 1.0))
+			draw_rect(Rect2(int(cur["c"]) * CELL, int(cur["r"]) * CELL, CELL - 1, CELL - 1),
+				ccol, false, 2.0)

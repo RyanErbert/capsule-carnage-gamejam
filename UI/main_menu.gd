@@ -26,6 +26,8 @@ var _settings_box: PanelContainer
 var _players: Dictionary = {}   # id -> {name, skinColor, x, y, z}
 var _map: LiveMap
 var _preview_model: Node3D
+var _countdown: Label            # shared 5 s pre-editor countdown
+var _countdown_left := 0.0
 
 
 func _ready() -> void:
@@ -64,6 +66,15 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"creativeGrid", "gameEnded":
 			if _map:
 				_map.queue_redraw()
+		"startCountdown":
+			# Every lobby counts the same 5 seconds down together
+			if data is Dictionary:
+				_countdown_left = float(data.get("ms", 5000)) / 1000.0
+				_countdown.text = str(ceili(_countdown_left))
+				_countdown.visible = true
+				_join_btn.disabled = true
+		"enterEditor":
+			get_tree().change_scene_to_file(LEVELS["creative"])
 
 
 func _apply_game_settings(gs: Variant) -> void:
@@ -101,6 +112,12 @@ func _join() -> void:
 		return
 	if _name_edit.text.strip_edges() != "":
 		Settings.player_name = _name_edit.text.strip_edges().left(16)
+	# STARTING a creative session goes through the server's shared countdown so
+	# every lobby lands in the editor together. Joining one in motion is direct.
+	if Settings.level == "creative" and _players.is_empty() \
+			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
+		Net.emit_event("requestStart")
+		return
 	get_tree().change_scene_to_file(LEVELS.get(Settings.level, LEVELS["creative"]))
 
 
@@ -109,6 +126,11 @@ func _process(_delta: float) -> void:
 		_map.queue_redraw()
 	if _preview_model:
 		_preview_model.rotate_y(_delta * 0.7)
+	if _countdown_left > 0.0:
+		_countdown_left -= _delta
+		_countdown.text = str(maxi(1, ceili(_countdown_left)))
+		if _countdown_left <= 0.0:
+			_countdown.visible = false  # 'enterEditor' arrives right about now
 
 
 # --- UI --------------------------------------------------------------------
@@ -257,15 +279,25 @@ func _build_ui() -> void:
 	_status.add_theme_font_size_override("font_size", 16)
 	root.add_child(_status)
 
-	# Chat, shared with the map editor and the in-game HUD
+	# Chat docked into the lobby column, shared with the editor and HUD
 	var chat := PanelContainer.new()
 	chat.set_script(load("res://UI/chat_box.gd"))
-	chat.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	chat.offset_left = 12
-	chat.offset_top = -206
-	chat.offset_bottom = -12
-	chat.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	add_child(chat)
+	chat.custom_minimum_size = Vector2(0, 160)
+	root.add_child(chat)
+
+	# Big shared countdown before everyone is dropped into the editor
+	_countdown = Label.new()
+	_countdown.visible = false
+	_countdown.set_anchors_preset(Control.PRESET_CENTER)
+	_countdown.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_countdown.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_countdown.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_countdown.add_theme_font_size_override("font_size", 120)
+	_countdown.add_theme_color_override("font_color", Style.ACCENT)
+	_countdown.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	_countdown.add_theme_constant_override("shadow_offset_x", 4)
+	_countdown.add_theme_constant_override("shadow_offset_y", 4)
+	add_child(_countdown)
 
 	var build := Label.new()
 	build.text = "build " + Net.git_commit()

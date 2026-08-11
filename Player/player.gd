@@ -69,6 +69,9 @@ var last_grounded_time := -1000.0
 var air_time := 0.0
 var spawn_position := Vector3.ZERO
 var spawn_points: Array = []  # optional; respawns pick randomly (web randomSpawn)
+# Scene-provided respawn hook (creative: a random point inside YOUR spawn
+# zone). Returning null falls through to spawn_points.
+var respawn_provider := Callable()
 var godmode := false
 var vehicle: Node3D = null    # riding: body glued to the seat, collider off
 var dragging_generator := false  # rope-tied to a generator: heavy slowdown
@@ -77,6 +80,10 @@ var dead_timer := 0.0
 
 
 func respawn_point() -> Vector3:
+	if respawn_provider.is_valid():
+		var p: Variant = respawn_provider.call()
+		if p is Vector3:
+			return p
 	if not spawn_points.is_empty():
 		return spawn_points.pick_random()
 	return spawn_position + Vector3(0, 0.5, 0)

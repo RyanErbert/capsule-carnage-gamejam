@@ -155,6 +155,15 @@ func _add_gen(g: Variant) -> void:
 		"label": lbl,
 		"ring": node.get_node("HealRing"),
 	}
+	# Fresh generators FALL: whoever placed it (or whose corpse dropped it)
+	# owns the physics drop and relays it — nobody's core hangs in the air.
+	if str(g.get("owner", "")) == _self_id() and not (holder is String and holder != ""):
+		if _settle_id != "" and _settle_id != id:
+			_finish_settle(_settle_id, true)
+		node.freeze = false
+		node.sleeping = false
+		_settle_id = id
+		_settle_t = SETTLE_TIME + 1.0
 
 
 ## Nearest generator within `radius` — god menu delete tool. {} if none.
@@ -253,7 +262,9 @@ func _physics_process(delta: float) -> void:
 			_drag_step(body, delta)
 		elif id == _settle_id:
 			pass  # free physics while it tumbles to rest
-		elif g["holder"] != "":
+		else:
+			# Remote-driven (dragged OR falling on its owner's client): chase
+			# the relays. Parked units' net_pos is where they already are.
 			body.global_position = body.global_position.lerp(g["net_pos"], 1.0 - exp(-NET_LERP * delta))
 
 	# Just-released generator keeps tumbling briefly, then freezes + syncs

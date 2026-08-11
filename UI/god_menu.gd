@@ -11,8 +11,10 @@ const GIVE_ITEMS := [
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
 const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
-const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"]]
-const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
+const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["tower", "#d8c9a3"]]
+const NPC_TOOLS := [["turret", "#ff9d5c"], ["crows", "#9db4c9"], ["rats", "#b7a08c"]]
+const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb", "lamp.glb"]
+const NO_SCALE := ["lamp.glb"]   # fixed-size props; scroll does nothing
 const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
 const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"], ["smooth", "#9fd0ff"]]
@@ -36,7 +38,13 @@ var _castle_nodes: Array = []
 var _castle_markers: Array = []
 var _hover_ghosts: Dictionary = {}  # tool -> ghost Node3D (blue placement preview)
 var _prop_ry := 0.0  # next prop's yaw, rolled up-front so the ghost matches
+var _prop_scale := 1.0  # scroll scales props up/down
+var _tower_h := 8.0  # scroll sets tower height while the tool is armed
 var _lift := 0.0     # scroll offset on the placement height
+# Click-select: with no tool armed, clicking an element highlights it for
+# editing (castles: live height + punched holes) or deletion.
+var _selected: Dictionary = {}
+var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
 # God build mode (web: godmode build tools + the 9^3 grid-point cloud)
@@ -57,6 +65,26 @@ var _terrain_node: Node3D
 func _ready() -> void:
 	visible = false
 	_build_ui()
+	Net.event_received.connect(_on_net_event)
+	_render_prop_icons.call_deferred()
+
+
+## The server owns drone health: bullets and blasts wear it down, and at zero
+## the drone pops — view snaps back to the body (which just paid 10 health).
+func _on_net_event(event: String, data: Variant) -> void:
+	if not data is Dictionary:
+		return
+	var sync: Node = get_tree().get_first_node_in_group("net_sync")
+	var self_id: String = sync.self_id if sync else ""
+	if str(data.get("id", "")) != self_id:
+		return
+	if event == "droneHealth" and visible:
+		_status.text = "DRONE %d" % int(data.get("hp", 0))
+	elif event == "droneDestroyed" and visible:
+		if _drone and is_instance_valid(_drone):
+			_drone.queue_free()
+		_drone = null
+		toggle()
 
 
 func _find_refs() -> bool:
@@ -85,6 +113,14 @@ func _input(event: InputEvent) -> void:
 			# Any multi-point element finishes on Esc/Enter
 			_set_tool("")
 			get_viewport().set_input_as_handled()
+		elif visible and not _selected.is_empty() \
+				and event.keycode in [KEY_DELETE, KEY_BACKSPACE]:
+			Net.emit_event(_selected["event"], _selected["id"])
+			_select({})
+			get_viewport().set_input_as_handled()
+		elif visible and not _selected.is_empty() and event.keycode == KEY_ESCAPE:
+			_select({})
+			get_viewport().set_input_as_handled()
 	# Scroll: brush size for the terrain tools, placement height for the rest
 	if visible and _tool != "" and event is InputEventMouseButton and event.pressed:
 		var dir := 0
@@ -94,12 +130,25 @@ func _input(event: InputEvent) -> void:
 			dir = -1
 		if dir != 0:
 			if _tool.begins_with("prop:"):
-				pass  # props sit on the floor; there is no height to pick
+				# Props sit on the floor; scroll SCALES them instead
+				if not _tool.substr(5) in NO_SCALE:
+					_prop_scale = clampf(_prop_scale * (1.12 if dir > 0 else 1.0 / 1.12), 0.25, 5.0)
+					_status.text = "x%.2f" % _prop_scale
+			elif _tool == "tower":
+				_tower_h = clampf(_tower_h + dir, 3.0, 20.0)
+				_status.text = "H %d" % int(_tower_h)
 			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
 			else:
 				_lift += LIFT_STEP * dir
+	# Scroll with NOTHING armed: live height on a selected wall/tower
+	if visible and _tool == "" and str(_selected.get("kind", "")) == "castle wall" \
+			and event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			Net.emit_event("updateCastle", {"id": _selected["id"], "dh": 0.5})
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			Net.emit_event("updateCastle", {"id": _selected["id"], "dh": -0.5})
 	# Mouse release anywhere (UI included) ends a dig/fill stroke
 	if event is InputEventMouseButton and not event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT:
@@ -156,6 +205,7 @@ func _set_scifi(on: bool) -> void:
 func _make_drone() -> CharacterBody3D:
 	var drone := CharacterBody3D.new()
 	drone.set_script(load("res://Player/drone.gd"))
+	drone.add_to_group("god_drone")  # multiplayer_sync reports it as a target
 	var col := CollisionShape3D.new()
 	var shape := SphereShape3D.new()
 	shape.radius = 0.4
@@ -194,7 +244,10 @@ func _mouse_ray(mpos: Vector2) -> Dictionary:
 
 ## World clicks (UI clicks never get here — buttons consume them first).
 func _unhandled_input(event: InputEvent) -> void:
-	if not visible or _tool == "":
+	if not visible:
+		return
+	if _tool == "":
+		_selection_click(event)
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var hit := _mouse_ray(event.position)
@@ -219,6 +272,25 @@ func _unhandled_input(event: InputEvent) -> void:
 				"x": pos.x, "y": pos.y + 0.7, "z": pos.z,
 			})
 			_status.text = "generator  [E - drag]"
+		elif _tool == "tower":
+			Net.emit_event("placeCastle", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"kind": "tower", "h": _tower_h,
+				"nodes": [{"x": pos.x, "y": pos.y, "z": pos.z}],
+			})
+			_status.text = "tower  H %d" % int(_tower_h)
+		elif _tool == "turret":
+			Net.emit_event("placeTurret", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"x": pos.x, "y": pos.y, "z": pos.z,
+			})
+			_status.text = "turret"
+		elif _tool == "crows" or _tool == "rats":
+			Net.emit_event("placeFlock", {
+				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
+				"kind": _tool, "x": pos.x, "y": pos.y, "z": pos.z,
+			})
+			_status.text = _tool
 		elif _tool == "castle" or _tool == "gate":
 			_castle_nodes.append(pos)
 			_castle_markers.append(_channel_marker(pos))
@@ -242,16 +314,71 @@ func _unhandled_input(event: InputEvent) -> void:
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
 				_status.text = "%s placed" % _tool.substr(6)
 		elif _tool.begins_with("prop:"):
+			var pmodel := _tool.substr(5)
 			Net.emit_event("placeModel", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
-				"model": _tool.substr(5),
+				"model": pmodel,
 				"x": pos.x, "y": pos.y, "z": pos.z, "ry": _prop_ry,
+				"s": 1.0 if pmodel in NO_SCALE else _prop_scale,
 			})
 			_prop_ry = randf() * TAU  # reroll: the ghost previews the NEXT one
-			_status.text = "%s placed" % _tool.substr(5).trim_suffix(".glb")
+			_status.text = "%s placed" % pmodel.trim_suffix(".glb")
 		else:
 			Net.emit_event("placePedestal", {"x": pos.x, "y": pos.y, "z": pos.z, "ry": 0.0, "type": _tool})
 			_status.text = "%s pedestal" % _tool
+
+
+# --- Selection ---------------------------------------------------------------
+
+## No tool armed: clicking an element selects it. A selected wall/tower takes
+## live edits — scroll changes its height, clicking it again punches a hole
+## through that spot, Del removes it. Anything else selected: Del removes.
+func _selection_click(event: InputEvent) -> void:
+	if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
+		return
+	var hit := _mouse_ray(event.position)
+	if hit.is_empty():
+		_select({})
+		return
+	var target := _find_delete_target(hit["position"])
+	if not target.is_empty() and not _selected.is_empty() \
+			and str(_selected.get("kind", "")) == "castle wall" \
+			and str(target.get("id", "")) == str(_selected.get("id", "")):
+		# Second click on the selected wall: punch a penetration right there
+		var p: Vector3 = hit["position"]
+		Net.emit_event("updateCastle", {"id": target["id"], "hole": {"x": p.x, "y": p.y, "z": p.z}})
+		return
+	_select(target)
+
+
+func _select(target: Dictionary) -> void:
+	_selected = target
+	if target.is_empty():
+		if _select_marker:
+			_select_marker.visible = false
+		if _status:
+			_status.text = ""
+		return
+	if _select_marker == null:
+		_select_marker = MeshInstance3D.new()
+		var sphere := SphereMesh.new()
+		sphere.radius = 2.2
+		sphere.height = 4.4
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.85, 0.2, 0.22)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		sphere.material = mat
+		_select_marker.mesh = sphere
+		_player.get_parent().add_child(_select_marker)
+	_select_marker.visible = true
+	_select_marker.global_position = target["pos"]
+	var kind := str(target.get("kind", ""))
+	if kind == "castle wall":
+		_status.text = "WALL  [Scroll - Height]  [Click - Hole]  [Del - Delete]"
+	else:
+		_status.text = "%s  [Del - Delete]" % kind.to_upper()
 
 
 ## Terrain sculpting (god-mode dig/fill): carve at the cursor while the
@@ -439,9 +566,14 @@ func _update_hover_preview() -> void:
 		_hover_ghosts[_tool] = ghost
 	ghost.visible = true
 	ghost.global_position = hit["position"] 		+ Vector3(0, 0.0 if _tool.begins_with("prop:") else _lift, 0)
-	# Props place with a random yaw (R nudges it); the ghost shows the exact
-	# one coming
+	# Props place with a random yaw (R nudges it) and the scrolled scale;
+	# the ghost shows exactly what's coming
 	ghost.rotation.y = _prop_ry if _tool.begins_with("prop:") else 0.0
+	ghost.scale = Vector3.ONE * (_prop_scale if _tool.begins_with("prop:") and not _tool.substr(5) in NO_SCALE else 1.0)
+	if ghost.has_meta("tower"):
+		var body: Node3D = ghost.get_node("TowerBody")
+		body.scale = Vector3(1, _tower_h, 1)
+		body.position.y = _tower_h / 2.0
 
 
 func _ghost_material() -> StandardMaterial3D:
@@ -460,15 +592,29 @@ func _make_hover_ghost(tool_name: String) -> Node3D:
 	var mat := _ghost_material()
 	if tool_name.begins_with("prop:"):
 		# The actual model, ghosted blue
-		var scenes: Dictionary = preload("res://Items/props.gd").MODEL_SCENES
-		var model := tool_name.substr(5)
-		if scenes.has(model):
-			var inst: Node3D = scenes[model].instantiate()
+		var inst: Node3D = preload("res://Items/props.gd").instantiate_model(tool_name.substr(5))
+		if inst:
 			root.add_child(inst)
 			_ghost_all_meshes(inst, mat)
 			return root
 	var mi := MeshInstance3D.new()
-	if tool_name.begins_with("vehicle:"):
+	if tool_name == "tower":
+		# Unit-height cylinder; _update_hover_preview stretches it live
+		var tcyl := CylinderMesh.new()
+		tcyl.top_radius = 3.2
+		tcyl.bottom_radius = 3.6
+		tcyl.height = 1.0
+		mi.mesh = tcyl
+		mi.name = "TowerBody"
+		root.set_meta("tower", true)
+	elif tool_name == "turret":
+		var ncyl := CylinderMesh.new()
+		ncyl.top_radius = 0.55
+		ncyl.bottom_radius = 0.8
+		ncyl.height = 1.6
+		mi.mesh = ncyl
+		mi.position.y = 0.8
+	elif tool_name.begins_with("vehicle:"):
 		var box := BoxMesh.new()
 		box.size = Vector3(2.4, 1.1, 3.2)
 		mi.mesh = box
@@ -615,6 +761,16 @@ func _find_delete_target(pos: Vector3) -> Dictionary:
 		var gn: Dictionary = gens.nearest_deletable(pos)
 		if not gn.is_empty():
 			candidates.append(gn.merged({"event": "removeGenerator", "kind": "generator"}))
+	var turrets: Node = get_tree().get_first_node_in_group("world_turrets")
+	if turrets:
+		var tr: Dictionary = turrets.nearest_deletable(pos)
+		if not tr.is_empty():
+			candidates.append(tr.merged({"event": "removeTurret", "kind": "turret"}))
+	var critters: Node = get_tree().get_first_node_in_group("world_critters")
+	if critters:
+		var fl: Dictionary = critters.nearest_deletable(pos)
+		if not fl.is_empty():
+			candidates.append(fl.merged({"event": "removeFlock", "kind": "flock"}))
 	var best: Dictionary = {}
 	for c in candidates:
 		if best.is_empty() or c["dist"] < best["dist"]:
@@ -676,6 +832,7 @@ func _set_tool(tool_name: String) -> void:
 		_finish_channel()
 	if (_tool == "castle" or _tool == "gate") and tool_name != _tool:
 		_finish_castle(_tool == "gate")
+	_select({})  # arming a tool drops any selection
 	_tool = tool_name
 	_lift = 0.0
 	for t in _tool_buttons:
@@ -769,6 +926,7 @@ func _build_ui() -> void:
 	_tool_row(root, "PEDESTALS", PED_TOOLS)
 	_tool_row(root, "MARKERS", MARKER_TOOLS)
 	_tool_row(root, "STRUCTURES", STRUCT_TOOLS)
+	_tool_row(root, "NPCS", NPC_TOOLS)
 
 	var build_label := Label.new()
 	build_label.text = "BUILD"
@@ -852,3 +1010,49 @@ func _build_ui() -> void:
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_status.custom_minimum_size = Vector2(220, 0)
 	root.add_child(_status)
+
+
+## Little 3D renders on the prop buttons, framed from each model's AABB so
+## the whole thing is in shot.
+func _render_prop_icons() -> void:
+	var vp := SubViewport.new()
+	vp.size = Vector2i(96, 96)
+	vp.own_world_3d = true
+	vp.transparent_bg = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(vp)
+	var cam := Camera3D.new()
+	cam.fov = 35.0
+	vp.add_child(cam)
+	var key := DirectionalLight3D.new()
+	key.rotation_degrees = Vector3(-35, 35, 0)
+	key.light_energy = 1.3
+	vp.add_child(key)
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(-15, -140, 0)
+	fill.light_energy = 0.5
+	vp.add_child(fill)
+	var props_script := preload("res://Items/props.gd")
+	for model in PROPS:
+		if not _tool_buttons.has("prop:" + str(model)) or not is_inside_tree():
+			continue
+		var inst: Node3D = props_script.instantiate_model(str(model))
+		if inst == null:
+			continue
+		vp.add_child(inst)
+		var box: AABB = preload("res://Vehicles/vehicle.gd")._model_aabb(inst)
+		var c := box.get_center()
+		var r := maxf(box.size.length() * 0.5, 0.01)
+		cam.global_position = c + Vector3(0.55, 0.45, 1.0).normalized() * (r * 2.7)
+		cam.look_at(c)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		if not is_inside_tree():
+			return
+		var img: Image = vp.get_texture().get_image()
+		inst.queue_free()
+		var b: Button = _tool_buttons["prop:" + str(model)]
+		b.icon = ImageTexture.create_from_image(img)
+		b.add_theme_constant_override("icon_max_width", 44)
+		b.custom_minimum_size = Vector2(0, 50)
+	vp.queue_free()

@@ -135,50 +135,25 @@ let creativeLayers = null;   // [4][32] after normLayers
 let terrainEdits = [];
 let paintLayers = null;  // in-progress editor canvas, live-synced between painters
 
-// --- Home base ---
-// Every generated map has one, whether or not anyone painted a SPAWN pixel.
-// A deadzone around it is unpaintable and unsculptable (client marks it faint
-// red), so the base can never be buried by later geometry.
-const HOME_PIXEL = [16, 16];        // dead center of the 32x32 canvas
+// --- Spawn zones ---
+// Each painter can claim a spawn pixel in the editor. The block around it is
+// a DEADZONE (unpaintable, unsculptable) so the ground their respawns land on
+// stays predictable — respawn placement itself is client-side, scattered
+// procedurally inside the zone. No default zone: with nothing claimed there
+// are no deadzones and everyone uses the map's scattered spawn points.
 const DEADZONE_R = 10;              // meters (max-norm), ~a 5x5 pixel block
 const ZONE_SEPARATION = 5;          // pixels between two players' spawn pixels
 
-// Each painter claims a spawn pixel; it becomes their base, their spawn point
-// and a deadzone. With nobody claiming one, the map still gets the default.
 const spawnZones = {};              // socket.id -> [r, c]
 
 function zoneList() {
-  const z = Object.values(spawnZones);
-  return z.length ? z : [HOME_PIXEL];
+  return Object.values(spawnZones);
 }
 function homeWorlds() {
   return zoneList().map(h => ({ x: -64 + h[1] * 4 + 2, z: -64 + h[0] * 4 + 2 }));
 }
 function inDeadzone(r, c) {
   return zoneList().some(h => Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2);
-}
-
-// Every zone becomes a spawn point with a base building, re-applied on each
-// generate. Ids are indexed so a stale set clears cleanly.
-let homeIds = [];
-function applyHomeBase() {
-  for (const id of homeIds) {
-    const s = spawnPoints.findIndex(p => p.id === 'spawn-' + id);
-    if (s !== -1) { spawnPoints.splice(s, 1); io.emit('spawnRemoved', 'spawn-' + id); }
-    const m = activeModels.findIndex(p => p.id === 'bldg-' + id);
-    if (m !== -1) { activeModels.splice(m, 1); io.emit('modelRemoved', 'bldg-' + id); }
-  }
-  homeIds = [];
-  homeWorlds().forEach(({ x, z }, i) => {
-    const id = 'home' + i;
-    homeIds.push(id);
-    const sp = { id: 'spawn-' + id, x, y: 2, z };
-    spawnPoints.push(sp);
-    io.emit('spawnPlaced', sp);
-    const model = { id: 'bldg-' + id, model: 'building_1.glb', x, y: 1, z, ry: 0 };
-    activeModels.push(model);
-    io.emit('modelPlaced', model);
-  });
 }
 
 // Highest painted layer at a pixel (-1 = pit), and the world Y its surface
@@ -224,6 +199,33 @@ const SLAYER_START = 100;
 const RESPAWN_MS = 4000;
 const deadUntil = {};   // socket.id -> timestamp while dead
 
+// --- God-mode drones ---
+// While a player flies their drone the client reports its position in
+// playerMoved ({drone:{x,y,z}}), which makes it a shootable target: 3 bullet
+// hits (or one nearby blast) pop it, the view snaps back to the body, and the
+// owner pays 10 health — but a popped drone can never kill you.
+const DRONE_HP = 30;
+const DRONE_LOSS = 10;
+
+function damageDrone(id, dmg) {
+  const p = players[id];
+  if (!p || !p.drone) return;
+  p.droneHp = (typeof p.droneHp === 'number' ? p.droneHp : DRONE_HP) - dmg;
+  if (p.droneHp > 0) {
+    io.emit('droneHealth', { id, hp: p.droneHp });
+    return;
+  }
+  const at = p.drone;
+  p.drone = null;
+  delete p.droneHp;
+  io.emit('droneDestroyed', { id, x: at.x, y: at.y, z: at.z });
+  io.emit('explosion', { x: at.x, y: at.y, z: at.z, type: 'mine' });
+  if (gameSettings.slayer && typeof scores[id] === 'number') {
+    scores[id] = Math.max(1, scores[id] - DRONE_LOSS);
+    io.emit('scores', scores);
+  }
+}
+
 function startingScore() { return gameSettings.slayer ? SLAYER_START : 0; }
 
 function isDead(id) { return (deadUntil[id] || 0) > Date.now(); }
@@ -247,7 +249,7 @@ function checkDeath(id) {
   }
   const miniGen = {
     id: 'gen-death-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
-    x: pos.x, y: pos.y + 0.8, z: pos.z, holder: null,
+    x: pos.x, y: pos.y + 0.8, z: pos.z, holder: null, owner: id,
     energy: 20 + Math.floor(Math.random() * 21), mini: true
   };
   activeGenerators.push(miniGen);
@@ -325,6 +327,15 @@ function explosionDamage(pos, excludeId) {
   }
   if (droppedCoins.length > 0) io.emit('coinsDropped', droppedCoins);
   io.emit('scores', scores);
+  // Drones caught in the blast pop outright
+  for (const id of Object.keys(players)) {
+    const d = players[id].drone;
+    if (d && Math.hypot(d.x - pos.x, d.y - pos.y, d.z - pos.z) < 6) damageDrone(id, DRONE_HP);
+  }
+  // Turrets take heavy blast damage
+  for (const t of [...activeTurrets]) {
+    if (Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z) < 5.5) damageTurret(t.id, 30);
+  }
 }
 
 // --- Generators (Slayer): humming heal stations, draggable with E ---
@@ -392,7 +403,31 @@ setInterval(() => {
 }, 2000);
 
 // --- Castle walls (parametric, brick-built) ---
-const activeCastles = [];  // { id, a:{x,y,z}, b:{x,y,z}, arch }
+const activeCastles = [];  // { id, nodes, arch, kind, h, holes }
+
+// --- NPCs ---
+// Turrets belong to their spawner and shoot everyone else. The OWNER's client
+// runs the aiming/firing sim (through the normal machinegun pipeline, so
+// bullets damage as usual); the server owns turret health.
+const activeTurrets = [];  // { id, x, y, z, ry, owner, hp }
+const TURRET_HP = 60;
+
+function damageTurret(id, dmg) {
+  const t = activeTurrets.find(t => t.id === id);
+  if (!t) return;
+  t.hp -= Math.max(0, Math.min(30, dmg));
+  if (t.hp > 0) {
+    io.emit('turretHealth', { id, hp: t.hp });
+    return;
+  }
+  activeTurrets.splice(activeTurrets.indexOf(t), 1);
+  io.emit('turretDestroyed', id);
+  io.emit('explosion', { x: t.x, y: t.y + 1, z: t.z, type: 'mine' });
+}
+
+// Critter flocks (crows/rats) are ambient boids simulated client-side; the
+// server just remembers where each flock is anchored.
+const activeFlocks = [];   // { id, kind:'crows'|'rats', x, y, z }
 
 // --- Vehicles (Ghost-style hover + drill) ---
 // driver is a socket id while mounted, null while parked. The driver's client
@@ -469,7 +504,8 @@ function finishEndVote(passed) {
 // floor, which is what had them half-buried in walls.
 const PED_COUNT = 12;
 const PED_SPACING = 16;   // meters between pedestals
-const PED_TYPES = ['green', 'red', 'green', 'red', 'yellow'];
+// No yellow here: build prefabs are god-mode-only spawns, never map furniture.
+const PED_TYPES = ['green', 'red'];
 
 function autoPopulatePedestals() {
   pedestals.length = 0;
@@ -509,6 +545,7 @@ function autoPopulatePedestals() {
 // and the painted grid resets, so the next lobby starts from scratch.
 function endGame() {
   if (endVote) { clearTimeout(endVote.timer); endVote = null; }
+  if (startTimer) { clearTimeout(startTimer); startTimer = null; }
   for (const id of Object.keys(scores)) scores[id] = startingScore();
   io.emit('scores', scores);
   holderID = null;
@@ -533,6 +570,8 @@ function endGame() {
   activeCastles.length = 0;
   activeVehicles.length = 0;
   activeGenerators.length = 0;
+  activeTurrets.length = 0;
+  activeFlocks.length = 0;
   io.emit('currentPedestals', []);
   io.emit('currentSpawns', []);
   io.emit('currentTeleporters', []);
@@ -544,6 +583,8 @@ function endGame() {
   io.emit('currentCastles', []);
   io.emit('currentVehicles', []);
   io.emit('currentGenerators', []);
+  io.emit('currentTurrets', []);
+  io.emit('currentFlocks', []);
   if (levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
   io.emit('gameEnded');
 }
@@ -556,6 +597,10 @@ const EDIT_VOTE_MS = 25000;
 // Sockets sitting in the map editor. They haven't 'ready'd yet, so readyIds
 // doesn't see them - the editor announces itself instead.
 const editors = new Set();
+
+// Lobby start countdown: one shared timer so every menu counts in sync.
+const START_COUNTDOWN_MS = 5000;
+let startTimer = null;
 
 function defaultLayers() {
   const out = [[], [], [], []];
@@ -610,7 +655,6 @@ function applyEditVote(kind) {
   io.emit('creativeGrid', { layers: creativeLayers });
   autoPopulatePedestals();
   autoPlaceGenerator();
-  applyHomeBase();
 }
 
 // --- World items state ---
@@ -700,6 +744,32 @@ io.on('connection', (socket) => {
     if (on) editors.add(socket.id); else editors.delete(socket.id);
   });
 
+  // Lobby START: everyone in the lobby sees the same 5 s countdown, then all
+  // of them land in the pixel editor together. If a session is already in
+  // motion (painters at work or a live map), the caller just joins it.
+  socket.on('requestStart', () => {
+    if (creativeLayers || paintLayers || editors.size > 0 || readyIds.size > 0) {
+      socket.emit('enterEditor');
+      return;
+    }
+    if (startTimer) return;
+    io.emit('startCountdown', { ms: START_COUNTDOWN_MS });
+    startTimer = setTimeout(() => {
+      startTimer = null;
+      io.emit('enterEditor');
+    }, START_COUNTDOWN_MS);
+  });
+
+  // Live painter cursors: relay-only, so co-painters see where you're hovering.
+  socket.on('editCursor', (p) => {
+    if (!p) return;
+    socket.broadcast.emit('editCursor', {
+      id: socket.id,
+      r: Math.max(0, Math.min(31, Math.floor(Number(p.r) || 0))),
+      c: Math.max(0, Math.min(31, Math.floor(Number(p.c) || 0)))
+    });
+  });
+
   socket.on('updateGameSetting', (u) => {
     if (!u || typeof u.key !== 'string' || !(u.key in gameSettings)) return;
     if (u.key === 'slayer') return;  // derived from mode, never set directly
@@ -731,14 +801,33 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeCastle', (c) => {
-    if (!c || !Array.isArray(c.nodes) || c.nodes.length < 2) return;
+    if (!c || !Array.isArray(c.nodes) || c.nodes.length < 1) return;
+    const kind = c.kind === 'tower' ? 'tower' : 'wall';
+    if (kind === 'wall' && c.nodes.length < 2) return;
     const castle = {
       id: (typeof c.id === 'string' && c.id) ? c.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
       nodes: c.nodes.slice(0, 16).map(n => ({ x: +n.x || 0, y: +n.y || 0, z: +n.z || 0 })),
-      arch: !!c.arch
+      arch: !!c.arch,
+      kind,
+      h: Math.min(24, Math.max(2, Number(c.h) || 6)),
+      holes: []           // Tiny-Glade-style punched openings, added live
     };
     activeCastles.push(castle);
     io.emit('castlePlaced', castle);
+  });
+
+  // Live modification of a placed wall/tower: relative height and punched
+  // penetrations. Broadcasts the whole record; clients rebuild it.
+  socket.on('updateCastle', (u) => {
+    const castle = u && activeCastles.find(c => c.id === u.id);
+    if (!castle) return;
+    if (typeof u.dh === 'number') {
+      castle.h = Math.min(24, Math.max(2, castle.h + Math.max(-2, Math.min(2, u.dh))));
+    }
+    if (u.hole && typeof u.hole.x === 'number' && castle.holes.length < 24) {
+      castle.holes.push({ x: +u.hole.x, y: +u.hole.y, z: +u.hole.z });
+    }
+    io.emit('castleUpdated', castle);
   });
 
   socket.on('removeCastle', (id) => {
@@ -746,6 +835,58 @@ io.on('connection', (socket) => {
     if (idx !== -1) {
       activeCastles.splice(idx, 1);
       io.emit('castleRemoved', id);
+    }
+  });
+
+  // --- NPC turrets ---
+  socket.on('placeTurret', (t) => {
+    if (!t || typeof t.x !== 'number') return;
+    const turret = {
+      id: (typeof t.id === 'string' && t.id) ? t.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      x: +t.x, y: +t.y, z: +t.z, ry: 0,
+      owner: socket.id, hp: TURRET_HP
+    };
+    activeTurrets.push(turret);
+    io.emit('turretPlaced', turret);
+  });
+
+  socket.on('removeTurret', (id) => {
+    const idx = activeTurrets.findIndex(t => t.id === id);
+    if (idx !== -1) {
+      activeTurrets.splice(idx, 1);
+      io.emit('turretRemoved', id);
+    }
+  });
+
+  // Owner's client relays where the head is pointing (visual only)
+  socket.on('turretAim', (d) => {
+    const t = d && activeTurrets.find(t => t.id === d.id);
+    if (!t || t.owner !== socket.id) return;
+    t.ry = +d.ry || 0;
+    socket.broadcast.emit('turretAim', { id: t.id, ry: t.ry });
+  });
+
+  socket.on('turretHit', (d) => {
+    if (d && typeof d.id === 'string') damageTurret(d.id, Number(d.dmg) || 10);
+  });
+
+  // --- Critter flocks ---
+  socket.on('placeFlock', (f) => {
+    if (!f || typeof f.x !== 'number') return;
+    const flock = {
+      id: (typeof f.id === 'string' && f.id) ? f.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
+      kind: f.kind === 'rats' ? 'rats' : 'crows',
+      x: +f.x, y: +f.y, z: +f.z
+    };
+    activeFlocks.push(flock);
+    io.emit('flockPlaced', flock);
+  });
+
+  socket.on('removeFlock', (id) => {
+    const idx = activeFlocks.findIndex(f => f.id === id);
+    if (idx !== -1) {
+      activeFlocks.splice(idx, 1);
+      io.emit('flockRemoved', id);
     }
   });
 
@@ -771,7 +912,7 @@ io.on('connection', (socket) => {
 
   socket.on('mountVehicle', (id) => {
     const veh = activeVehicles.find(v => v.id === id);
-    if (!veh) return;
+    if (!veh || veh.wrecked) return;
     // Taken by someone still connected? Re-assert the real driver so the
     // optimistic mount on the loser's client rolls back.
     if (veh.driver && veh.driver !== socket.id && io.sockets.sockets.get(veh.driver)) {
@@ -794,7 +935,44 @@ io.on('connection', (socket) => {
     const veh = d && activeVehicles.find(v => v.id === d.id);
     if (!veh || veh.driver !== socket.id) return;
     veh.x = +d.x || 0; veh.y = +d.y || 0; veh.z = +d.z || 0; veh.ry = +d.ry || 0;
-    socket.broadcast.emit('vehicleMoved', { id: veh.id, x: veh.x, y: veh.y, z: veh.z, ry: veh.ry });
+    const out = { id: veh.id, x: veh.x, y: veh.y, z: veh.z, ry: veh.ry };
+    // Wreck tumbles carry a full orientation, not just yaw
+    if (typeof d.qx === 'number') {
+      out.qx = +d.qx; out.qy = +d.qy; out.qz = +d.qz; out.qw = +d.qw;
+    }
+    socket.broadcast.emit('vehicleMoved', out);
+  });
+
+  // --- Crash physics ---
+  // A hard stop knocks a vehicle into free rigid-body "wreck" physics on the
+  // crasher's client (who keeps relay authority). It can settle upside down;
+  // anyone pressing E on a wreck flips it back upright and parks it.
+  socket.on('wreckVehicle', (id) => {
+    const veh = activeVehicles.find(v => v.id === id);
+    if (!veh || veh.driver !== socket.id) return;
+    veh.wrecked = true;
+    socket.broadcast.emit('vehicleWrecked', id);
+  });
+
+  // Crasher's wreck settled upright on its own: back to a parked vehicle.
+  socket.on('vehicleRighted', (d) => {
+    const veh = d && activeVehicles.find(v => v.id === d.id);
+    if (!veh || !veh.wrecked || (veh.driver && veh.driver !== socket.id)) return;
+    veh.wrecked = false;
+    if (typeof d.x === 'number') { veh.x = +d.x; veh.y = +d.y; veh.z = +d.z; veh.ry = +d.ry || 0; }
+    io.emit('vehicleRighted', { id: veh.id, x: veh.x, y: veh.y, z: veh.z, ry: veh.ry });
+  });
+
+  // E on an upside-down wreck: flip it upright where it lies.
+  socket.on('flipVehicle', (id) => {
+    const veh = activeVehicles.find(v => v.id === id);
+    if (!veh || !veh.wrecked) return;
+    veh.wrecked = false;
+    if (veh.driver) {
+      veh.driver = null;
+      io.emit('vehicleDriver', { id: veh.id, driver: null });
+    }
+    io.emit('vehicleRighted', { id: veh.id, x: veh.x, y: veh.y, z: veh.z, ry: veh.ry });
   });
 
   socket.on('placeSpawn', (s) => {
@@ -871,7 +1049,6 @@ io.on('connection', (socket) => {
     io.emit('creativeGrid', { layers: creativeLayers });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
     autoPlaceGenerator();     // and one heal generator near the center
-    applyHomeBase();          // home base + its spawn point (default or painted)
   });
 
   socket.on('terrainEdit', (e) => {
@@ -949,6 +1126,8 @@ io.on('connection', (socket) => {
     socket.emit('currentCastles', activeCastles);
     socket.emit('currentVehicles', activeVehicles);
     socket.emit('currentGenerators', activeGenerators);
+    socket.emit('currentTurrets', activeTurrets);
+    socket.emit('currentFlocks', activeFlocks);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
     socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
 
@@ -973,7 +1152,20 @@ io.on('connection', (socket) => {
     }
     if (data.smoothing !== undefined) players[socket.id].smoothing = data.smoothing;
     if (data.godmode !== undefined) players[socket.id].godmode = data.godmode;
+    // Drone out? Track it as a target; fresh drones start at full health.
+    if (data.drone && typeof data.drone.x === 'number') {
+      if (!players[socket.id].drone) players[socket.id].droneHp = DRONE_HP;
+      players[socket.id].drone = { x: +data.drone.x, y: +data.drone.y, z: +data.drone.z };
+    } else if (players[socket.id].drone) {
+      players[socket.id].drone = null;
+      delete players[socket.id].droneHp;
+    }
     socket.broadcast.emit('playerMoved', { id: socket.id, ...data });
+  });
+
+  // Shooter's client detected a bullet on someone's drone.
+  socket.on('droneHit', (targetId) => {
+    if (typeof targetId === 'string' && targetId !== socket.id) damageDrone(targetId, 10);
   });
 
   socket.on('jump', () => socket.broadcast.emit('playerJumped', socket.id));
@@ -1060,6 +1252,7 @@ io.on('connection', (socket) => {
       model: m.model,
       x: Number(m.x) || 0, y: Number(m.y) || 0, z: Number(m.z) || 0,
       ry: Number(m.ry) || 0,
+      s: Math.min(6, Math.max(0.2, Number(m.s) || 1)),   // god-menu scroll scale
       id: (typeof m.id === 'string' && m.id) ? m.id : (Date.now().toString(36) + Math.random().toString(36).substr(2))
     };
     activeModels.push(model);
@@ -1144,7 +1337,7 @@ io.on('connection', (socket) => {
     if (!g || typeof g.x !== 'number') return;
     const gen = {
       id: (typeof g.id === 'string' && g.id) ? g.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
-      x: +g.x, y: +g.y, z: +g.z, holder: null,
+      x: +g.x, y: +g.y, z: +g.z, holder: null, owner: socket.id,
       energy: GEN_ENERGY, mini: false
     };
     activeGenerators.push(gen);
@@ -1180,7 +1373,9 @@ io.on('connection', (socket) => {
 
   socket.on('generatorMoved', (d) => {
     const gen = d && activeGenerators.find(g => g.id === d.id);
-    if (!gen || gen.holder !== socket.id) return;
+    // The holder relays while dragging; the OWNER may also relay while nobody
+    // holds it — that's the physics drop right after placement/death.
+    if (!gen || (gen.holder !== socket.id && !(gen.holder == null && gen.owner === socket.id))) return;
     gen.x = +d.x || 0; gen.y = +d.y || 0; gen.z = +d.z || 0;
     socket.broadcast.emit('generatorMoved', { id: gen.id, x: gen.x, y: gen.y, z: gen.z });
   });

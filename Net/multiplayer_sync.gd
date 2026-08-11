@@ -101,6 +101,14 @@ func _on_event(event: String, data: Variant) -> void:
 			var jid := str(data)
 			if _remotes.has(jid):
 				Sfx.jump(_remotes[jid].global_position)
+		"droneHealth":
+			var did := str(data.get("id", ""))
+			if _remotes.has(did):
+				_remotes[did].set_drone_hp(int(data.get("hp", 0)))
+		"droneDestroyed":
+			var xid := str(data.get("id", ""))
+			if _remotes.has(xid):
+				_remotes[xid].clear_drone()
 		"kicked":
 			_return_to_menu("kicked (inactivity)")
 		"gameEnded":
@@ -148,7 +156,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_send_accum = 0.0
 	var q: Quaternion = player.visual_quat()
-	Net.emit_event("playerMoved", {
+	var payload := {
 		"x": player.global_position.x,
 		"y": player.global_position.y,
 		"z": player.global_position.z,
@@ -157,4 +165,12 @@ func _physics_process(delta: float) -> void:
 		# Drone-style god mode: the body stays put and stays a normal,
 		# vulnerable target — never render it as an untouchable ghost.
 		"godmode": false,
-	})
+	}
+	# Drone out? Report it — the server tracks it as a shootable target and
+	# remotes render it (with its health) at this spot.
+	if player.godmode:
+		var drone: Node = get_tree().get_first_node_in_group("god_drone")
+		if drone is Node3D and drone.get("return_to") == null:
+			var dp: Vector3 = drone.global_position
+			payload["drone"] = {"x": dp.x, "y": dp.y, "z": dp.z}
+	Net.emit_event("playerMoved", payload)

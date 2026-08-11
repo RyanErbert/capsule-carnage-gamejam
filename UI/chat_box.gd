@@ -14,7 +14,8 @@ var _input: LineEdit
 
 func _ready() -> void:
 	add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.55), 8))
-	custom_minimum_size = Vector2(330, 190)
+	if custom_minimum_size == Vector2.ZERO:
+		custom_minimum_size = Vector2(330, 190)  # hosts may pre-size to dock it
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 6)
 	add_child(box)

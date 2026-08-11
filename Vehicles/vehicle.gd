@@ -30,6 +30,12 @@ const DRILL_STRENGTH := 0.8
 const DRILL_INTERVAL := 0.09
 const DRILL_HP_PER_TICK := 0.5  # ~5.5 health/s while the drill is eating
 
+# Crash physics: a hard head-on stop knocks the vehicle into free rigid-body
+# "wreck" physics — it can bounce, tumble, and settle upside down. Landing
+# upright parks it again on its own; upside down it waits for an E-flip.
+const CRASH_SPEED := 11.0     # planar speed you must shed in one hit
+const CRASH_REMAINDER := 3.0
+
 var id := ""
 var kind := "ghost"
 var driver_id := ""           # "" = parked
@@ -37,8 +43,15 @@ var driven_by_me := false
 var camera_rig: Node3D        # set by world_vehicles while driven_by_me
 var net_pos := Vector3.ZERO
 var net_yaw := 0.0
+var net_quat := Quaternion.IDENTITY   # full orientation, used while wrecked
+
+var wrecked := false
+var crashed := false          # one-shot flag world_vehicles picks up
+var crash_vel := Vector3.ZERO # planar velocity the instant before the hit
 
 var _visual: Node3D
+var _col: CollisionShape3D
+var _wreck_body: RigidBody3D  # only on the client simulating the wreck
 var _drill_cone: MeshInstance3D
 var _drill_cd := 0.0
 var _drilling := false
@@ -55,18 +68,34 @@ func seat_pos() -> Vector3:
 	return global_position + global_transform.basis.y * 1.15
 
 
+func _exit_tree() -> void:
+	# The wreck sim body lives beside us, not under us — don't leak it
+	if _wreck_body and is_instance_valid(_wreck_body):
+		_wreck_body.queue_free()
+
+
 func _ready() -> void:
 	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
-	var col := CollisionShape3D.new()
+	_col = CollisionShape3D.new()
 	var box := BoxShape3D.new()
 	box.size = Vector3(2.4, 1.1, 3.2)
-	col.shape = box
-	add_child(col)
+	_col.shape = box
+	add_child(_col)
 	_visual = _build_visual()
 	add_child(_visual)
 
 
 func _physics_process(delta: float) -> void:
+	if wrecked:
+		if _wreck_body and is_instance_valid(_wreck_body):
+			# We simulate: the node just mirrors the rigid body
+			global_transform = _wreck_body.global_transform
+		else:
+			# Remote wreck: chase the relayed full orientation
+			var f := 1.0 - exp(-NET_LERP * delta)
+			global_position = global_position.lerp(net_pos, f)
+			quaternion = quaternion.slerp(net_quat, f)
+		return
 	if driven_by_me:
 		_drive(delta)
 	elif driver_id != "":
@@ -77,6 +106,68 @@ func _physics_process(delta: float) -> void:
 	if _drill_cone:
 		var spin_rate := 14.0 if _drilling else 1.5
 		_drill_cone.rotate_object_local(Vector3.UP, spin_rate * delta)
+
+
+# --- Wreck mode --------------------------------------------------------------
+
+## Knock the vehicle into rigid-body physics. `sim` = this client owns the
+## tumble (the crasher); remotes just render the relayed transform.
+func enter_wreck(sim: bool, impact := Vector3.ZERO) -> void:
+	if wrecked:
+		return
+	wrecked = true
+	crashed = false
+	velocity = Vector3.ZERO
+	net_quat = quaternion
+	if not sim:
+		return
+	_col.disabled = true
+	_wreck_body = RigidBody3D.new()
+	_wreck_body.mass = 90.0
+	var c := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(2.4, 1.1, 3.2)
+	c.shape = box
+	_wreck_body.add_child(c)
+	get_parent().add_child(_wreck_body)
+	_wreck_body.global_transform = global_transform
+	# Bounce off the wall it just ate: some of the impact back, plus a pop
+	_wreck_body.linear_velocity = -impact * 0.35 + Vector3(0, 4.5, 0)
+	_wreck_body.angular_velocity = Vector3(
+		randf_range(-4.0, 4.0), randf_range(-2.0, 2.0), randf_range(-4.0, 4.0))
+
+
+func exit_wreck(pos: Vector3, yaw: float) -> void:
+	wrecked = false
+	crashed = false
+	if _wreck_body and is_instance_valid(_wreck_body):
+		_wreck_body.queue_free()
+	_wreck_body = null
+	if _col:
+		_col.disabled = false
+	global_position = pos
+	rotation = Vector3(0, yaw, 0)
+	net_pos = pos
+	net_yaw = yaw
+	net_quat = quaternion
+	velocity = Vector3.ZERO
+
+
+func wreck_settled() -> bool:
+	return _wreck_body != null and is_instance_valid(_wreck_body) \
+		and (_wreck_body.sleeping or (_wreck_body.linear_velocity.length() < 0.5
+			and _wreck_body.angular_velocity.length() < 0.5))
+
+
+func wreck_upright() -> bool:
+	var b := _wreck_body.global_transform.basis if _wreck_body and is_instance_valid(_wreck_body) \
+		else global_transform.basis
+	return b.y.dot(Vector3.UP) > 0.65
+
+
+func wreck_transform() -> Transform3D:
+	return _wreck_body.global_transform if _wreck_body and is_instance_valid(_wreck_body) \
+		else global_transform
 
 
 func _drive(delta: float) -> void:
@@ -115,7 +206,18 @@ func _drive(delta: float) -> void:
 	velocity.x = hvel.x
 	velocity.z = hvel.z
 
+	var pre_vel := velocity
+	var pre_speed := hvel.length()
 	move_and_slide()
+
+	# Crash check: a lot of speed gone in one hit against something vertical
+	var post_speed := Vector2(velocity.x, velocity.z).length()
+	if pre_speed > CRASH_SPEED and post_speed < CRASH_REMAINDER:
+		for ci in get_slide_collision_count():
+			if absf(get_slide_collision(ci).get_normal().y) < 0.5:
+				crashed = true
+				crash_vel = pre_vel
+				break
 
 	# Visual lean: bank into lateral slide, dip the nose under thrust
 	_input_pitch = lerpf(_input_pitch, -input_dir.y * 0.10, minf(1.0, 8.0 * delta))

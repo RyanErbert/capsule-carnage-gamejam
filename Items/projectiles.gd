@@ -321,12 +321,23 @@ func _physics_process(delta: float) -> void:
 				if b["owner"] == self_id and _terrain() != null \
 						and rh["collider"].get_parent() == _terrain():
 					_carve(rh["position"], BULLET_CHIP_R, BULLET_CHIP_ST)
+				# ...and wear down NPC turrets
+				elif b["owner"] == self_id and rh["collider"] is Node \
+						and (rh["collider"] as Node).is_in_group("turret_body"):
+					Net.emit_event("turretHit", {
+						"id": str((rh["collider"] as Node).get_meta("turret_id", "")), "dmg": 10})
 		if not hit and b["owner"] == self_id:
 			for id in remotes:
 				if remotes[id].global_position.distance_to(b["pos"]) < HIT_RADIUS:
 					hit = true
 					var d := vel.normalized()
 					Net.emit_event("machinegunHit", {"targetId": id, "dir": {"x": d.x, "y": d.y, "z": d.z}})
+					break
+				# Their drone is a target too — smaller, so a tighter sphere
+				var dp: Variant = remotes[id].drone_pos()
+				if dp is Vector3 and dp.distance_to(b["pos"]) < 0.9:
+					hit = true
+					Net.emit_event("droneHit", id)
 					break
 		if not hit and b["owner"] != self_id and player \
 				and player.global_position.distance_to(b["pos"]) < HIT_RADIUS:

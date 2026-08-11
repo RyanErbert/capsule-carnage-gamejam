@@ -151,22 +151,26 @@ func _add_pedestal(ped: Dictionary) -> void:
 	root.rotation.y = float(ped.get("ry", 0.0))
 	add_child(root)
 
-	# Column stand-in for /prefabs/item_ped.glb
-	var column := MeshInstance3D.new()
+	# The plate: a shallow, tapered disc flush with the ground
+	var plate := MeshInstance3D.new()
 	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.35
-	cyl.bottom_radius = 0.45
-	cyl.height = 1.0
+	cyl.top_radius = 0.85
+	cyl.bottom_radius = 1.2
+	cyl.height = 0.28
 	var col_mat := StandardMaterial3D.new()
 	col_mat.albedo_color = Color(0.55, 0.55, 0.6)
+	col_mat.roughness = 0.8
 	cyl.material = col_mat
-	column.mesh = cyl
-	column.position.y = 0.5
-	root.add_child(column)
+	plate.mesh = cyl
+	plate.position.y = 0.14
+	root.add_child(plate)
 
-	# Octahedron crystal at y 1.2, colored by category (web §4.1)
+	# The item: a pill lying on its side, colored by category
 	var crystal := MeshInstance3D.new()
-	crystal.mesh = _octahedron_mesh(0.3)
+	var pill := CapsuleMesh.new()
+	pill.radius = 0.17
+	pill.height = 0.78
+	crystal.mesh = pill
 	var color: Color = CRYSTAL_COLORS.get(str(ped.get("type", "green")), Color.WHITE)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
@@ -174,7 +178,8 @@ func _add_pedestal(ped: Dictionary) -> void:
 	mat.emission = color
 	mat.emission_energy_multiplier = 0.6
 	crystal.material_override = mat
-	crystal.position.y = 1.2
+	crystal.rotation.z = PI / 2.0  # lie flat: it's a pill, not an obelisk
+	crystal.position.y = 0.95
 	crystal.visible = ped.get("currentItem") != null
 	root.add_child(crystal)
 
@@ -183,21 +188,6 @@ func _add_pedestal(ped: Dictionary) -> void:
 		"has_item": ped.get("currentItem") != null,
 		"type": str(ped.get("type", "green")),
 	}
-
-
-func _octahedron_mesh(r: float) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var top := Vector3(0, r, 0)
-	var bottom := Vector3(0, -r, 0)
-	var ring := [Vector3(r, 0, 0), Vector3(0, 0, r), Vector3(-r, 0, 0), Vector3(0, 0, -r)]
-	for i in 4:
-		var a: Vector3 = ring[i]
-		var b: Vector3 = ring[(i + 1) % 4]
-		st.add_vertex(top); st.add_vertex(b); st.add_vertex(a)
-		st.add_vertex(bottom); st.add_vertex(a); st.add_vertex(b)
-	st.generate_normals()
-	return st.commit()
 
 
 func _add_pad(p: Dictionary) -> void:
@@ -286,21 +276,21 @@ func _physics_process(delta: float) -> void:
 		_pending_ghost.queue_free()
 		_pending_ghost = null
 
-	# Crystals spin 2 rad/s and bob (web: sin(ms*0.003 + x) * 0.1 around y 1.2)
+	# Pills spin 2 rad/s and bob (web: sin(ms*0.003 + x) * 0.1)
 	for id in _pedestals:
 		var ped: Dictionary = _pedestals[id]
 		if ped["has_item"]:
 			var crystal: MeshInstance3D = ped["crystal"]
 			crystal.rotation.y += delta * 2.0
-			crystal.position.y = 1.2 + sin(_time * 3.0 + ped["node"].position.x) * 0.1
+			crystal.position.y = 0.95 + sin(_time * 3.0 + ped["node"].position.x) * 0.1
 
 	if not player:
 		return
 
-	# Pedestal pickup (< 1.8, needs a free slot, never in godmode; web hides
-	# the crystal optimistically)
-	if _item_controller and not player.godmode \
-			and _item_controller.inventory.size() < _item_controller.MAX_INVENTORY:
+	# Pedestal pickup (< 1.8, never in godmode; web hides the crystal
+	# optimistically). A full inventory still picks up: the new item takes
+	# slot 0 and the last one falls off — same as a god-given item.
+	if _item_controller and not player.godmode:
 		for id in _pedestals:
 			var ped: Dictionary = _pedestals[id]
 			if ped["has_item"] and player.global_position.distance_to(ped["node"].position) < PICKUP_DIST:
