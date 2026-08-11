@@ -40,7 +40,7 @@ const SLAB := 8.0
 # The fog boundary (creative.gd) turns players around long before the edge.
 const FRAME_INNER := 78.0          # butts against the bowl's outer shelf
 const STAGE_RADIUS := 640.0        # outer edge of the circular plain
-const FRAME_TOP := 0.98            # a hair under the voxel floor's ~1.0
+const FRAME_TOP := 0.48            # a hair under the bowl apron's ~0.5 surface
 const FRAME_SEGMENTS := 128
 
 # Lattice points are (NX+1) x (NY+1) x (NZ+1)

@@ -215,10 +215,12 @@ func _reseat() -> void:
 
 
 ## Snap a prop back onto the surface under it. Returns false when there is no
-## survivable ground there anymore.
+## survivable ground there anymore. The ray starts just above the prop, NOT in
+## the sky — a lamp in a cave must seat on the cave floor, not pop up through
+## the ceiling onto the overworld.
 func _reseat_node(node: Node3D, exclude: Array) -> bool:
 	var pos := node.global_position
-	var hit := _ground_at(pos + Vector3(0, 20.0, 0), exclude)
+	var hit := _ground_at(pos + Vector3(0, 2.5, 0), exclude)
 	if hit.is_empty() or hit["normal"].y < MAX_SLOPE_Y:
 		return false
 	if absf(hit["position"].y - pos.y) > 0.06:

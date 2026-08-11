@@ -865,7 +865,8 @@ io.on('connection', (socket) => {
     const t = d && activeTurrets.find(t => t.id === d.id);
     if (!t || t.owner !== socket.id) return;
     t.ry = +d.ry || 0;
-    socket.broadcast.emit('turretAim', { id: t.id, ry: t.ry });
+    t.rx = +d.rx || 0;  // pitch: the gun nods up/down at its target
+    socket.broadcast.emit('turretAim', { id: t.id, ry: t.ry, rx: t.rx });
   });
 
   socket.on('turretHit', (d) => {
@@ -934,6 +935,15 @@ io.on('connection', (socket) => {
     const bot = activeVehicles.find(v => v.kind === 'crowbot' && v.driver === socket.id);
     if (!bot) return;
     io.emit('swarmStrike', { id: socket.id, x: +d.x, y: +d.y, z: +d.z });
+  });
+
+  // Rat-attack pilot marked a player: guided rat packs hunt that player for a
+  // while (boids are client-local; this only syncs intent).
+  socket.on('swarmHunt', (d) => {
+    if (!d || typeof d.t !== 'string' || !players[d.t]) return;
+    const bot = activeVehicles.find(v => v.kind === 'ratbot' && v.driver === socket.id);
+    if (!bot) return;
+    io.emit('swarmHunt', { id: socket.id, target: d.t });
   });
 
   socket.on('removeVehicle', (id) => {

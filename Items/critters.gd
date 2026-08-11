@@ -23,6 +23,10 @@ const ANCHOR_R := 16.0      # how far a flock strays from home
 const GUIDE_R := 30.0
 const STRIKE_TIME := 3.5    # crow torrent duration after a swarmStrike
 const STRIKE_BITE_CD := 0.6 # torrent bites land faster than ambient nips
+# Guided swarms run hot enough to pace the machine leading them
+const GUIDED_CROW_SPEED := 15.0   # a hair over CROWBOT_SPEED (14)
+const GUIDED_RAT_SPEED := 12.0    # a hair over RATBOT_SPEED (11)
+const HUNT_TIME := 10.0     # how long a rat-attack mark keeps the pack on someone
 
 # Combat: critters are shootable (one hit kills a boid) and hold a grudge —
 # a flock that loses a member turns on whatever killed it for a while.
@@ -61,6 +65,9 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if data is Dictionary:
 				_apply_strike(str(data.get("id", "")),
 					Vector3(data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0)))
+		"swarmHunt":
+			if data is Dictionary:
+				_apply_hunt(str(data.get("id", "")), str(data.get("target", "")))
 		"critterDied":
 			if data is Dictionary:
 				_kill_boid(str(data.get("id", "")), int(data.get("idx", -1)), data.get("src"))
@@ -118,12 +125,17 @@ func _aggro_pos(flock: Dictionary) -> Variant:
 	if ag["t"] == "turret":
 		var wt: Node = get_tree().get_first_node_in_group("world_turrets")
 		return wt.turret_pos(str(ag["id"])) if wt else null
+	return _player_pos(str(ag["id"]))
+
+
+## Where a player (ourselves or a remote) is right now, or null.
+func _player_pos(pid: String) -> Variant:
 	if _sync == null:
 		_sync = get_tree().get_first_node_in_group("net_sync")
-	if _sync and str(ag["id"]) == str(_sync.self_id):
+	if _sync and pid == str(_sync.self_id):
 		return player.global_position if player and not player.dead else null
-	if _sync and _sync.remotes().has(str(ag["id"])):
-		return (_sync.remotes()[str(ag["id"])] as Node3D).global_position
+	if _sync and _sync.remotes().has(pid):
+		return (_sync.remotes()[pid] as Node3D).global_position
 	return null
 
 
@@ -149,11 +161,7 @@ func _aggro_bite(flock: Dictionary, pos: Vector3) -> void:
 ## A crow-bot pilot clicked a target: every crow flock that bot is currently
 ## guiding surges there for a few seconds.
 func _apply_strike(pilot_id: String, point: Vector3) -> void:
-	var bot: Node3D = null
-	for n in get_tree().get_nodes_in_group("bot_crow"):
-		if n is Node3D and str(n.get("driver_id")) == pilot_id:
-			bot = n
-			break
+	var bot := _pilot_bot("bot_crow", pilot_id)
 	if bot == null:
 		return
 	for id in _flocks:
@@ -163,6 +171,28 @@ func _apply_strike(pilot_id: String, point: Vector3) -> void:
 		if _flock_center(flock).distance_to(bot.global_position) < GUIDE_R:
 			flock["strike"] = point
 			flock["strike_t"] = STRIKE_TIME
+
+
+## A rat-attack pilot marked a player: every rat pack that bot is currently
+## guiding hunts the target until the mark runs out.
+func _apply_hunt(pilot_id: String, target_id: String) -> void:
+	var bot := _pilot_bot("bot_rat", pilot_id)
+	if bot == null or target_id == "":
+		return
+	for id in _flocks:
+		var flock: Dictionary = _flocks[id]
+		if flock["kind"] != "rats":
+			continue
+		if _flock_center(flock).distance_to(bot.global_position) < GUIDE_R:
+			flock["hunt"] = {"id": target_id, "left": HUNT_TIME}
+
+
+## The bot in `group` this pilot is currently driving, or null.
+func _pilot_bot(group: String, pilot_id: String) -> Node3D:
+	for n in get_tree().get_nodes_in_group(group):
+		if n is Node3D and str(n.get("driver_id")) == pilot_id:
+			return n
+	return null
 
 
 func _flock_center(flock: Dictionary) -> Vector3:
@@ -244,6 +274,11 @@ func _physics_process(delta: float) -> void:
 			ag["left"] = float(ag["left"]) - delta
 			if float(ag["left"]) <= 0.0:
 				flock.erase("aggro")
+		var hu: Variant = flock.get("hunt")
+		if hu is Dictionary:
+			hu["left"] = float(hu["left"]) - delta
+			if float(hu["left"]) <= 0.0:
+				flock.erase("hunt")
 		if flock["kind"] == "crows":
 			_tick_crows(flock, delta)
 		else:
@@ -335,10 +370,16 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 			accel += Vector3(-out.z, 0, out.x).normalized() * 3.0  # orbit bias
 			accel.y += clampf(home.y - pos.y, -6.0 if bot else -4.0, 6.0 if bot else 4.0)
 			if bot:
-				speed = CROW_SPEED * 1.7  # keep up with the machine
+				speed = GUIDED_CROW_SPEED  # match the machine's pace
 		vel += accel * delta
 		vel = vel.limit_length(speed)
-		pos += vel * delta
+		# Crows obey the level: clip the step against terrain/walls and slide
+		var clip := _clip_move(pos, pos + vel * delta)
+		if clip.is_empty():
+			pos += vel * delta
+		else:
+			pos = (clip["position"] as Vector3) + (clip["normal"] as Vector3) * 0.3
+			vel = vel.slide(clip["normal"])
 		b["pos"] = pos
 		b["vel"] = vel
 		var node: Node3D = b["node"]
@@ -361,6 +402,13 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 	var bot := _guide_bot("bot_rat", _flock_center(flock))
 	var home: Vector3 = bot.global_position if bot else anchor
 	var grudge: Variant = _aggro_pos(flock)
+	# A rat-attack mark: the whole pack runs down one player until it expires
+	var hunt: Variant = flock.get("hunt")
+	var hunt_p: Variant = _player_pos(str((hunt as Dictionary)["id"])) if hunt is Dictionary else null
+	if hunt is Dictionary and hunt_p == null:
+		flock.erase("hunt")  # target died or left: drop the mark
+	var hunting_me: bool = hunt is Dictionary and _sync \
+		and str((hunt as Dictionary)["id"]) == str(_sync.self_id)
 	var chase: bool = player != null and not player.dead and not player.godmode \
 		and not player.piloting and player.global_position.distance_to(home) < RAT_CHASE + ANCHOR_R
 	for b in boids:
@@ -375,7 +423,14 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 			var d: float = pos.distance_to(o["pos"])
 			if d < SEP_R * 0.6 and d > 0.001:
 				accel += (pos - o["pos"]) / d * 8.0
-		if grudge != null and (grudge as Vector3).distance_to(pos) < RAT_CHASE * 2.5:
+		if hunt_p != null:
+			var hp := hunt_p as Vector3
+			accel += (hp - pos).normalized() * 18.0
+			if hunting_me and hp.distance_to(pos) < 1.2 and float(flock["bite_cd"]) <= 0.0:
+				flock["bite_cd"] = STRIKE_BITE_CD
+				Net.emit_event("selfDamage", 1)
+				Sfx.boost(pos, 0.3)
+		elif grudge != null and (grudge as Vector3).distance_to(pos) < RAT_CHASE * 2.5:
 			# Revenge mob: swarm whatever shot the pack (player or turret)
 			var gp := grudge as Vector3
 			accel += (gp - pos).normalized() * 16.0
@@ -397,7 +452,14 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 		accel.y = 0.0
 		vel += accel * delta
 		vel.y = 0.0
-		vel = vel.limit_length(RAT_SPEED * (2.2 if bot else 1.0))
+		# Guided or on a hunt: run hot enough to pace the machine
+		var cap := GUIDED_RAT_SPEED if (bot or hunt_p != null) else RAT_SPEED
+		vel = vel.limit_length(cap)
+		# Rats obey walls too: clip the step at ankle height and slide along
+		var lift := Vector3(0, 0.25, 0)
+		var clip := _clip_move(pos + lift, pos + lift + vel * delta)
+		if not clip.is_empty():
+			vel = vel.slide(clip["normal"])
 		pos += vel * delta
 		pos.y = _ground_y(pos) + 0.12
 		b["pos"] = pos
@@ -412,6 +474,18 @@ func _ground_y(pos: Vector3) -> float:
 	var q := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 4, 0), pos + Vector3(0, -12, 0))
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
 	return hit["position"].y if hit else pos.y
+
+
+## Segment cast for a boid step (with a little skin), ignoring our own player
+## so dives can still reach them. {} = path clear.
+func _clip_move(from: Vector3, to: Vector3) -> Dictionary:
+	var dir := to - from
+	if dir.length_squared() < 0.000001:
+		return {}
+	var q := PhysicsRayQueryParameters3D.create(from, to + dir.normalized() * 0.3)
+	if player:
+		q.exclude = [player.get_rid()]
+	return get_world_3d().direct_space_state.intersect_ray(q)
 
 
 # --- Bodies (procedural, matching the blocky look) ---------------------------

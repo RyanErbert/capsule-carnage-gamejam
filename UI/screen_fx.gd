@@ -12,16 +12,21 @@ extends Node
 const GLITCH_DECAY := 1.9
 
 var _scifi_rect: ColorRect
-var _mosh_vp: SubViewport
+# Ping-pong feedback pair: reading the render target you're writing is
+# undefined, so each frame ONE viewport renders while sampling the OTHER.
+var _mosh_a: SubViewport
+var _mosh_b: SubViewport
 var _copy_vp: SubViewport       # 1-frame-delayed copy of the live screen
-var _mosh_feedback: ColorRect   # inside the buffer: advects prev frame
 var _mosh_display: ColorRect    # on screen: shows the buffer while moshing
+var _flip := false
+var _was_active := false
 var _glitch_amount := 0.0
 var _t := 0.0
 
 const SCIFI_SHADER := "
 shader_type canvas_item;
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
+uniform vec3 grade = vec3(0.72, 1.05, 1.28);
 void fragment() {
 	vec2 uv = SCREEN_UV;
 	float ab = 0.0016;
@@ -29,7 +34,7 @@ void fragment() {
 	col.r = texture(screen_tex, uv + vec2(ab, 0.0)).r;
 	col.g = texture(screen_tex, uv).g;
 	col.b = texture(screen_tex, uv - vec2(ab, 0.0)).b;
-	col = mix(col, col * vec3(0.72, 1.05, 1.28), 0.55);
+	col = mix(col, col * grade, 0.55);
 	col *= 0.93 + 0.07 * sin(uv.y * 800.0 + TIME * 8.0);
 	vec2 g = fract(uv * vec2(48.0, 27.0));
 	col *= 1.0 - 0.05 * step(0.95, max(g.x, g.y));
@@ -126,11 +131,19 @@ func _make_screen_rect(code: String) -> ColorRect:
 func _build_mosh() -> void:
 	var vp_size: Vector2i = get_viewport().size
 
+	# The ping-pong pair FIRST in tree order: sibling viewports render in
+	# attach order, so when a mosh pass samples the copy buffer below it,
+	# that buffer still holds the PREVIOUS frame — real optical flow.
+	_mosh_a = _make_mosh_vp(vp_size)
+	_mosh_b = _make_mosh_vp(vp_size)
+	_fb_mat(_mosh_a).set_shader_parameter("prev_tex", _mosh_b.get_texture())
+	_fb_mat(_mosh_b).set_shader_parameter("prev_tex", _mosh_a.get_texture())
+
 	# Live-frame history buffer (its texture lags the screen by one frame)
 	_copy_vp = SubViewport.new()
 	_copy_vp.size = vp_size
 	_copy_vp.disable_3d = true
-	_copy_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_copy_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	add_child(_copy_vp)
 	var copy_rect := ColorRect.new()
 	copy_rect.size = vp_size
@@ -141,32 +154,41 @@ func _build_mosh() -> void:
 	copy_mat.set_shader_parameter("live_tex", get_viewport().get_texture())
 	copy_rect.material = copy_mat
 	_copy_vp.add_child(copy_rect)
-
-	# The mosh buffer itself (feedback: reads its own last frame)
-	_mosh_vp = SubViewport.new()
-	_mosh_vp.size = vp_size
-	_mosh_vp.disable_3d = true
-	_mosh_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	add_child(_mosh_vp)
-	_mosh_feedback = ColorRect.new()
-	_mosh_feedback.size = vp_size
-	var fb_shader := Shader.new()
-	fb_shader.code = MOSH_FEEDBACK_SHADER
-	var fb_mat := ShaderMaterial.new()
-	fb_mat.shader = fb_shader
-	fb_mat.set_shader_parameter("live_tex", get_viewport().get_texture())
-	fb_mat.set_shader_parameter("prev_live_tex", _copy_vp.get_texture())
-	fb_mat.set_shader_parameter("prev_tex", _mosh_vp.get_texture())  # feedback
-	_mosh_feedback.material = fb_mat
-	_mosh_vp.add_child(_mosh_feedback)
+	_fb_mat(_mosh_a).set_shader_parameter("prev_live_tex", _copy_vp.get_texture())
+	_fb_mat(_mosh_b).set_shader_parameter("prev_live_tex", _copy_vp.get_texture())
 
 	_mosh_display = _make_screen_rect(MOSH_DISPLAY_SHADER)
-	(_mosh_display.material as ShaderMaterial).set_shader_parameter("mosh_tex", _mosh_vp.get_texture())
+	(_mosh_display.material as ShaderMaterial).set_shader_parameter("mosh_tex", _mosh_a.get_texture())
 
 
-func set_scifi(on: bool) -> void:
+func _make_mosh_vp(vp_size: Vector2i) -> SubViewport:
+	var vp := SubViewport.new()
+	vp.size = vp_size
+	vp.disable_3d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(vp)
+	var rect := ColorRect.new()
+	rect.size = vp_size
+	var shader := Shader.new()
+	shader.code = MOSH_FEEDBACK_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("live_tex", get_viewport().get_texture())
+	rect.material = mat
+	vp.add_child(rect)
+	return vp
+
+
+func _fb_mat(vp: SubViewport) -> ShaderMaterial:
+	return (vp.get_child(0) as ColorRect).material as ShaderMaterial
+
+
+## `grade` tints the whole overlay: default cyan (drone/crow-bot), red for
+## the rat-attack's hunter vision.
+func set_scifi(on: bool, grade := Vector3(0.72, 1.05, 1.28)) -> void:
 	if _scifi_rect:
 		_scifi_rect.visible = on
+		(_scifi_rect.material as ShaderMaterial).set_shader_parameter("grade", grade)
 
 
 ## Damage hit: kick the mosh up (0..1) — it decays back to a clean image.
@@ -181,16 +203,30 @@ func _process(delta: float) -> void:
 	_glitch_amount *= exp(-GLITCH_DECAY * delta)
 	var active := _glitch_amount > 0.03
 	_mosh_display.visible = active
-	var mode := SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
-	_mosh_vp.render_target_update_mode = mode
-	_copy_vp.render_target_update_mode = mode
-	if active:
-		var fb := _mosh_feedback.material as ShaderMaterial
-		fb.set_shader_parameter("amount", _glitch_amount)
-		fb.set_shader_parameter("t", _t)
-		(_mosh_display.material as ShaderMaterial).set_shader_parameter("amount", _glitch_amount)
-		# Track window size so the buffer never stretches
-		if _mosh_vp.size != Vector2i(get_viewport().size):
-			_mosh_vp.size = get_viewport().size
-			_mosh_feedback.size = _mosh_vp.size
-			_copy_vp.size = _mosh_vp.size
+	if not active:
+		_was_active = false
+		_mosh_a.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		_mosh_b.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		_copy_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		return
+	# Track window size so the buffers never stretch
+	if _mosh_a.size != Vector2i(get_viewport().size):
+		for vp: SubViewport in [_mosh_a, _mosh_b, _copy_vp]:
+			vp.size = get_viewport().size
+			(vp.get_child(0) as ColorRect).size = vp.size
+	# Ping-pong: this frame's writer advects the other buffer's last frame
+	_flip = not _flip
+	var writer := _mosh_a if _flip else _mosh_b
+	var reader := _mosh_b if _flip else _mosh_a
+	writer.render_target_update_mode = SubViewport.UPDATE_ONCE
+	reader.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_copy_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	var fb := _fb_mat(writer)
+	# Rising edge: seed the buffer with a clean copy of the screen (amount 0
+	# forces a full I-frame refresh), THEN let it melt on following frames
+	fb.set_shader_parameter("amount", _glitch_amount if _was_active else 0.0)
+	fb.set_shader_parameter("t", _t)
+	_was_active = true
+	var disp := _mosh_display.material as ShaderMaterial
+	disp.set_shader_parameter("amount", _glitch_amount)
+	disp.set_shader_parameter("mosh_tex", writer.get_texture())

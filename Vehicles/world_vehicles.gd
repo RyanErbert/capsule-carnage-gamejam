@@ -10,7 +10,9 @@ extends Node3D
 const RELAY_INTERVAL := 0.05
 const MOUNT_RANGE := 4.0
 const RESCUE_Y := -20.0   # vehicle fell out of the world: teleport it back up
-const STRIKE_CD := 4.0    # crow-bot swarm strike cooldown
+const STRIKE_CD := 4.0    # crow-bot strike / rat-attack hunt cooldown
+const HUNT_RANGE := 30.0  # rat-attack: how far a target can be marked from
+const HUNT_CONE := 0.75   # dot(camera fwd, to-target) to count as "in front"
 const VehicleScript := preload("res://Vehicles/vehicle.gd")
 
 @export var player: CharacterBody3D
@@ -23,6 +25,11 @@ var _wrecking: Dictionary = {}   # id -> vehicle whose wreck WE are simulating
 var _relay_cd := 0.0
 var _strike_cd := 0.0
 var _sync: Node
+# Rat-attack hunter vision: red overlays on enemies, one of them selected
+var _marks: Dictionary = {}      # remote id -> overlay MeshInstance3D
+var _hunt_target := ""           # selected enemy id, "" = none in the cone
+var _mark_mat: StandardMaterial3D
+var _mark_mat_sel: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -159,13 +166,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		elif _try_mount():
 			get_viewport().set_input_as_handled()
-	# Crow-bot pilot clicks: send the guided flock at whatever the crosshair
-	# is on (a torrent of birds, synced via swarmStrike).
+	# Bot pilot clicks. Crow-bot: send the guided flock at whatever the
+	# crosshair is on. Rat-attack: mark the selected enemy for the pack.
 	elif event is InputEventMouseButton and event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT \
-			and _piloting and _mounted and _mounted.kind == "crowbot":
-		_swarm_strike()
-		get_viewport().set_input_as_handled()
+			and _piloting and _mounted:
+		if _mounted.kind == "crowbot":
+			_swarm_strike()
+			get_viewport().set_input_as_handled()
+		elif _mounted.kind == "ratbot" and _hunt_target != "":
+			_swarm_hunt()
+			get_viewport().set_input_as_handled()
 
 
 ## E next to a wreck rights it: the server reparks it where it lies.
@@ -221,15 +232,15 @@ func _pilot(veh: CharacterBody3D) -> void:
 	player.set_piloting(true)
 	if player.camera_rig:
 		player.camera_rig.follow_target = veh
-	_set_scifi(true)
+	_set_scifi(true, veh.kind == "ratbot")  # rat-attack hunts in red
 	Net.emit_event("mountVehicle", veh.id)
 	Sfx.boost(veh.global_position, 0.5)
 
 
-func _set_scifi(on: bool) -> void:
+func _set_scifi(on: bool, red := false) -> void:
 	var fx: Node = get_tree().get_first_node_in_group("screen_fx")
 	if fx:
-		fx.set_scifi(on)
+		fx.set_scifi(on, Vector3(1.5, 0.55, 0.5) if red else Vector3(0.72, 1.05, 1.28))
 
 
 ## Deploy a bot just ahead of the player (weapon activation) and pilot it as
@@ -263,6 +274,87 @@ func _swarm_strike() -> void:
 	_strike_cd = STRIKE_CD
 	Net.emit_event("swarmStrike", {"x": target.x, "y": target.y, "z": target.z})
 	Sfx.boost(_mounted.global_position, 0.9)
+
+
+## Rat-attack: sic every guided rat pack on the selected enemy.
+func _swarm_hunt() -> void:
+	if _strike_cd > 0.0:
+		return
+	_strike_cd = STRIKE_CD
+	Net.emit_event("swarmHunt", {"t": _hunt_target})
+	Sfx.boost(_mounted.global_position, 0.9)
+
+
+## Hunter vision while flying the rat-attack: every enemy gets a red overlay
+## (read through walls, machine-vision style); the one most in front of the
+## camera within range is SELECTED — brighter — and LMB sends the pack at them.
+func _update_hunter_vision() -> void:
+	var hunting: bool = _piloting and _mounted != null and is_instance_valid(_mounted) \
+		and _mounted.kind == "ratbot"
+	for rid in _marks.keys():
+		if not is_instance_valid(_marks[rid]):
+			_marks.erase(rid)
+		else:
+			_marks[rid].visible = false
+	if not hunting:
+		_hunt_target = ""
+		return
+	if _sync == null:
+		_sync = get_tree().get_first_node_in_group("net_sync")
+	var remotes: Dictionary = _sync.remotes() if _sync else {}
+	var cam := get_viewport().get_camera_3d()
+	var fwd := -cam.global_transform.basis.z if cam else Vector3.FORWARD
+	_hunt_target = ""
+	var best_dot := HUNT_CONE
+	for rid in remotes:
+		var node: Node3D = remotes[rid]
+		if not is_instance_valid(node):
+			continue
+		var mark := _mark_for(str(rid))
+		mark.visible = true
+		mark.global_position = node.global_position
+		mark.material_override = _mark_material(false)
+		if cam and node.global_position.distance_to(_mounted.global_position) < HUNT_RANGE:
+			var d := fwd.dot((node.global_position - cam.global_position).normalized())
+			if d > best_dot:
+				best_dot = d
+				_hunt_target = str(rid)
+	if _hunt_target != "" and _marks.has(_hunt_target):
+		_marks[_hunt_target].material_override = _mark_material(true)
+
+
+func _mark_for(rid: String) -> MeshInstance3D:
+	var m: MeshInstance3D = _marks.get(rid)
+	if m and is_instance_valid(m):
+		return m
+	m = MeshInstance3D.new()
+	var cap := CapsuleMesh.new()
+	cap.radius = 0.55
+	cap.height = 1.9
+	m.mesh = cap
+	add_child(m)
+	_marks[rid] = m
+	return m
+
+
+func _mark_material(selected: bool) -> StandardMaterial3D:
+	if selected:
+		if _mark_mat_sel == null:
+			_mark_mat_sel = _make_mark_mat(Color(1.0, 0.15, 0.1, 0.55))
+		return _mark_mat_sel
+	if _mark_mat == null:
+		_mark_mat = _make_mark_mat(Color(1.0, 0.25, 0.2, 0.22))
+	return _mark_mat
+
+
+static func _make_mark_mat(c: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = c
+	m.no_depth_test = true   # hunter vision reads through everything
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return m
 
 
 func _dismount(tell_server: bool) -> void:
@@ -303,6 +395,7 @@ func _process(delta: float) -> void:
 	if relay:
 		_relay_cd = RELAY_INTERVAL
 	_tick_wrecks(relay)
+	_update_hunter_vision()
 	if _mounted == null:
 		return
 	if not is_instance_valid(_mounted):
@@ -325,11 +418,19 @@ func _process(delta: float) -> void:
 			else (player.respawn_point() + Vector3(0, 2.5, 0))
 		_mounted.velocity = Vector3.ZERO
 	if relay:
-		Net.emit_event("vehicleMoved", {
+		var out := {
 			"id": _mounted.id,
 			"x": _mounted.global_position.x, "y": _mounted.global_position.y,
 			"z": _mounted.global_position.z, "ry": _mounted.rotation.y,
-		})
+		}
+		# Rat-attacks ride walls and ceilings: relay the full orientation
+		if _mounted.kind == "ratbot":
+			var q: Quaternion = _mounted.quaternion
+			out["qx"] = q.x
+			out["qy"] = q.y
+			out["qz"] = q.z
+			out["qw"] = q.w
+		Net.emit_event("vehicleMoved", out)
 
 
 ## Eject the driver but KEEP server authority (the driver slot) so our tumble

@@ -135,6 +135,11 @@ func enter_vehicle(v: Node3D) -> void:
 
 
 func exit_vehicle() -> void:
+	# Dying in the seat: die_slayer already moved the body to the respawn
+	# zone — don't drag the corpse back beside the vehicle or wake its collider
+	if dead:
+		vehicle = null
+		return
 	if vehicle and is_instance_valid(vehicle):
 		global_position = vehicle.global_position \
 			+ vehicle.global_transform.basis.x * 2.2 + Vector3(0, 1.0, 0)
@@ -300,10 +305,19 @@ func _physics_process(delta: float) -> void:
 			velocity.x *= floor_damp
 			velocity.z *= floor_damp
 
+		# --- Marble slide: a slope too steep to walk plays like a marble run.
+		# Gravity's in-plane component accelerates you downslope, and the soft
+		# cap rides up so the momentum CARRIES at the bottom instead of being
+		# clipped back to run speed.
+		var marble_n := get_wall_normal() if not is_on_floor() and is_on_wall() else Vector3.ZERO
+		var marbling := marble_n.y > 0.15 and marble_n.y < 0.95
+
 		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
 		var cap_target := (SPRINT_SPEED if sprinting else MAX_SPEED) * spd
 		speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
 		var h_vel := Vector2(velocity.x, velocity.z)
+		if marbling:
+			speed_cap = maxf(speed_cap, h_vel.length())
 		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
 			h_vel = h_vel.normalized() * speed_cap
 			velocity.x = h_vel.x
@@ -312,6 +326,9 @@ func _physics_process(delta: float) -> void:
 		# --- Gravity ---
 		if not is_on_floor():
 			velocity.y -= GRAVITY * grv * delta
+		if marbling:
+			var down_slope := Vector3.DOWN - marble_n * Vector3.DOWN.dot(marble_n)
+			velocity += down_slope * GRAVITY * grv * 0.8 * delta
 
 		# --- Jump: hold to charge, release to fire (web §3.4) ---
 		jump_cooldown = maxf(0.0, jump_cooldown - delta)

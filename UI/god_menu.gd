@@ -16,6 +16,10 @@ const NPC_TOOLS := [["turret", "#ff9d5c"], ["crows", "#9db4c9"], ["rats", "#b7a0
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb", "lamp.glb"]
 const NO_SCALE := ["lamp.glb"]   # fixed-size props; scroll does nothing
 const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"], ["crowbot", "#9adcff"], ["ratbot", "#ff9db4"]]
+# Display names where the wire kind reads badly ('ratbot' stays the protocol kind)
+const VEHICLE_NAMES := {"ratbot": "rat-attack"}
+# Placement obeys terrain: steeper than ~45 degrees refuses surface items
+const PLACE_MAX_SLOPE := 0.71   # minimum surface normal.y
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
 const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"], ["smooth", "#9fd0ff"]]
 const CARVE_SIZES := [3.0, 6.0, 10.0]   # scroll picks one while a terrain tool is armed
@@ -53,6 +57,7 @@ var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
 var _build_ghosts: Dictionary = {}
 var _ghost_mat: StandardMaterial3D
+var _ghost_mat_bad: StandardMaterial3D
 var _grid_points: MultiMeshInstance3D
 var _grid_center := Vector3(1e9, 0, 0)
 # Dig/fill: hold LEFT mouse to carve continuously at the cursor
@@ -254,6 +259,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if hit.is_empty():
 			_status.text = "no surface"
 			return
+		if _slope_gated() and float(hit["normal"].y) < PLACE_MAX_SLOPE:
+			_status.text = "too steep"
+			return
 		var lift := 0.0 if _tool.begins_with("prop:") else _lift
 		var pos: Vector3 = hit["position"] + Vector3(0, lift, 0)
 		if _tool == "delete":
@@ -309,7 +317,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				"kind": vkind,
 				"x": pos.x, "y": pos.y + (0.4 if vkind == "ratbot" else 1.6), "z": pos.z, "ry": 0.0,
 			})
-			_status.text = "%s  [E - %s]" % [vkind, "pilot" if vkind in ["crowbot", "ratbot"] else "mount"]
+			_status.text = "%s  [E - %s]" % [VEHICLE_NAMES.get(vkind, vkind), "pilot" if vkind in ["crowbot", "ratbot"] else "mount"]
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -566,6 +574,9 @@ func _update_hover_preview() -> void:
 		ghost = _make_hover_ghost(_tool)
 		_hover_ghosts[_tool] = ghost
 	ghost.visible = true
+	# Too-steep surface: the ghost goes red and the click will refuse
+	var blocked := _slope_gated() and float(hit["normal"].y) < PLACE_MAX_SLOPE
+	_ghost_all_meshes(ghost, _bad_ghost_material() if blocked else _ghost_material())
 	ghost.global_position = hit["position"] 		+ Vector3(0, 0.0 if _tool.begins_with("prop:") else _lift, 0)
 	# Props place with a random yaw (R nudges it) and the scrolled scale;
 	# the ghost shows exactly what's coming
@@ -585,6 +596,23 @@ func _ghost_material() -> StandardMaterial3D:
 		_ghost_mat.albedo_color = Color(0.3, 0.6, 1.0, 0.4)
 		_ghost_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return _ghost_mat
+
+
+func _bad_ghost_material() -> StandardMaterial3D:
+	if _ghost_mat_bad == null:
+		_ghost_mat_bad = StandardMaterial3D.new()
+		_ghost_mat_bad.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_ghost_mat_bad.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_ghost_mat_bad.albedo_color = Color(1.0, 0.22, 0.18, 0.45)
+		_ghost_mat_bad.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _ghost_mat_bad
+
+
+## Tools that seat an object ON a surface obey the 45-degree slope rule.
+## Chains (castle/gate/channel), grid builds, and carving are exempt.
+func _slope_gated() -> bool:
+	return _tool.begins_with("prop:") or _tool.begins_with("vehicle:") \
+		or _tool in ["generator", "turret", "crows", "rats", "tower", "spawn", "green", "red", "yellow"]
 
 
 func _make_hover_ghost(tool_name: String) -> Node3D:
@@ -977,7 +1005,7 @@ func _build_ui() -> void:
 	root.add_child(veh_row)
 	for entry in VEHICLE_TOOLS:
 		var tool_id: String = "vehicle:" + str(entry[0])
-		var vb := _mk_button(entry[0], Color(entry[1]))
+		var vb := _mk_button(VEHICLE_NAMES.get(entry[0], entry[0]), Color(entry[1]))
 		vb.toggle_mode = true
 		vb.pressed.connect(_on_tool_pressed.bind(tool_id))
 		veh_row.add_child(vb)

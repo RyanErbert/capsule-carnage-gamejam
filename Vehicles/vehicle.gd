@@ -42,9 +42,15 @@ const CRASH_REMAINDER := 3.0
 # Machine-animal bots
 const CROWBOT_SPEED := 14.0   # full-3D flight, camera-directed
 const CROWBOT_ACCEL := 5.0    # velocity chase rate (soft, floaty)
-const RATBOT_ACCEL := 34.0
 const RATBOT_SPEED := 11.0
-const RATBOT_HOP := 6.5
+const RATBOT_STICK := 4.0     # adhesion pull along the surface normal
+# Parked crow-bots don't freeze mid-air: they loiter on a lazy ring around the
+# park spot. Client-local and cosmetic, like the boids — the synced park
+# position is the ring's anchor, so every client watches the same patch of sky.
+const AMBIENT_R := 2.6
+const AMBIENT_RATE := 0.8     # rad/s around the loiter ring
+const AMBIENT_SPEED := 4.0
+const AMBIENT_LIFT := 2.2     # ring height above the ground
 
 var id := ""
 var kind := "ghost"
@@ -65,6 +71,9 @@ var _wreck_body: RigidBody3D  # only on the client simulating the wreck
 var _drill_cone: MeshInstance3D
 var _flap_speed := 0.0        # crowbot: wing rate follows apparent speed
 var _last_pos := Vector3.ZERO
+var _ambient_anchor := Vector3.INF   # INF = not loitering
+var _ambient_t := 0.0
+var _climb_n := Vector3.UP    # ratbot: the surface normal it's glued to
 var _drill_cd := 0.0
 var _drilling := false
 var _drain_acc := 0.0
@@ -91,8 +100,9 @@ func _exit_tree() -> void:
 
 
 func _ready() -> void:
-	motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED if kind == "ratbot" \
-		else CharacterBody3D.MOTION_MODE_FLOATING
+	# Every kind is FLOATING — the rat-attack glues itself to walls/ceilings
+	# with its own adhesion, so gravity-floor logic would just fight it
+	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 	_col = CollisionShape3D.new()
 	var box := BoxShape3D.new()
 	match kind:
@@ -122,16 +132,24 @@ func _physics_process(delta: float) -> void:
 			global_position = global_position.lerp(net_pos, f)
 			quaternion = quaternion.slerp(net_quat, f)
 		return
+	if driver_id != "":
+		_ambient_anchor = Vector3.INF  # a pilot took over: stop loitering
 	if driven_by_me:
 		match kind:
 			"crowbot": _fly_bot(delta)
-			"ratbot": _scurry_bot(delta)
+			"ratbot": _climb_bot(delta)
 			_: _drive(delta)
 	elif driver_id != "":
-		# Someone else is driving: chase their relayed state.
-		global_position = global_position.lerp(net_pos, 1.0 - exp(-NET_LERP * delta))
-		rotation.y = lerp_angle(rotation.y, net_yaw, 1.0 - exp(-NET_LERP * delta))
-	# Parked (driver_id == ""): frozen where the last driver left it.
+		# Someone else is driving: chase their relayed state. Rat-attacks
+		# relay a full orientation (they ride walls and ceilings).
+		var f := 1.0 - exp(-NET_LERP * delta)
+		global_position = global_position.lerp(net_pos, f)
+		if kind == "ratbot":
+			quaternion = quaternion.slerp(net_quat, f)
+		else:
+			rotation.y = lerp_angle(rotation.y, net_yaw, f)
+	elif kind == "crowbot":
+		_ambient_fly(delta)  # parked crow-bots patrol their spot
 	if _drill_cone:
 		var spin_rate := 14.0 if _drilling else 1.5
 		_drill_cone.rotate_object_local(Vector3.UP, spin_rate * delta)
@@ -289,48 +307,129 @@ func _fly_bot(delta: float) -> void:
 		_visual.rotation.x = lerpf(_visual.rotation.x, clampf(velocity.y * 0.04, -0.5, 0.5), minf(1.0, 6.0 * delta))
 
 
-## Rat-bot: fast low scurry under gravity, with a little hop on Space.
-func _scurry_bot(delta: float) -> void:
+## Rat-attack: crawls over ANY surface — floors, walls, ceilings — glued on
+## by an adhesion pull along the current surface normal. It cannot jump;
+## crawling off into open air means falling until something is under it again.
+func _climb_bot(delta: float) -> void:
 	var typing := get_viewport().gui_get_focus_owner() != null
 	var input_dir := Vector2.ZERO if typing else Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	var yaw: float = camera_rig.yaw if camera_rig else rotation.y
-	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
-	var right := Vector3(-fwd.z, 0, fwd.x)
-	var wish := (fwd * (-input_dir.y) + right * input_dir.x).limit_length(1.0)
-	velocity.x += wish.x * RATBOT_ACCEL * delta
-	velocity.z += wish.z * RATBOT_ACCEL * delta
-	var damp := exp(-(2.2 if wish.length() > 0.1 else 8.0) * delta)
-	velocity.x *= damp
-	velocity.z *= damp
-	var hvel := Vector2(velocity.x, velocity.z)
-	if hvel.length() > RATBOT_SPEED:
-		hvel = hvel.normalized() * RATBOT_SPEED
-		velocity.x = hvel.x
-		velocity.z = hvel.y
-	if is_on_floor():
-		if not typing and Input.is_action_pressed("jump"):
-			velocity.y = RATBOT_HOP
+	var cam_fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	var cam_right := Vector3(-cam_fwd.z, 0, cam_fwd.x)
+	var raw_wish := cam_fwd * (-input_dir.y) + cam_right * input_dir.x
+	# Map the wish onto the surface: the part pushing INTO a wall becomes a
+	# climb up it, pulling away becomes a descent
+	var into := -raw_wish.dot(_climb_n)
+	var wish := raw_wish - _climb_n * raw_wish.dot(_climb_n)
+	var up_t := Vector3.UP - _climb_n * Vector3.UP.dot(_climb_n)
+	if up_t.length() > 0.05:
+		wish += up_t.normalized() * into
+	wish = wish.limit_length(1.0)
+
+	var space := get_world_3d().direct_space_state
+	var attached := false
+	# A surface right ahead of the crawl: adopt it (floor -> wall transition)
+	if wish.length() > 0.1:
+		var ahead := _climb_ray(space, global_position, global_position + wish.normalized() * 0.9)
+		if not ahead.is_empty():
+			_climb_n = ahead["normal"]
+			attached = true
+	# The surface we're riding
+	if not attached:
+		var down := _climb_ray(space, global_position + _climb_n * 0.3, global_position - _climb_n * 1.1)
+		if not down.is_empty():
+			_climb_n = down["normal"]
+			attached = true
+	# Outer corner: wrap around the edge we just crawled past
+	if not attached and velocity.length() > 0.5:
+		var lip := global_position - _climb_n * 0.7
+		var back := _climb_ray(space, lip, lip - velocity.normalized() * 0.9)
+		if not back.is_empty():
+			_climb_n = back["normal"]
+			attached = true
+
+	if attached:
+		velocity = velocity.lerp(wish * RATBOT_SPEED - _climb_n * RATBOT_STICK,
+			minf(1.0, 10.0 * delta))
 	else:
+		# Airborne: normal gravity, weak air control, roll back upright
+		_climb_n = _climb_n.slerp(Vector3.UP, minf(1.0, 3.0 * delta)).normalized()
+		velocity.x = lerpf(velocity.x, raw_wish.x * RATBOT_SPEED * 0.6, minf(1.0, 3.0 * delta))
+		velocity.z = lerpf(velocity.z, raw_wish.z * RATBOT_SPEED * 0.6, minf(1.0, 3.0 * delta))
 		velocity.y -= GRAVITY * delta
-	if hvel.length() > 0.5:
-		rotation.y = lerp_angle(rotation.y, atan2(-velocity.x, -velocity.z), minf(1.0, 10.0 * delta))
 	move_and_slide()
+
+	# Body hugs the surface: local up = surface normal, nose along the crawl
+	var fwd_t := velocity - _climb_n * velocity.dot(_climb_n)
+	if fwd_t.length() < 0.3:
+		var old_fwd := -global_transform.basis.z
+		fwd_t = old_fwd - _climb_n * old_fwd.dot(_climb_n)
+	if fwd_t.length() > 0.05:
+		var target := Basis.looking_at(fwd_t.normalized(), _climb_n)
+		global_transform.basis = global_transform.basis.slerp(target, minf(1.0, 8.0 * delta)).orthonormalized()
+
+
+func _climb_ray(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dictionary:
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.exclude = [get_rid()]
+	return space.intersect_ray(q)
+
+
+## Parked crow-bot: take off and fly a lazy loiter ring over the park spot,
+## bobbing and scanning. Pure ambience — the moment anyone pilots it (any
+## client), the ring is abandoned.
+func _ambient_fly(delta: float) -> void:
+	if wrecked:
+		return
+	if _ambient_anchor == Vector3.INF:
+		_ambient_anchor = global_position
+		var g := _ground_ray()
+		if not g.is_empty():
+			_ambient_anchor.y = maxf(_ambient_anchor.y, float(g["position"].y) + AMBIENT_LIFT)
+		_ambient_t = randf() * TAU
+	_ambient_t += AMBIENT_RATE * delta
+	var target := _ambient_anchor + Vector3(
+		cos(_ambient_t) * AMBIENT_R,
+		sin(_ambient_t * 2.3) * 0.5,
+		sin(_ambient_t) * AMBIENT_R)
+	velocity = velocity.lerp((target - global_position).limit_length(4.0) * (AMBIENT_SPEED / 4.0),
+		minf(1.0, 2.0 * delta))
+	move_and_slide()
+	var prev_yaw := rotation.y
+	if velocity.length() > 0.4:
+		rotation.y = lerp_angle(rotation.y, atan2(-velocity.x, -velocity.z), minf(1.0, 3.0 * delta))
+	if _visual:
+		# Bank into the turn, nose follows the bob
+		var yaw_rate := angle_difference(prev_yaw, rotation.y) / maxf(delta, 0.001)
+		_visual.rotation.z = lerpf(_visual.rotation.z, clampf(yaw_rate * 0.3, -0.4, 0.4), minf(1.0, 3.0 * delta))
+		_visual.rotation.x = lerpf(_visual.rotation.x, clampf(-velocity.y * 0.08, -0.3, 0.3), minf(1.0, 3.0 * delta))
 
 
 ## Wings beat with apparent speed on EVERY client (remotes estimate speed
-## from position deltas, since only the pilot has a real velocity).
+## from position deltas, since only the pilot has a real velocity). The
+## feather tips trail the main flap, and the head scans while unpiloted.
 func _flap_wings(delta: float) -> void:
 	var spd := velocity.length() if driven_by_me \
 		else global_position.distance_to(_last_pos) / maxf(delta, 0.001)
 	_last_pos = global_position
-	var active := driver_id != ""
+	var active := not wrecked  # loitering counts as flying now
 	_flap_speed = lerpf(_flap_speed, (6.0 + spd * 0.8) if active else 0.0, minf(1.0, 5.0 * delta))
 	var wl: Node3D = _visual.get_node_or_null("WingL") if _visual else null
 	if wl == null:
 		return
-	var flap := sin(Time.get_ticks_msec() / 1000.0 * _flap_speed) * 0.5 if active else -0.25
+	var wr: Node3D = _visual.get_node("WingR")
+	var amp := 0.5 if driver_id != "" else 0.32   # lazier beat on patrol
+	var flap := sin(Time.get_ticks_msec() / 1000.0 * _flap_speed) * amp if active else -0.25
 	wl.rotation.z = flap
-	(_visual.get_node("WingR") as Node3D).rotation.z = -flap
+	wr.rotation.z = -flap
+	var tip_l: Node3D = wl.get_node_or_null("Tip")
+	if tip_l:
+		tip_l.rotation.z = flap * 0.7
+		(wr.get_node("Tip") as Node3D).rotation.z = -flap * 0.7
+	var head: Node3D = _visual.get_node_or_null("Head")
+	if head:
+		var scan := 0.0 if driver_id != "" else sin(Time.get_ticks_msec() / 1000.0 * 1.3) * 0.45
+		head.rotation.y = lerpf(head.rotation.y, scan, minf(1.0, 4.0 * delta))
 
 
 ## The drill eats terrain while you HOLD LEFT MOUSE, along where the camera
@@ -488,22 +587,77 @@ static func _bot_box(root: Node3D, size: Vector3, pos: Vector3, mat: StandardMat
 	return mi
 
 
+## Crow-bot body: a proper mech corvid — deep chest, swept tail boom, a
+## scanning head on a neck pivot, two-segment wings whose feather tips trail
+## the flap, a fanned tail, and folded talon struts.
 func _build_crowbot() -> Node3D:
 	var root := Node3D.new()
 	var plate := _bot_plate()
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.13, 0.14, 0.17)
+	dark.metallic = 0.9
+	dark.roughness = 0.3
 	var eye := _bot_glow(Color(0.4, 0.9, 1.0))
-	_bot_box(root, Vector3(0.42, 0.3, 1.0), Vector3(0, 0, 0), plate)          # fuselage
-	_bot_box(root, Vector3(0.26, 0.22, 0.3), Vector3(0, 0.1, -0.62), plate)   # head
-	_bot_box(root, Vector3(0.1, 0.1, 0.28), Vector3(0, 0.02, -0.85), _bot_glow(Color(1.0, 0.75, 0.2)))  # beak
+
+	# Fuselage
+	_bot_box(root, Vector3(0.46, 0.36, 0.6), Vector3(0, 0, -0.08), plate)       # chest
+	var boom := _bot_box(root, Vector3(0.3, 0.24, 0.55), Vector3(0, 0.05, 0.38), plate)
+	boom.rotation.x = -0.12                                                      # tail sweeps up
+	_bot_box(root, Vector3(0.16, 0.08, 0.7), Vector3(0, 0.2, 0.06), dark)       # spine ridge
+	_bot_box(root, Vector3(0.34, 0.1, 0.2), Vector3(0, -0.2, -0.24), dark)      # chin plate
+	_bot_box(root, Vector3(0.28, 0.04, 0.04), Vector3(0, 0.0, -0.39), _bot_glow(Color(0.25, 0.65, 1.0)))  # chest vent
+
+	# Head on a neck pivot (named: it scans while the bot patrols)
+	var head := Node3D.new()
+	head.name = "Head"
+	head.position = Vector3(0, 0.22, -0.34)
+	root.add_child(head)
+	_bot_box(head, Vector3(0.16, 0.14, 0.18), Vector3(0, 0.0, -0.02), dark)     # neck
+	_bot_box(head, Vector3(0.28, 0.22, 0.3), Vector3(0, 0.12, -0.18), plate)    # skull
+	_bot_box(head, Vector3(0.09, 0.07, 0.3), Vector3(0, 0.1, -0.44), dark)      # upper beak
+	_bot_box(head, Vector3(0.07, 0.045, 0.2), Vector3(0, 0.03, -0.4), plate)    # lower beak
+	_bot_box(head, Vector3(0.03, 0.16, 0.03), Vector3(0, 0.3, -0.08), dark)     # antenna
+	_bot_box(head, Vector3(0.05, 0.05, 0.05), Vector3(0, 0.4, -0.08), eye)      # antenna tip
 	for side: float in [-1.0, 1.0]:
-		_bot_box(root, Vector3(0.07, 0.07, 0.07), Vector3(side * 0.09, 0.16, -0.72), eye)
-		var wing := _bot_box(root, Vector3(1.3, 0.05, 0.6), Vector3.ZERO, plate,
-			"WingL" if side < 0 else "WingR")
-		# Pivot at the wing root so the flap hinges at the body
-		wing.position = Vector3(side * 0.2, 0.12, 0.0)
-		(wing.mesh as BoxMesh).center_offset = Vector3(side * 0.65, 0, 0)
-	_bot_box(root, Vector3(0.3, 0.05, 0.4), Vector3(0, 0.02, 0.62), plate)    # tail fan
-	var jet := _bot_box(root, Vector3(0.2, 0.08, 0.2), Vector3(0, -0.19, 0.25), _bot_glow(Color(0.4, 0.9, 1.0)))
+		_bot_box(head, Vector3(0.06, 0.09, 0.09), Vector3(side * 0.15, 0.13, -0.24), eye)   # eyes
+		_bot_box(head, Vector3(0.04, 0.12, 0.16), Vector3(side * 0.15, 0.15, -0.1), dark)   # brow plates
+
+	# Wings: shoulder pivot -> armored inner panel -> hinged feather tip
+	for side: float in [-1.0, 1.0]:
+		var wing := Node3D.new()
+		wing.name = "WingL" if side < 0 else "WingR"
+		wing.position = Vector3(side * 0.22, 0.14, 0.02)
+		root.add_child(wing)
+		_bot_box(wing, Vector3(0.62, 0.06, 0.5), Vector3(side * 0.31, 0, 0), plate)
+		_bot_box(wing, Vector3(0.5, 0.03, 0.34), Vector3(side * 0.3, 0.05, 0.1), dark)
+		var tip := Node3D.new()
+		tip.name = "Tip"
+		tip.position = Vector3(side * 0.62, 0, 0)
+		wing.add_child(tip)
+		# Staggered feather plates, sweeping back and thinning outward
+		_bot_box(tip, Vector3(0.5, 0.04, 0.42), Vector3(side * 0.25, 0, 0.02), plate)
+		_bot_box(tip, Vector3(0.36, 0.03, 0.3), Vector3(side * 0.4, -0.01, 0.16), dark)
+		_bot_box(tip, Vector3(0.22, 0.03, 0.2), Vector3(side * 0.5, -0.02, 0.28), plate)
+
+	# Tail fan: three plates hinged at the boom, fanned in yaw
+	var tail := Node3D.new()
+	tail.name = "Tail"
+	tail.position = Vector3(0, 0.1, 0.64)
+	root.add_child(tail)
+	for k in 3:
+		var pivot := Node3D.new()
+		tail.add_child(pivot)
+		pivot.rotation.y = (k - 1) * 0.28
+		_bot_box(pivot, Vector3(0.15, 0.03, 0.44), Vector3(0, 0, 0.22),
+			dark if k == 1 else plate)
+
+	# Folded talon struts
+	for side: float in [-1.0, 1.0]:
+		var leg := _bot_box(root, Vector3(0.06, 0.26, 0.06), Vector3(side * 0.14, -0.24, 0.06), dark)
+		leg.rotation.x = 0.5
+		_bot_box(root, Vector3(0.09, 0.05, 0.18), Vector3(side * 0.14, -0.32, 0.16), plate)
+
+	var jet := _bot_box(root, Vector3(0.18, 0.08, 0.18), Vector3(0, -0.16, 0.3), _bot_glow(Color(0.4, 0.9, 1.0)))
 	jet.name = "Jet"
 	return root
 

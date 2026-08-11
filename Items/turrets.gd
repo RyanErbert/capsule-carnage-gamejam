@@ -65,6 +65,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 				var aid := str(data.get("id", ""))
 				if _turrets.has(aid) and _turrets[aid]["owner"] != _self_id():
 					_turrets[aid]["ry"] = float(data.get("ry", 0.0))
+					_turrets[aid]["rx"] = float(data.get("rx", 0.0))
 
 
 ## Position of a live turret, or null — critters resolving their grudge.
@@ -101,10 +102,12 @@ func _add_turret(t: Variant) -> void:
 	_turrets[id] = {
 		"node": node,
 		"head": node.get_node("Head"),
-		"barrels": node.get_node("Head/Barrels"),
+		"pivot": node.get_node("Head/Pivot"),
+		"barrels": node.get_node("Head/Pivot/Barrels"),
 		"hp_fill": hp_fill,
 		"owner": str(t.get("owner", "")),
 		"ry": float(t.get("ry", 0.0)),
+		"rx": 0.0,
 		"fire_cd": 0.0,
 		"spin": 0.0,   # gatling spin speed, ramps while firing
 	}
@@ -120,13 +123,15 @@ func _physics_process(delta: float) -> void:
 	for id in _turrets:
 		var t: Dictionary = _turrets[id]
 		var head: Node3D = t["head"]
+		var pivot: Node3D = t["pivot"]
 		var firing := false
 		if t["owner"] == self_id:
 			firing = _run_brain(id, t, remotes, delta)
 			if relay:
-				Net.emit_event("turretAim", {"id": id, "ry": head.rotation.y})
+				Net.emit_event("turretAim", {"id": id, "ry": head.rotation.y, "rx": pivot.rotation.x})
 		else:
 			head.rotation.y = lerp_angle(head.rotation.y, t["ry"], minf(1.0, 6.0 * delta))
+			pivot.rotation.x = lerpf(pivot.rotation.x, t["rx"], minf(1.0, 6.0 * delta))
 		# Gatling barrels: spin up while firing, wind down after
 		t["spin"] = clampf(t["spin"] + (22.0 if firing else -14.0) * delta, 1.2, 26.0)
 		(t["barrels"] as Node3D).rotate_object_local(Vector3.FORWARD, t["spin"] * delta)
@@ -160,7 +165,12 @@ func _run_brain(id: String, t: Dictionary, remotes: Dictionary, delta: float) ->
 	var to := target + (Vector3.ZERO if fauna else Vector3(0, 0.4, 0)) - muzzle
 	var want_yaw := atan2(-to.x, -to.z)
 	head.rotation.y = lerp_angle(head.rotation.y, want_yaw, minf(1.0, AIM_RATE * delta))
-	if absf(angle_difference(head.rotation.y, want_yaw)) > AIM_TOLERANCE:
+	# The gun also nods at its target: crows overhead, rats under the ring
+	var pivot: Node3D = t["pivot"]
+	var want_pitch := clampf(atan2(to.y, Vector2(to.x, to.z).length()), -0.9, 1.1)
+	pivot.rotation.x = lerpf(pivot.rotation.x, want_pitch, minf(1.0, AIM_RATE * delta))
+	if absf(angle_difference(head.rotation.y, want_yaw)) > AIM_TOLERANCE \
+			or absf(pivot.rotation.x - want_pitch) > AIM_TOLERANCE:
 		return false
 	if t["fire_cd"] > 0.0:
 		return true  # mid-burst: keep the barrels spinning
@@ -237,11 +247,17 @@ func _make_turret_node(id: String) -> Node3D:
 	dome.mesh = dome_mesh
 	head.add_child(dome)
 
+	# Pitch pivot: the head yaws, this nods the gun up/down at its target
+	var pivot := Node3D.new()
+	pivot.name = "Pivot"
+	pivot.position = Vector3(0, 0.1, -0.25)
+	head.add_child(pivot)
+
 	# Gatling cluster: six thin barrels around an axle, pointing -Z
 	var barrels := Node3D.new()
 	barrels.name = "Barrels"
-	barrels.position = Vector3(0, 0.1, -0.55)
-	head.add_child(barrels)
+	barrels.position = Vector3(0, 0, -0.3)
+	pivot.add_child(barrels)
 	var barrel_mat := StandardMaterial3D.new()
 	barrel_mat.albedo_color = Color(0.15, 0.15, 0.17)
 	barrel_mat.metallic = 0.85
