@@ -2,8 +2,8 @@ extends Node
 
 ## Build placement, child of the player (PORT_BLUEPRINT.md §4.2/§4.3).
 ## Active while slot 0 holds block/wall/ramp/platform: ghost preview snapped
-## to the 4-unit grid, R rotates 90°, scroll adjusts reach (16, 4..100), left
-## click places (hold + move = drag-build along a locked axis, like the web).
+## to the 4-unit grid, R rotates 45°, scroll raises/lowers the target cell,
+## left click places (hold + move = drag-build along a locked axis).
 ## bridge_gun is aim-and-click: a walkway from under you to the aim point.
 
 const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
@@ -18,7 +18,8 @@ const GHOST_BAD := Color(1.0, 0.2, 0.2, 0.45)
 @onready var _items: Node = get_parent().get_node("ItemController")
 
 var reach := DEFAULT_REACH
-var rotation_steps := 0
+var lift := 0.0          # scroll: whole grid cells above/below the aimed one
+var rotation_steps := 0  # 45-degree steps, 0..7
 var can_place := false
 var build_target: Dictionary = {}   # {x,y,z,ry,rx} of the current ghost
 
@@ -79,13 +80,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and _dragging:
 		_drag_mouse_accum += event.relative.length()
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R:
-		rotation_steps = (rotation_steps + 1) % 4
+		rotation_steps = (rotation_steps + 1) % 8
 	elif event is InputEventMouseButton and event.pressed:
 		match event.button_index:
 			MOUSE_BUTTON_WHEEL_UP:
-				reach = clampf(reach + 4.0, MIN_REACH, MAX_REACH)
+				lift += 4.0
 			MOUSE_BUTTON_WHEEL_DOWN:
-				reach = clampf(reach - 4.0, MIN_REACH, MAX_REACH)
+				lift -= 4.0
 
 
 ## Called from ItemController.use_item() on left click with a build item.
@@ -100,7 +101,7 @@ func try_place() -> void:
 	_dragging = true
 	_drag_mouse_accum = 0.0
 	if type == "wall":
-		_drag_lock = {"axis": "z", "value": build_target["z"]} if rotation_steps % 2 == 0 \
+		_drag_lock = {"axis": "z", "value": build_target["z"]} if (rotation_steps / 2) % 2 == 0 \
 			else {"axis": "x", "value": build_target["x"]}
 	else:
 		_drag_lock = {"axis": "y", "value": build_target["y"]}
@@ -158,12 +159,14 @@ func _process(_delta: float) -> void:
 
 	# Snap to the 4-unit voxel grid: cell center = floor(p/4)*4 + 2
 	var fx := floorf(target_pt.x / 4.0) * 4.0 + 2.0
-	var fy := floorf(target_pt.y / 4.0) * 4.0 + 2.0
+	var fy := floorf(target_pt.y / 4.0) * 4.0 + 2.0 + lift
 	var fz := floorf(target_pt.z / 4.0) * 4.0 + 2.0
-	var rot_y := rotation_steps * (PI / 2.0)
+	var rot_y := rotation_steps * (PI / 4.0)
 
-	if type == "wall":
-		match rotation_steps:
+	# Walls hug the cell face they face - only on the cardinals; a diagonal
+	# wall has no face to hug, so it stays centred.
+	if type == "wall" and rotation_steps % 2 == 0:
+		match rotation_steps / 2:
 			0: fz -= 2.0
 			1: fx -= 2.0
 			2: fz += 2.0

@@ -133,18 +133,11 @@ func _d(x: int, y: int, z: int) -> float:
 ## Build the field from the editor's layer stack: `layers` is 4 Arrays of 32
 ## ints (ground, main, +1, +2 — bottom to top), bit (31-col) = filled pixel.
 ## Each pixel is a 4x4 m column within its 8 m slab; bedrock fills [-12,-8]
-## beneath everything regardless of paint. AUTOFILL: a painted pixel with
-## nothing beneath it grows a support column — every layer below a filled
-## one is treated as filled, so nothing generates floating.
+## beneath everything regardless of paint. What's painted is what you get,
+## floating slabs included — SPIRE MODE in the painter fills the columns
+## underneath at paint time instead (creative.gd), so the canvas never lies.
 func build_from_layers(layers: Array) -> void:
-	var eff: Array = []
-	eff.resize(4)
-	eff[3] = layers[3].duplicate()
-	for li in [2, 1, 0]:
-		var merged := []
-		for r in layers[li].size():
-			merged.append(int(layers[li][r]) | int(eff[li + 1][r]))
-		eff[li] = merged
+	var eff: Array = layers
 	_density.resize((NX + 1) * (NY + 1) * (NZ + 1))
 	_density.fill(0.0)
 	var points_per_pixel := int(4.0 / VOXEL)  # 2
@@ -264,10 +257,23 @@ func density_at(pos: Vector3) -> float:
 	return _d(clampi(roundi(g.x), 0, NX), clampi(roundi(g.y), 0, NY), clampi(roundi(g.z), 0, NZ))
 
 
+## The home base sits in a protected square (creative.gd sets the center from
+## the spawn pixel): no brush may reach into it, so the base can't be dug out
+## from under or buried. Mirrors the server's check.
+var deadzone_center := Vector3(2, 0, 2)
+const DEADZONE_R := 10.0
+
+func in_deadzone(center: Vector3, radius := 0.0) -> bool:
+	return maxf(absf(center.x - deadzone_center.x), absf(center.z - deadzone_center.z)) \
+		<= DEADZONE_R + radius
+
+
 ## Astroneer-style brush: add (sign +1) or carve (sign -1) a falloff sphere.
 ## `strength` scales the per-call amount so held-button strokes carve
 ## gradually instead of stamping. Returns true if anything changed.
 func apply_brush(center: Vector3, radius: float, sign_: float, strength := 1.0) -> bool:
+	if in_deadzone(center, radius):
+		return false
 	var changed := false
 	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
 	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
@@ -285,17 +291,58 @@ func apply_brush(center: Vector3, radius: float, sign_: float, strength := 1.0) 
 				if not is_equal_approx(v, _density[i]):
 					_density[i] = v
 					changed = true
-					# lattice point (x,z) touches cells x-1..x / z-1..z -> chunks
-					var cz0 := clampi((z - 1) / CHUNK, 0, NZ / CHUNK - 1)
-					var cz1 := clampi(z / CHUNK, 0, NZ / CHUNK - 1)
-					var cx0 := clampi((x - 1) / CHUNK, 0, NX / CHUNK - 1)
-					var cx1 := clampi(x / CHUNK, 0, NX / CHUNK - 1)
-					for cz in range(cz0, cz1 + 1):
-						for cx in range(cx0, cx1 + 1):
-							dirty[Vector2i(cx, cz)] = true
+					_mark_dirty(x, z, dirty)
 	for key in dirty:
 		_remesh_chunk(key)
 	return changed
+
+
+## Lattice point (x,z) touches cells x-1..x / z-1..z, hence up to 4 chunks.
+func _mark_dirty(x: int, z: int, dirty: Dictionary) -> void:
+	var cz0 := clampi((z - 1) / CHUNK, 0, NZ / CHUNK - 1)
+	var cz1 := clampi(z / CHUNK, 0, NZ / CHUNK - 1)
+	var cx0 := clampi((x - 1) / CHUNK, 0, NX / CHUNK - 1)
+	var cx1 := clampi(x / CHUNK, 0, NX / CHUNK - 1)
+	for cz in range(cz0, cz1 + 1):
+		for cx in range(cx0, cx1 + 1):
+			dirty[Vector2i(cx, cz)] = true
+
+
+## Blender's smooth brush: pull each lattice point toward the average of its
+## six neighbours, by the brush falloff. Relaxes lumps and stair-steps without
+## adding or removing material. Targets come off the pre-stroke field so the
+## result doesn't depend on iteration order.
+func smooth_brush(center: Vector3, radius: float, strength := 1.0) -> bool:
+	if in_deadzone(center, radius):
+		return false
+	var lo := ((center - Vector3.ONE * radius) - ORIGIN) / VOXEL
+	var hi := ((center + Vector3.ONE * radius) - ORIGIN) / VOXEL
+	var targets: Array = []   # [Vector3i, new value]
+	for y in range(maxi(BEDROCK_Y + 1, floori(lo.y)), mini(NY - 1, ceili(hi.y)) + 1):
+		for z in range(maxi(1, floori(lo.z)), mini(NZ - 1, ceili(hi.z)) + 1):
+			for x in range(maxi(1, floori(lo.x)), mini(NX - 1, ceili(hi.x)) + 1):
+				var p := ORIGIN + Vector3(x, y, z) * VOXEL
+				var dist := p.distance_to(center)
+				if dist >= radius:
+					continue
+				var avg := (_d(x - 1, y, z) + _d(x + 1, y, z) + _d(x, y - 1, z)
+					+ _d(x, y + 1, z) + _d(x, y, z - 1) + _d(x, y, z + 1)) / 6.0
+				var t := clampf((1.0 - dist / radius) * strength, 0.0, 1.0)
+				targets.append([Vector3i(x, y, z), lerpf(_density[_idx(x, y, z)], avg, t)])
+	var changed := false
+	var dirty := {}
+	for entry in targets:
+		var c: Vector3i = entry[0]
+		var i := _idx(c.x, c.y, c.z)
+		if is_equal_approx(entry[1], _density[i]):
+			continue
+		_density[i] = entry[1]
+		changed = true
+		_mark_dirty(c.x, c.z, dirty)
+	for key in dirty:
+		_remesh_chunk(key)
+	return changed
+
 
 
 func _remesh_all() -> void:

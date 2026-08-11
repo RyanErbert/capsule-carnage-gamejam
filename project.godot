@@ -37,6 +37,10 @@ project/assembly_name="capsuloids"
 
 enabled=PackedStringArray("res://addons/func_godot/plugin.cfg")
 
+[gui]
+
+theme/custom_font="res://UI/fonts/04B_03__.TTF"
+
 [input]
 
 ui_left={

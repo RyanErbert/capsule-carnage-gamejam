@@ -39,6 +39,21 @@ void fragment() {
 	ALPHA = alpha_max * fade;
 }
 "
+# Home base: every map has one whether or not anyone places it, and the
+# 5x5-pixel block around it is a DEADZONE — unpaintable here, unsculptable
+# in play, marked faint red in both. Mirrors server.js HOME_PIXEL/DEADZONE_R.
+const HOME_PIXEL := [16, 16]
+const DEADZONE_PX := 2          # pixels either side of the home pixel
+
+# Confined spaces duck the wind and fade in a cave drone; venturing past the
+# bounds ramps in a gale over the top of it.
+const PROBE_DIRS := [
+	Vector3(0, 1, 0), Vector3(0.6, 0.8, 0), Vector3(-0.6, 0.8, 0),
+	Vector3(0, 0.8, 0.6), Vector3(0, 0.8, -0.6),
+]
+const PROBE_DIST := 16.0
+const AMBIENCE_LERP := 1.4      # how fast the mix follows the space you're in
+
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
@@ -49,6 +64,8 @@ var _playing := false
 var _layers: Array = []        # 4 x (32 ints), bit (31-col) = filled
 var _active_layer := 1         # painting target; 1 = MAIN
 var _layer_buttons: Array = []
+var _brush := 1                # painter brush size, in cells across
+var _spire_mode := true        # painting high fills the column underneath
 var _spawn_px: Variant = null  # painted spawn pixel [r, c]; a building pops up there
 var _spawn_mode := false       # SPAWN chip armed: clicks place the spawn pixel
 var _spawn_button: Button
@@ -57,6 +74,11 @@ var _painter: Control
 var _status: Label
 var _fog_rect: ColorRect
 var _env_ref: Environment
+var _wind: AudioStreamPlayer    # base ambience
+var _gale: AudioStreamPlayer    # boundary wind, ramps in past the bounds
+var _cave: AudioStreamPlayer    # low drone for confined spaces
+var _confine := 0.0             # 0 open sky .. 1 fully enclosed
+var _probe_cd := 0.0
 
 
 func _ready() -> void:
@@ -165,23 +187,24 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if not grid.is_empty() and not _same_layers(grid):
 				_spawn_px = _norm_spawn(data)
 				_start_play(grid, [], false)
-		"mapRebuilt":
-			# Round reset: regenerate terrain from the layers, fresh spawn
-			if _playing and terrain:
-				var rebuilt: Array = _norm_layers(data) if data is Dictionary else []
-				if not rebuilt.is_empty():
-					_layers = rebuilt
-				terrain.build_from_layers(_layers)
-				if player:
-					player.spawn_points = _spawn_points()
-					player.global_position = player.respawn_point()
-					player.velocity = Vector3.ZERO
+		"gameEnded":
+			# Full wipe, grid included: everyone goes back to the lobby so the
+			# next map starts from a blank canvas.
+			get_tree().change_scene_to_file("res://UI/main_menu.tscn")
 		"terrainEdit":
 			if _playing and data is Dictionary and terrain:
-				terrain.apply_brush(
-					Vector3(data.get("x", 0.0), data.get("y", 0.0), data.get("z", 0.0)),
-					float(data.get("r", BRUSH_RADIUS)), float(data.get("s", -1.0)),
-					float(data.get("st", 1.0)))
+				_replay_edit(data)
+
+
+## One replayed brush stroke from the server (or the join snapshot).
+func _replay_edit(e: Dictionary) -> void:
+	var at := Vector3(e.get("x", 0.0), e.get("y", 0.0), e.get("z", 0.0))
+	var r := float(e.get("r", BRUSH_RADIUS))
+	var st := float(e.get("st", 1.0))
+	if str(e.get("m", "add")) == "smooth":
+		terrain.smooth_brush(at, r, st)
+	else:
+		terrain.apply_brush(at, r, float(e.get("s", -1.0)), st)
 
 
 ## JSON round-trips ints as floats — compare numerically, not by hash.
@@ -206,11 +229,12 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 	if terrain == null:
 		terrain = VoxelTerrain.new()
 		add_child(terrain)
+	terrain.deadzone_center = _home_world()
 	terrain.build_from_layers(_layers)
+	_make_deadzone_marker()
 	for e in edits:
 		if e is Dictionary:
-			terrain.apply_brush(Vector3(e.get("x", 0.0), e.get("y", 0.0), e.get("z", 0.0)),
-				float(e.get("r", BRUSH_RADIUS)), float(e.get("s", -1.0)), float(e.get("st", 1.0)))
+			_replay_edit(e)
 	if announce:
 		Net.emit_event("creativeGrid", _grid_payload())
 	_editor_layer.visible = false
@@ -317,15 +341,14 @@ func _make_fog_shells() -> void:
 			add_child(mi)
 
 
-## Spawns scattered across walkable pixels — nothing at main level or above
-## (autofill makes upper paint imply main) AND ground present (not a pit) —
-## one per 3x3 block (web randomSpawn equivalent).
+## Spawns scattered across walkable pixels — nothing at main level (that's
+## what blocks you at ground height) AND ground present (not a pit) — one per
+## 3x3 block (web randomSpawn equivalent).
 func _spawn_points() -> Array:
 	var points: Array = []
 	for r in range(1, PIXELS - 1, 3):
 		for c in range(1, PIXELS - 1, 3):
-			var above := int(_layers[1][r]) | int(_layers[2][r]) | int(_layers[3][r])
-			if (above >> (31 - c)) & 1:
+			if (int(_layers[1][r]) >> (31 - c)) & 1:
 				continue  # wall column
 			if not ((int(_layers[0][r]) >> (31 - c)) & 1):
 				continue  # pit
@@ -335,13 +358,75 @@ func _spawn_points() -> Array:
 	return points
 
 
+# --- Home base deadzone ------------------------------------------------------
+
+## The home pixel: whatever was painted with the SPAWN chip, else the default.
+func _home_px() -> Array:
+	return _spawn_px if _spawn_px is Array else HOME_PIXEL
+
+
+func _home_world() -> Vector3:
+	var h := _home_px()
+	return Vector3(-64.0 + int(h[1]) * 4.0 + 2.0, 0.0, -64.0 + int(h[0]) * 4.0 + 2.0)
+
+
+func _in_deadzone(r: int, c: int) -> bool:
+	var h := _home_px()
+	return absi(r - int(h[0])) <= DEADZONE_PX and absi(c - int(h[1])) <= DEADZONE_PX
+
+
+## The protected square, drawn as a faint red volume you can see through:
+## terrain tools do nothing inside it, so it needs to read as off-limits
+## without hiding the base.
+var _deadzone_node: Node3D
+
+func _make_deadzone_marker() -> void:
+	if _deadzone_node:
+		_deadzone_node.queue_free()
+	_deadzone_node = Node3D.new()
+	add_child(_deadzone_node)
+	var size := VoxelTerrain.DEADZONE_R * 2.0
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(1.0, 0.15, 0.18, 0.16)
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	var walls := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(size, 26.0, size)
+	walls.mesh = box
+	walls.material_override = mat
+	walls.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	walls.position = _home_world() + Vector3(0, 5.0, 0)
+	_deadzone_node.add_child(walls)
+	# A solid band on the ground so the boundary is unmistakable on foot
+	var edge_mat := StandardMaterial3D.new()
+	edge_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	edge_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	edge_mat.albedo_color = Color(1.0, 0.2, 0.22, 0.55)
+	edge_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var h := VoxelTerrain.DEADZONE_R
+	for side in 4:
+		var band := MeshInstance3D.new()
+		var quad := QuadMesh.new()
+		quad.size = Vector2(size + 1.4, 1.4)
+		band.mesh = quad
+		band.material_override = edge_mat
+		band.rotation = Vector3(-PI / 2.0, side * PI / 2.0, 0)
+		band.position = _home_world() + Vector3(0, 1.1, 0) \
+			+ Basis(Vector3.UP, side * PI / 2.0) * Vector3(0, 0, -h)
+		_deadzone_node.add_child(band)
+
+
 # --- World backstops --------------------------------------------------------
 # (riding a vehicle: world_vehicles.gd rescues the vehicle + driver instead)
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	if not _playing or player == null:
 		return
 	_update_fog_bounds()
+	_update_ambience(delta)
 	if player.vehicle != null:
 		return
 	# Backstop: anything that slips below the world snaps back to a spawn
@@ -366,6 +451,7 @@ func _update_fog_bounds() -> void:
 	var f := clampf((d - FOG_START) / (FOG_WHITE - FOG_START), 0.0, 1.0)
 	if player.godmode or player.dead:
 		f = 0.0
+	_fog_f = f
 	_fog_rect.color.a = f * f  # eases in, hits solid white right at the bound
 	if _env_ref:
 		# Thicken the ever-present base haze; the sky whites out with it
@@ -417,15 +503,67 @@ func _setup_environment() -> void:
 	env.environment = e
 	_env_ref = e
 	add_child(env)
-	# Ambient bed: CC0 wind loop (opengameart.org/content/wind-whoosh-loop)
-	var wind := AudioStreamPlayer.new()
-	var wind_stream: AudioStreamOggVorbis = load("res://Audio/ambient_wind.ogg")
-	wind_stream = wind_stream.duplicate()
-	wind_stream.loop = true
-	wind.stream = wind_stream
-	wind.volume_db = -16.0
-	wind.autoplay = true
-	add_child(wind)
+	_setup_ambience()
+
+
+# --- Ambience ----------------------------------------------------------------
+# Three beds, mixed live: open-air wind, a low cave drone that swaps in when
+# you're enclosed, and a gale that ramps up as you push past the boundary.
+
+func _looping_player(path: String, pitch: float, db: float) -> AudioStreamPlayer:
+	var p := AudioStreamPlayer.new()
+	var stream: AudioStreamOggVorbis = load(path).duplicate()
+	stream.loop = true
+	p.stream = stream
+	p.pitch_scale = pitch
+	p.volume_db = db
+	p.autoplay = true
+	add_child(p)
+	return p
+
+
+func _setup_ambience() -> void:
+	# CC0 wind loop (opengameart.org/content/wind-whoosh-loop)
+	_wind = _looping_player("res://Audio/ambient_wind.ogg", 1.0, -16.0)
+	# Same loop, slowed and detuned: the boundary gale over the top of it
+	_gale = _looping_player("res://Audio/ambient_wind.ogg", 0.78, -60.0)
+	# CC0 Kenney machine loop dropped two octaves: a simple, dead cave drone
+	_cave = _looping_player("res://Audio/generator_hum.ogg", 0.25, -60.0)
+
+
+## Roof/wall probes from the head: the share that hit something nearby is how
+## enclosed you are. Cheap enough at 6 Hz, and it reacts to dug-out caves and
+## built structures alike because it's just raycasts against the world.
+func _probe_confinement() -> void:
+	var space := player.get_world_3d().direct_space_state
+	var from := player.global_position + Vector3(0, 1.0, 0)
+	var blocked := 0
+	for dir in PROBE_DIRS:
+		var q := PhysicsRayQueryParameters3D.create(from, from + dir.normalized() * PROBE_DIST)
+		q.exclude = [player.get_rid()]
+		if not space.intersect_ray(q).is_empty():
+			blocked += 1
+	var target := float(blocked) / float(PROBE_DIRS.size())
+	# Only a real roof counts as a cave; one wall nearby shouldn't muffle you
+	_confine_target = smoothstep(0.35, 1.0, target)
+
+
+var _confine_target := 0.0
+var _fog_f := 0.0
+
+func _update_ambience(delta: float) -> void:
+	if _wind == null or player == null:
+		return
+	_probe_cd -= delta
+	if _probe_cd <= 0.0:
+		_probe_cd = 0.16
+		_probe_confinement()
+	_confine = lerpf(_confine, _confine_target, minf(1.0, AMBIENCE_LERP * delta))
+	# Wind drops away indoors, and lifts a little out in the open boundary
+	_wind.volume_db = lerpf(-16.0 + 4.0 * _fog_f, -34.0, _confine)
+	_cave.volume_db = -60.0 if _confine < 0.02 else lerpf(-40.0, -13.0, _confine)
+	# The gale ignores confinement: outside the bounds there's nothing to hide in
+	_gale.volume_db = -60.0 if _fog_f < 0.01 else lerpf(-30.0, -5.0, _fog_f)
 
 
 # --- Editor UI ---------------------------------------------------------------
@@ -446,18 +584,51 @@ func _build_editor_ui() -> void:
 	center.add_child(box)
 
 	var title := Label.new()
-	title.text = "CREATIVE - paint the canyon"
+	title.text = "PAINT THE MAP"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_font_size_override("font_size", 24)
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	box.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "left-drag paints, right-drag erases | scroll: layer"
+	hint.text = "[LMB - Paint]  [RMB - Erase]  [Scroll - Layer]"
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_font_size_override("font_size", 16)
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	box.add_child(hint)
+
+	# Brush size + spire mode, above the canvas
+	var opts := HBoxContainer.new()
+	opts.alignment = BoxContainer.ALIGNMENT_CENTER
+	opts.add_theme_constant_override("separation", 6)
+	box.add_child(opts)
+	var brush_lbl := Label.new()
+	brush_lbl.text = "BRUSH"
+	brush_lbl.add_theme_font_size_override("font_size", 16)
+	brush_lbl.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	opts.add_child(brush_lbl)
+	var brush_group := ButtonGroup.new()
+	for size in [1, 2, 3, 5]:
+		var bb := Button.new()
+		bb.text = "%d" % size
+		bb.toggle_mode = true
+		bb.button_group = brush_group
+		bb.focus_mode = Control.FOCUS_NONE
+		bb.custom_minimum_size = Vector2(34, 28)
+		bb.button_pressed = size == _brush
+		bb.pressed.connect(func(): _brush = size)
+		opts.add_child(bb)
+	# SPIRE MODE: paint high and the column beneath fills in with it. Off,
+	# slabs are free to float.
+	var spire := Button.new()
+	spire.text = "SPIRE MODE"
+	spire.toggle_mode = true
+	spire.focus_mode = Control.FOCUS_NONE
+	spire.button_pressed = _spire_mode
+	spire.custom_minimum_size = Vector2(110, 28)
+	spire.add_theme_color_override("font_color", Color("#f0cb96"))
+	spire.toggled.connect(func(on: bool): _spire_mode = on)
+	opts.add_child(spire)
 
 	var canvas_row := HBoxContainer.new()
 	canvas_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -488,7 +659,7 @@ func _build_editor_ui() -> void:
 	bedrock_chip.text = "BEDROCK"
 	bedrock_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	bedrock_chip.custom_minimum_size = Vector2(88, 0)
-	bedrock_chip.add_theme_font_size_override("font_size", 11)
+	bedrock_chip.add_theme_font_size_override("font_size", 16)
 	bedrock_chip.add_theme_color_override("font_color", Color(1, 1, 1, 0.3))
 	layer_col.add_child(bedrock_chip)
 
@@ -529,7 +700,7 @@ func _build_editor_ui() -> void:
 
 	_status = Label.new()
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_status.add_theme_font_size_override("font_size", 12)
+	_status.add_theme_font_size_override("font_size", 16)
 	_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	box.add_child(_status)
 
@@ -548,6 +719,23 @@ func _set_layer(li: int) -> void:
 
 func change_layer(dir: int) -> void:
 	_set_layer(_active_layer + dir)
+
+
+## One canvas cell on the active layer. SPIRE MODE fills the layers beneath
+## as you paint high, so a tower comes with its column; with it off, slabs
+## are free to hang in the air. The home deadzone refuses paint entirely.
+func paint_cell(r: int, c: int, fill: bool) -> void:
+	if _in_deadzone(r, c):
+		return
+	var bit := 1 << (31 - c)
+	var rows: Array = _layers[_active_layer]
+	if fill:
+		rows[r] = int(rows[r]) | bit
+		if _spire_mode:
+			for li in _active_layer:
+				_layers[li][r] = int(_layers[li][r]) | bit
+	else:
+		rows[r] = int(rows[r]) & ~bit
 
 
 class PixelPainter extends Control:
@@ -593,12 +781,11 @@ class PixelPainter extends Control:
 			owner_scene._on_painted()
 			queue_redraw()
 			return
-		var bit := 1 << (31 - c)
-		var rows: Array = owner_scene._layers[owner_scene._active_layer]
-		if _paint_value == 1:
-			rows[r] = int(rows[r]) | bit
-		else:
-			rows[r] = int(rows[r]) & ~bit
+		var reach: int = owner_scene._brush - 1
+		for rr in range(r - reach, r + reach + 1):
+			for cc in range(c - reach, c + reach + 1):
+				if rr >= 0 and rr < 32 and cc >= 0 and cc < 32:
+					owner_scene.paint_cell(rr, cc, _paint_value == 1)
 		owner_scene._on_painted()
 		queue_redraw()
 
@@ -621,11 +808,13 @@ class PixelPainter extends Control:
 						col = col.lerp(Color(LAYER_FILL[0]), 0.85)
 				elif _bit(active, r, c):
 					col = Color(LAYER_FILL[active])
+				# Home deadzone: off-limits to the brush, in play as well
+				if owner_scene._in_deadzone(r, c):
+					col = col.lerp(Color(1.0, 0.25, 0.25), 0.35)
 				draw_rect(rect, col)
-		# Spawn marker: the building generates on this pixel
-		var sp: Variant = owner_scene._spawn_px
-		if sp is Array:
-			var srect := Rect2(int(sp[1]) * CELL, int(sp[0]) * CELL, CELL - 1, CELL - 1)
-			draw_rect(srect, Color("#7dedb0"))
-			draw_rect(srect.grow(-3), Color("#0c2018"))
-			draw_rect(srect.grow(-5), Color("#7dedb0"))
+		# Home base pixel
+		var sp: Array = owner_scene._home_px()
+		var srect := Rect2(int(sp[1]) * CELL, int(sp[0]) * CELL, CELL - 1, CELL - 1)
+		draw_rect(srect, Color("#7dedb0"))
+		draw_rect(srect.grow(-3), Color("#0c2018"))
+		draw_rect(srect.grow(-5), Color("#7dedb0"))

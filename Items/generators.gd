@@ -11,20 +11,18 @@ extends Node3D
 const GRAB_RANGE := 3.5
 const ROPE_LEN := 3.0
 const ROPE_SNAP := 12.0       # overstretched: the rope lets go
-const GEN_MASS := 8.0         # it's HEAVY
-const SPRING_F := 520.0       # rope tension force on the generator when taut
-const PLAYER_PULL := 16.0     # ...and the weight yanking the player back
+const GEN_MASS := 26.0        # the full-size unit is genuinely heavy
+const MINI_MASS := 6.0        # corpse drops are luggable
+const SPRING_A := 34.0        # rope tension as an ACCELERATION (x mass below)
+const PLAYER_PULL := 0.55     # ...times mass: the big one really fights back
 const SETTLE_TIME := 1.4      # after release it keeps tumbling before freezing
 const RELAY_INTERVAL := 0.1
 const NET_LERP := 8.0
 const HEAL_RANGE := 4.5  # matches the server's GEN_HEAL_RANGE ring
+const LABEL_RANGE := 8.0 # energy readout only shows when you're right on it
 const HUM_DB := 0.0
 # CC0 loop from Kenney's Sci-Fi Sounds pack (kenney.nl, engineCircular_000)
 const HumStream := preload("res://Audio/generator_hum.ogg")
-# CC0 models from Kenney's Space Kit
-const BigGenModel := preload("res://Models/kenney/machine_generatorLarge.glb")
-const MiniGenModel := preload("res://Models/kenney/machine_generator.glb")
-const VehicleScript := preload("res://Vehicles/vehicle.gd")  # for _model_aabb
 
 @export var player: CharacterBody3D
 
@@ -64,22 +62,17 @@ func _build_prompt() -> void:
 	_prompt.offset_top = 60
 	_prompt.offset_bottom = 96
 	_prompt.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0, 0, 0, 0.65)
-	style.border_color = Color(1, 1, 1, 0.8)
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(6)
-	style.set_content_margin_all(6)
-	_prompt.add_theme_stylebox_override("panel", style)
+	_prompt.add_theme_stylebox_override("panel",
+		preload("res://UI/ui_style.gd").panel_box(Color(0, 0, 0, 0.65), 6))
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 8)
 	_prompt.add_child(row)
 	var key := Label.new()
 	key.text = " E "
-	key.add_theme_font_size_override("font_size", 18)
+	key.add_theme_font_size_override("font_size", 16)
 	row.add_child(key)
 	_prompt_suffix = Label.new()
-	_prompt_suffix.add_theme_font_size_override("font_size", 13)
+	_prompt_suffix.add_theme_font_size_override("font_size", 16)
 	_prompt_suffix.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
 	_prompt_suffix.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	row.add_child(_prompt_suffix)
@@ -160,6 +153,7 @@ func _add_gen(g: Variant) -> void:
 		"holder": str(holder) if holder is String else "",
 		"net_pos": pos,
 		"label": lbl,
+		"ring": node.get_node("HealRing"),
 	}
 
 
@@ -297,8 +291,10 @@ func _drag_step(body: RigidBody3D, delta: float) -> void:
 	var stretch := clampf(dist - ROPE_LEN, 0.0, 6.0)
 	if stretch > 0.0 and dist > 0.01:
 		var dir := to_player / dist
-		body.apply_central_force(dir * stretch * SPRING_F)
-		player.velocity -= dir * stretch * PLAYER_PULL * delta
+		# Tension scales with mass on BOTH ends: the generator accelerates the
+		# same either way, but the heavy one hauls you back much harder.
+		body.apply_central_force(dir * stretch * SPRING_A * body.mass)
+		player.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta
 	# Fell out of the world mid-drag: haul it back to a spawn
 	if body.global_position.y < -20.0:
 		body.global_position = player.respawn_point() + Vector3(0, 2, 0)
@@ -308,6 +304,20 @@ func _drag_step(body: RigidBody3D, delta: float) -> void:
 func _process(_delta: float) -> void:
 	_draw_ropes()
 	_update_prompt()
+	_update_gen_visuals()
+
+
+## The heal ring is ground furniture: it means nothing while the unit is in
+## transit, so tethering hides it. The energy readout is only legible (and
+## only worth reading) when you're standing at the generator.
+func _update_gen_visuals() -> void:
+	var eye := player.global_position if player else Vector3.ZERO
+	for id in _gens:
+		var g: Dictionary = _gens[id]
+		var tethered: bool = g["holder"] != "" or id == _settle_id
+		g["ring"].visible = not tethered
+		g["label"].visible = player != null \
+			and g["node"].global_position.distance_to(eye) < LABEL_RANGE
 
 
 func _update_prompt() -> void:
@@ -381,7 +391,7 @@ func _draw_ropes() -> void:
 ## the corpse drops: smaller, quieter, higher-pitched.
 func _make_generator_node(mini := false) -> RigidBody3D:
 	var root := RigidBody3D.new()
-	root.mass = GEN_MASS * (0.4 if mini else 1.0)
+	root.mass = MINI_MASS if mini else GEN_MASS
 	root.freeze = true
 	root.linear_damp = 0.6
 	root.angular_damp = 1.0
@@ -394,16 +404,10 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	col.position.y = 0.0
 	root.add_child(col)
 
-	# Kenney machine model, normalized to the collider height and grounded
-	var model: Node3D = (MiniGenModel if mini else BigGenModel).instantiate()
-	root.add_child(model)
-	var box: AABB = VehicleScript._model_aabb(model)
-	if box.size.y > 0.01:
-		var s := (1.4 * scale_f) / box.size.y
-		var c := box.get_center()
-		model.scale = Vector3.ONE * s
-		# Recenter x/z too: Kenney GLB origins sit off-center
-		model.position = Vector3(-c.x * s, -0.7 * scale_f - box.position.y * s, -c.z * s)
+	# The body: an octagonal drum matching the collider exactly
+	var drum := MeshInstance3D.new()
+	drum.mesh = _octagon_mesh(0.65 * scale_f, 1.4 * scale_f)
+	root.add_child(drum)
 
 	# Glowing core ring
 	var ring := MeshInstance3D.new()
@@ -434,8 +438,9 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	hum.autoplay = true
 	root.add_child(hum)
 
-	# Heal range shown as a ring on the ground
+	# Heal range shown as a ring on the ground (hidden while it's tethered)
 	var ring_r := MeshInstance3D.new()
+	ring_r.name = "HealRing"
 	var torus2 := TorusMesh.new()
 	torus2.inner_radius = HEAL_RANGE - 0.18
 	torus2.outer_radius = HEAL_RANGE
@@ -450,3 +455,39 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	root.add_child(ring_r)
 
 	return root
+
+
+## An octagonal drum: flat-shaded sides plus caps, sized to the collider.
+## Reads as machined metal without needing a model, and unlike a smooth
+## cylinder you can see it spin when you drag it around.
+func _octagon_mesh(radius: float, height: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var hy := height * 0.5
+	var pts: Array = []
+	for i in 8:
+		var a := TAU * (i + 0.5) / 8.0  # half-step so a flat face points forward
+		pts.append(Vector2(cos(a) * radius, sin(a) * radius))
+	for i in 8:
+		var p: Vector2 = pts[i]
+		var q: Vector2 = pts[(i + 1) % 8]
+		var n := Vector3(p.x + q.x, 0, p.y + q.y).normalized()
+		st.set_normal(n)
+		for v in [
+			Vector3(p.x, -hy, p.y), Vector3(q.x, hy, q.y), Vector3(p.x, hy, p.y),
+			Vector3(p.x, -hy, p.y), Vector3(q.x, -hy, q.y), Vector3(q.x, hy, q.y),
+		]:
+			st.add_vertex(v)
+		# Caps, fanned from the center
+		st.set_normal(Vector3.UP)
+		for v in [Vector3(0, hy, 0), Vector3(p.x, hy, p.y), Vector3(q.x, hy, q.y)]:
+			st.add_vertex(v)
+		st.set_normal(Vector3.DOWN)
+		for v in [Vector3(0, -hy, 0), Vector3(q.x, -hy, q.y), Vector3(p.x, -hy, p.y)]:
+			st.add_vertex(v)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.42, 0.45, 0.5)
+	mat.metallic = 0.6
+	mat.roughness = 0.45
+	st.set_material(mat)
+	return st.commit()

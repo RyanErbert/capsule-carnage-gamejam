@@ -19,7 +19,7 @@ const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
 
 var yaw := PI
 var pitch := 0.4
-var base_chain_length := 10.0
+var base_chain_length := 13.0
 var follow_target: Node3D = null  # god-mode drone override; null = the player
 var _mouse_idle_timer := 999.0
 
@@ -38,16 +38,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		yaw -= event.relative.x * MOUSE_SENSITIVITY
 		pitch = clampf(pitch + event.relative.y * MOUSE_SENSITIVITY, CAM_PITCH_MIN, CAM_PITCH_MAX)
 		_mouse_idle_timer = 0.0
-	elif event is InputEventMouseButton and event.pressed:
-		# Scroll adjusts build reach instead of camera zoom while placing builds
-		var builder: Node = _player.get_node_or_null("BuildController")
-		if builder and builder.is_build_active():
-			return
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			base_chain_length = clampf(base_chain_length - 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			base_chain_length = clampf(base_chain_length + 1.0, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
-	# (Esc handling moved to the HUD's escape menu)
+	# (scroll belongs to the inventory / placement height now, not zoom)
 
 
 func _physics_process(delta: float) -> void:

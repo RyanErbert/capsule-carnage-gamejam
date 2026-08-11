@@ -3,11 +3,6 @@ extends PanelContainer
 ## God menu (web §6.8, F4 — here on tilde/backtick per Ryan). Toggling it
 ## enters/leaves god mode: free-fly, mouse freed for the menu, remotes see
 ## you as a 30% ghost, and the server hands the oddball off if you held it.
-##
-## Controls while open: WASD fly (camera-relative), Space/E up, Shift/Q down,
-## hold RIGHT mouse to look. GIVE buttons drop items straight into your
-## inventory; with a pedestal tool armed, LEFT click places (or deletes) at
-## the clicked spot.
 
 const GIVE_ITEMS := [
 	"grapple", "launch_pad", "boost_pad", "teleporter",
@@ -20,10 +15,13 @@ const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb"]
 const VEHICLE_TOOLS := [["ghost", "#b48cff"], ["drill", "#ffab4a"]]
 # Terrain sculpting is god-mode only now (or the drill vehicle, in play)
-const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"]]
-const CARVE_RADIUS := 3.0
+const TERRAIN_TOOLS := [["dig", "#e0876a"], ["fill", "#8ac977"], ["smooth", "#9fd0ff"]]
+const CARVE_SIZES := [3.0, 6.0, 10.0]   # scroll picks one while a terrain tool is armed
 const CARVE_INTERVAL := 0.08
 const CARVE_STRENGTH := 0.5
+const ROT_STEP := PI / 4.0   # R turns any placement 45 degrees
+const LIFT_STEP := 0.5       # scroll raises/lowers the placement height
+const Style := preload("res://UI/ui_style.gd")
 
 var _player: CharacterBody3D
 var _world_items: Node
@@ -38,9 +36,12 @@ var _castle_nodes: Array = []
 var _castle_markers: Array = []
 var _hover_ghosts: Dictionary = {}  # tool -> ghost Node3D (blue placement preview)
 var _prop_ry := 0.0  # next prop's yaw, rolled up-front so the ghost matches
+var _lift := 0.0     # scroll offset on the placement height
+var _chain_preview: Node3D  # live castle/channel ghost while clicking points
+var _chain_at := Vector3(1e9, 0, 0)
 # God build mode (web: godmode build tools + the 9^3 grid-point cloud)
 const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
-var _build_rot := 0
+var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
 var _build_ghosts: Dictionary = {}
 var _ghost_mat: StandardMaterial3D
@@ -49,6 +50,7 @@ var _grid_center := Vector3(1e9, 0, 0)
 # Dig/fill: hold LEFT mouse to carve continuously at the cursor
 var _carve_hold := false
 var _carve_cd := 0.0
+var _carve_size := 0   # index into CARVE_SIZES
 var _terrain_node: Node3D
 
 
@@ -75,12 +77,39 @@ func _input(event: InputEvent) -> void:
 		if event.keycode == KEY_QUOTELEFT or event.keycode == KEY_Q:
 			toggle()
 			get_viewport().set_input_as_handled()
-		elif event.keycode == KEY_R and visible and _tool.begins_with("build:"):
-			_build_rot = (_build_rot + 1) % 4
+		elif event.keycode == KEY_R and visible:
+			_build_rot = (_build_rot + 1) % 8
+			_prop_ry = wrapf(_prop_ry + ROT_STEP, 0.0, TAU)
+		elif visible and _chaining() \
+				and event.keycode in [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER]:
+			# Any multi-point element finishes on Esc/Enter
+			_set_tool("")
+			get_viewport().set_input_as_handled()
+	# Scroll: brush size for the terrain tools, placement height for the rest
+	if visible and _tool != "" and event is InputEventMouseButton and event.pressed:
+		var dir := 0
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			dir = 1
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			dir = -1
+		if dir != 0:
+			if _carving():
+				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
+				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
+			else:
+				_lift += LIFT_STEP * dir
 	# Mouse release anywhere (UI included) ends a dig/fill stroke
 	if event is InputEventMouseButton and not event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT:
 		_carve_hold = false
+
+
+func _chaining() -> bool:
+	return _tool in ["castle", "gate", "channel"]
+
+
+func _carving() -> bool:
+	return _tool in ["dig", "fill", "smooth"]
 
 
 func toggle() -> void:
@@ -168,35 +197,34 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var hit := _mouse_ray(event.position)
 		if hit.is_empty():
-			_status.text = "no surface hit - aim at the map"
+			_status.text = "no surface"
 			return
-		var pos: Vector3 = hit["position"]
+		var pos: Vector3 = hit["position"] + Vector3(0, _lift, 0)
 		if _tool == "delete":
 			var target := _find_delete_target(pos)
 			if target.is_empty():
-				_status.text = "nothing deletable near that spot"
+				_status.text = "nothing there"
 			else:
 				Net.emit_event(target["event"], target["id"])
 				_status.text = "%s removed" % target["kind"]
 		elif _tool == "spawn":
 			Net.emit_event("placeSpawn", {"x": pos.x, "y": pos.y, "z": pos.z})
-			_status.text = "spawn point placed"
+			_status.text = "spawn"
 		elif _tool == "generator":
 			Net.emit_event("placeGenerator", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
 				"x": pos.x, "y": pos.y + 0.7, "z": pos.z,
 			})
-			_status.text = "generator placed (E drags it)"
+			_status.text = "generator  [E - drag]"
 		elif _tool == "castle" or _tool == "gate":
 			_castle_nodes.append(pos)
 			_castle_markers.append(_channel_marker(pos))
-			_status.text = "%d point%s - click %s again to finish" % [
-				_castle_nodes.size(), "" if _castle_nodes.size() == 1 else "s", _tool.to_upper()]
+			_status.text = "%d pts  [Enter - done]" % _castle_nodes.size()
 		elif _tool == "channel":
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
-			_status.text = "%d point%s - click CHANNEL again to finish" % [_channel_nodes.size(), "" if _channel_nodes.size() == 1 else "s"]
-		elif _tool == "dig" or _tool == "fill":
+			_status.text = "%d pts  [Enter - done]" % _channel_nodes.size()
+		elif _carving():
 			_carve_hold = true
 			_carve_at(pos)
 		elif _tool.begins_with("vehicle:"):
@@ -205,11 +233,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				"kind": _tool.substr(8),
 				"x": pos.x, "y": pos.y + 1.6, "z": pos.z, "ry": 0.0,
 			})
-			_status.text = "%s placed (E mounts it)" % _tool.substr(8)
+			_status.text = "%s  [E - mount]" % _tool.substr(8)
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
-				_status.text = "%s placed (R rotates)" % _tool.substr(6)
+				_status.text = "%s placed" % _tool.substr(6)
 		elif _tool.begins_with("prop:"):
 			Net.emit_event("placeModel", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
@@ -220,7 +248,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_status.text = "%s placed" % _tool.substr(5).trim_suffix(".glb")
 		else:
 			Net.emit_event("placePedestal", {"x": pos.x, "y": pos.y, "z": pos.z, "ry": 0.0, "type": _tool})
-			_status.text = "%s pedestal placed" % _tool
+			_status.text = "%s pedestal" % _tool
 
 
 ## Terrain sculpting (god-mode dig/fill): carve at the cursor while the
@@ -234,13 +262,16 @@ func _terrain() -> Node3D:
 func _carve_at(pos: Vector3) -> void:
 	var t := _terrain()
 	if t == null:
-		_status.text = "no sculptable terrain on this map"
+		_status.text = "no terrain"
 		return
+	var radius: float = CARVE_SIZES[_carve_size]
 	var s := -1.0 if _tool == "dig" else 1.0
-	if t.apply_brush(pos, CARVE_RADIUS, s, CARVE_STRENGTH):
+	var hit: bool = t.smooth_brush(pos, radius, CARVE_STRENGTH) if _tool == "smooth" 		else t.apply_brush(pos, radius, s, CARVE_STRENGTH)
+	if hit:
 		Net.emit_event("terrainEdit", {
 			"x": pos.x, "y": pos.y, "z": pos.z,
-			"r": CARVE_RADIUS, "s": s, "st": CARVE_STRENGTH,
+			"r": radius, "s": s, "st": CARVE_STRENGTH,
+			"m": "smooth" if _tool == "smooth" else "add",
 		})
 
 
@@ -248,7 +279,7 @@ func _carve_at(pos: Vector3) -> void:
 ## red highlight over whatever a click would remove (web behavior).
 func _process(delta: float) -> void:
 	_carve_cd = maxf(0.0, _carve_cd - delta)
-	if _carve_hold and visible and (_tool == "dig" or _tool == "fill") and _carve_cd <= 0.0:
+	if _carve_hold and visible and _carving() and _carve_cd <= 0.0:
 		var carve_hit := _mouse_ray(get_viewport().get_mouse_position())
 		if not carve_hit.is_empty():
 			_carve_cd = CARVE_INTERVAL
@@ -260,6 +291,8 @@ func _process(delta: float) -> void:
 		_build_ghosts[t].visible = false
 	_update_delete_highlight()
 	_update_hover_preview()
+	_update_chain_preview()
+	_update_brush_marker()
 	if not building or _player == null:
 		_build_target = {}
 		return
@@ -279,22 +312,24 @@ func _process(delta: float) -> void:
 	var fy := floorf(target.y / 4.0) * 4.0 + 2.0
 	var fz := floorf(target.z / 4.0) * 4.0 + 2.0
 	var type := _tool.substr(6)
-	if type == "wall":
-		match _build_rot:
+	# Walls hug the cell face they're turned toward — only on the cardinals;
+	# at 45 degrees there's no face to hug, so it centers.
+	if type == "wall" and _build_rot % 2 == 0:
+		match _build_rot / 2:
 			0: fz -= 2.0
 			1: fx -= 2.0
 			2: fz += 2.0
 			3: fx += 2.0
 	elif type == "platform":
 		fy -= 1.5
-	_build_target = {"x": fx, "y": fy, "z": fz, "ry": _build_rot * (PI / 2.0), "rx": 0.0}
+	_build_target = {"x": fx, "y": fy, "z": fz, "ry": _build_rot * ROT_STEP, "rx": 0.0}
 
 	if not _build_ghosts.has(type):
 		_build_ghosts[type] = _make_build_ghost(type)
 	var ghost: MeshInstance3D = _build_ghosts[type]
 	ghost.visible = true
 	ghost.global_position = Vector3(fx, fy, fz)
-	ghost.rotation = Vector3(0, _build_rot * (PI / 2.0), 0)
+	ghost.rotation = Vector3(0, _build_rot * ROT_STEP, 0)
 
 	# Grid cloud re-centers when the aimed cell changes
 	var center := Vector3(floorf(target.x / 4.0) * 4.0 + 2.0, floorf(target.y / 4.0) * 4.0 + 2.0, floorf(target.z / 4.0) * 4.0 + 2.0)
@@ -311,13 +346,83 @@ func _process(delta: float) -> void:
 					i += 1
 
 
+var _brush_marker: MeshInstance3D
+
+## Sphere at the cursor sized to the current brush, so the scrolled size is
+## something you can see rather than guess.
+func _update_brush_marker() -> void:
+	var hit := _mouse_ray(get_viewport().get_mouse_position()) \
+		if visible and _carving() and _player != null else {}
+	if hit.is_empty():
+		if _brush_marker:
+			_brush_marker.visible = false
+		return
+	if _brush_marker == null:
+		_brush_marker = MeshInstance3D.new()
+		var sphere := SphereMesh.new()
+		sphere.radius = 1.0
+		sphere.height = 2.0
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(1, 1, 1, 0.16)
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		sphere.material = mat
+		_brush_marker.mesh = sphere
+		_player.get_parent().add_child(_brush_marker)
+	_brush_marker.visible = true
+	_brush_marker.global_position = hit["position"]
+	_brush_marker.scale = Vector3.ONE * float(CARVE_SIZES[_carve_size])
+
+
+## Multi-point tools draw the thing they'd actually build, running through
+## every point clicked so far plus the cursor, rebuilt as you move.
+func _update_chain_preview() -> void:
+	var pts: Array = _castle_nodes if _tool in ["castle", "gate"] else _channel_nodes
+	if not visible or not _chaining() or pts.is_empty():
+		if _chain_preview:
+			_chain_preview.queue_free()
+			_chain_preview = null
+			_chain_at = Vector3(1e9, 0, 0)
+		return
+	var hit := _mouse_ray(get_viewport().get_mouse_position())
+	if hit.is_empty():
+		return
+	var cursor: Vector3 = hit["position"] + Vector3(0, _lift, 0)
+	if cursor.distance_to(_chain_at) < 0.3:
+		return
+	_chain_at = cursor
+	if _chain_preview:
+		_chain_preview.queue_free()
+	var chain: Array = pts + [cursor]
+	if _tool == "channel":
+		_chain_preview = _polyline_preview(chain)
+	else:
+		var castles: Node = get_tree().get_first_node_in_group("world_castles")
+		_chain_preview = castles.make_preview(chain, _tool == "gate") if castles else null
+
+
+## Channels are a route, not a solid — preview them as the line they carve.
+func _polyline_preview(pts: Array) -> Node3D:
+	var mi := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	var mat := _ghost_material()
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, mat)
+	for p in pts:
+		im.surface_add_vertex(p)
+	im.surface_end()
+	mi.mesh = im
+	_player.get_parent().add_child(mi)
+	return mi
+
+
 ## Blue placement preview at the cursor for every point-and-click tool
 ## (pedestals, markers, structures, props, vehicles). BUILD keeps its own
 ## snapped ghost; delete keeps its red highlight.
 func _update_hover_preview() -> void:
 	var previewing := visible and _player != null and _tool != "" \
 		and not _tool.begins_with("build:") \
-		and _tool != "delete" and _tool != "dig" and _tool != "fill"
+		and _tool != "delete" and not _carving()
 	for t in _hover_ghosts:
 		_hover_ghosts[t].visible = false
 	if not previewing:
@@ -330,8 +435,9 @@ func _update_hover_preview() -> void:
 		ghost = _make_hover_ghost(_tool)
 		_hover_ghosts[_tool] = ghost
 	ghost.visible = true
-	ghost.global_position = hit["position"]
-	# Props place with a random yaw; the ghost shows the exact one coming
+	ghost.global_position = hit["position"] + Vector3(0, _lift, 0)
+	# Props place with a random yaw (R nudges it); the ghost shows the exact
+	# one coming
 	ghost.rotation.y = _prop_ry if _tool.begins_with("prop:") else 0.0
 
 
@@ -538,7 +644,7 @@ func _finish_channel() -> void:
 			"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
 			"nodes": nodes, "radius": 2.5,
 		})
-		_status.text = "channel placed (%d points)" % _channel_nodes.size()
+		_status.text = "channel placed"
 	for m in _channel_markers:
 		m.queue_free()
 	_channel_markers.clear()
@@ -555,7 +661,7 @@ func _finish_castle(arch: bool) -> void:
 			"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
 			"nodes": nodes, "arch": arch,
 		})
-		_status.text = "castle wall placed (%d points)%s" % [_castle_nodes.size(), " with gates" if arch else ""]
+		_status.text = "wall placed"
 	for m in _castle_markers:
 		m.queue_free()
 	_castle_markers.clear()
@@ -568,17 +674,12 @@ func _set_tool(tool_name: String) -> void:
 	if (_tool == "castle" or _tool == "gate") and tool_name != _tool:
 		_finish_castle(_tool == "gate")
 	_tool = tool_name
+	_lift = 0.0
 	for t in _tool_buttons:
 		_tool_buttons[t].button_pressed = t == tool_name
 	if _status:
-		if tool_name == "channel":
-			_status.text = "click points along the route, then click CHANNEL again to finish"
-		elif tool_name == "dig" or tool_name == "fill":
-			_status.text = "hold LEFT mouse on the terrain to %s" % tool_name
-		elif tool_name != "":
-			_status.text = "tool: %s - left-click the map" % tool_name.trim_prefix("prop:").trim_prefix("vehicle:").trim_suffix(".glb")
-		else:
-			_status.text = "GIVE an item, or arm a tool"
+		_status.text = tool_name.trim_prefix("prop:").trim_prefix("vehicle:") \
+			.trim_prefix("build:").trim_suffix(".glb").to_upper()
 
 
 func _on_tool_pressed(tool_name: String) -> void:
@@ -594,7 +695,7 @@ func _mk_button(text: String, color: Color) -> Button:
 	b.text = text
 	b.focus_mode = Control.FOCUS_NONE  # keep WASD/Space for flying
 	b.add_theme_color_override("font_color", color)
-	b.add_theme_font_size_override("font_size", 12)
+	b.add_theme_font_size_override("font_size", 16)
 	return b
 
 
@@ -602,7 +703,7 @@ func _mk_button(text: String, color: Color) -> Button:
 func _tool_row(root: VBoxContainer, label_text: String, tools: Array) -> void:
 	var lbl := Label.new()
 	lbl.text = label_text
-	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_font_size_override("font_size", 16)
 	lbl.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	root.add_child(lbl)
 	var row := HBoxContainer.new()
@@ -617,36 +718,30 @@ func _tool_row(root: VBoxContainer, label_text: String, tools: Array) -> void:
 
 
 func _build_ui() -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.03, 0.04, 0.07, 0.92)
-	style.border_color = Color("#ffd54a")
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(8)
-	style.set_content_margin_all(12)
-	add_theme_stylebox_override("panel", style)
+	add_theme_stylebox_override("panel", Style.panel_box())
 
 	var root := VBoxContainer.new()
 	root.add_theme_constant_override("separation", 8)
 	add_child(root)
 
 	var title := Label.new()
-	title.text = "GOD MODE  (Q or ~ to exit)"
+	title.text = "GOD MODE"
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	title.add_theme_font_size_override("font_size", 16)
 	root.add_child(title)
 
-	var help := Label.new()
-	help.text = "fly: WASD + Space/E up, Shift down\nlook: hold RIGHT mouse and drag"
-	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
-	help.add_theme_font_size_override("font_size", 11)
-	root.add_child(help)
+	var keys := Label.new()
+	keys.text = "[R - Rotate]  [Scroll - Z edit]  [Space - Up, Shift - Down]"
+	keys.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
+	keys.add_theme_font_size_override("font_size", 16)
+	root.add_child(keys)
 
 	# GIVE section is collapsed by default (housekeeping request)
 	var give_toggle := Button.new()
 	give_toggle.text = "▸ GIVE ITEM"
 	give_toggle.focus_mode = Control.FOCUS_NONE
 	give_toggle.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	give_toggle.add_theme_font_size_override("font_size", 12)
+	give_toggle.add_theme_font_size_override("font_size", 16)
 	root.add_child(give_toggle)
 
 	var grid := GridContainer.new()
@@ -670,11 +765,11 @@ func _build_ui() -> void:
 
 	_tool_row(root, "PEDESTALS", PED_TOOLS)
 	_tool_row(root, "MARKERS", MARKER_TOOLS)
-	_tool_row(root, "STRUCTURES (multi-click, reclick tool to finish)", STRUCT_TOOLS)
+	_tool_row(root, "STRUCTURES", STRUCT_TOOLS)
 
 	var build_label := Label.new()
-	build_label.text = "BUILD (free - click cells, R rotates)"
-	build_label.add_theme_font_size_override("font_size", 12)
+	build_label.text = "BUILD"
+	build_label.add_theme_font_size_override("font_size", 16)
 	build_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	root.add_child(build_label)
 
@@ -690,8 +785,8 @@ func _build_ui() -> void:
 		_tool_buttons[tool_id] = bb
 
 	var terrain_label := Label.new()
-	terrain_label.text = "TERRAIN (hold LEFT mouse)"
-	terrain_label.add_theme_font_size_override("font_size", 12)
+	terrain_label.text = "TERRAIN"
+	terrain_label.add_theme_font_size_override("font_size", 16)
 	terrain_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	root.add_child(terrain_label)
 
@@ -706,8 +801,8 @@ func _build_ui() -> void:
 		_tool_buttons[entry[0]] = tb
 
 	var veh_label := Label.new()
-	veh_label.text = "VEHICLES (E mounts)"
-	veh_label.add_theme_font_size_override("font_size", 12)
+	veh_label.text = "VEHICLES"
+	veh_label.add_theme_font_size_override("font_size", 16)
 	veh_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	root.add_child(veh_label)
 
@@ -724,7 +819,7 @@ func _build_ui() -> void:
 
 	var props_label := Label.new()
 	props_label.text = "PROPS"
-	props_label.add_theme_font_size_override("font_size", 12)
+	props_label.add_theme_font_size_override("font_size", 16)
 	props_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	root.add_child(props_label)
 
@@ -741,7 +836,7 @@ func _build_ui() -> void:
 		props_grid.add_child(pb)
 		_tool_buttons[tool_id] = pb
 
-	var del := _mk_button("✕ DELETE (hover highlights red)", Color("#ff7060"))
+	var del := _mk_button("✕ DELETE", Color("#ff7060"))
 	del.toggle_mode = true
 	del.pressed.connect(_on_tool_pressed.bind("delete"))
 	root.add_child(del)
@@ -749,7 +844,7 @@ func _build_ui() -> void:
 
 	_status = Label.new()
 	_status.text = ""
-	_status.add_theme_font_size_override("font_size", 11)
+	_status.add_theme_font_size_override("font_size", 16)
 	_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_status.custom_minimum_size = Vector2(220, 0)

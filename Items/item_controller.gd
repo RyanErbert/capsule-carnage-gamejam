@@ -82,11 +82,30 @@ func _unhandled_input(event: InputEvent) -> void:
 			_mg_timer = 0.0
 		else:
 			use_item()
+	elif event is InputEventMouseButton and event.pressed \
+			and (event.button_index == MOUSE_BUTTON_WHEEL_UP or event.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+		# Scroll cycles weapons — unless a build is armed, where it's the
+		# placement height instead.
+		var builder: Node = get_parent().get_node_or_null("BuildController")
+		if builder and builder.is_build_active():
+			return
+		cycle(1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_2:
 			swap_to_first(1)
 		elif event.keycode == KEY_3:
 			swap_to_first(2)
+
+
+## Rotate the inventory so a different slot becomes active.
+func cycle(dir: int) -> void:
+	if inventory.size() < 2:
+		return
+	if dir > 0:
+		inventory.push_back(inventory.pop_front())
+	else:
+		inventory.push_front(inventory.pop_back())
+	inventory_changed.emit(inventory)
 
 
 func swap_to_first(index: int) -> void:

@@ -144,16 +144,31 @@ function normSpawn(g) {
   return [r, c];
 }
 
-// The painted spawn pixel becomes a real spawn point with a building on it,
-// re-applied on every generate/rebuild (rebuild clears models).
-function applyPaintedSpawn() {
+// --- Home base ---
+// Every generated map has one, whether or not anyone painted a SPAWN pixel.
+// A deadzone around it is unpaintable and unsculptable (client marks it faint
+// red), so the base can never be buried by later geometry.
+const HOME_PIXEL = [16, 16];        // dead center of the 32x32 canvas
+const DEADZONE_R = 10;              // meters (max-norm), ~a 5x5 pixel block
+
+function homePixel() { return creativeSpawn || HOME_PIXEL; }
+function homeWorld() {
+  const h = homePixel();
+  return { x: -64 + h[1] * 4 + 2, z: -64 + h[0] * 4 + 2 };
+}
+function inDeadzone(r, c) {
+  const h = homePixel();
+  return Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2;
+}
+
+// The home base as a real spawn point with a building on it, re-applied on
+// every generate.
+function applyHomeBase() {
   const spIdx = spawnPoints.findIndex(s => s.id === 'spawn-paint');
   if (spIdx !== -1) { spawnPoints.splice(spIdx, 1); io.emit('spawnRemoved', 'spawn-paint'); }
   const mIdx = activeModels.findIndex(m => m.id === 'bldg-paint');
   if (mIdx !== -1) { activeModels.splice(mIdx, 1); io.emit('modelRemoved', 'bldg-paint'); }
-  if (!creativeSpawn) return;
-  const x = -64 + creativeSpawn[1] * 4 + 2;
-  const z = -64 + creativeSpawn[0] * 4 + 2;
+  const { x, z } = homeWorld();
   const sp = { id: 'spawn-paint', x, y: 2, z };
   spawnPoints.push(sp);
   io.emit('spawnPlaced', sp);
@@ -161,6 +176,17 @@ function applyPaintedSpawn() {
   activeModels.push(model);
   io.emit('modelPlaced', model);
 }
+
+// Highest painted layer at a pixel (-1 = pit), and the world Y its surface
+// meshes out at: 8 m slabs stacked over bedrock, surface ~1 m into the slab.
+function pixelTop(r, c) {
+  if (!creativeLayers) return 0;
+  const bit = 31 - c;
+  let top = -1;
+  for (let li = 0; li < 4; li++) if ((creativeLayers[li][r] >>> bit) & 1) top = li;
+  return top;
+}
+function surfaceY(top) { return top < 0 ? -7 : top * 8 + 1; }
 
 function normLayers(g) {
   if (!g || !Array.isArray(g.layers) || g.layers.length !== 4) return null;
@@ -173,12 +199,16 @@ function normLayers(g) {
 }
 
 // --- Global game settings (server-authoritative, alert on change) ---
+// These belong to the GAMEMODE: they're chosen in the lobby and frozen once a
+// game is live. Build mode is the exception - changing them live is its point.
+const MODES = ['slayer', 'sandbox', 'build'];
 const gameSettings = {
-  slayer: true,              // DEFAULT gamemode: coins are health (start 100)
+  mode: 'slayer',            // 'slayer' | 'sandbox' | 'build'
+  slayer: true,              // derived from mode; coins are health (start 100)
   infiniteAmmo: true,        // default ON per Ryan
-  selfAssign: true,          // players may give themselves items via the god menu
-  allowMidgameChanges: true, // when false, settings freeze while a game is running
-  speedScale: 0.7,           // global movement tuning
+  selfAssign: true,          // creative: players may spawn items for themselves
+  pedestals: true,           // auto item pedestals when a map generates
+  speedScale: 0.7,           // movement tuning
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0
 };
@@ -301,27 +331,25 @@ const GEN_HEAL_RANGE = 4.5;
 const GEN_ENERGY = 150;
 const MAX_MINI_GENS = 12;
 
+// One heal generator, on the walkable pixel closest to the middle of the map
+// that isn't inside the home deadzone (the base building owns that ground).
 function autoPlaceGenerator() {
   activeGenerators.length = 0;
   if (creativeLayers) {
-    const ground = creativeLayers[0];
-    const walls = creativeLayers[1].map((v, r) => v | creativeLayers[2][r] | creativeLayers[3][r]);
-    // First walkable pixel scanning outward-ish from the center
-    let placed = false;
-    for (let ring = 0; ring < 14 && !placed; ring++) {
-      for (let r = 16 - ring; r <= 16 + ring && !placed; r += Math.max(1, 2 * ring)) {
-        for (let c = 16 - ring; c <= 16 + ring && !placed; c++) {
-          if (r < 1 || r > 30 || c < 1 || c > 30) continue;
-          if (((walls[r] >>> (31 - c)) & 1) === 1) continue;  // wall column
-          if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
-          activeGenerators.push({
-            id: 'gen-auto', x: -64 + c * 4 + 2, y: 1.2, z: -64 + r * 4 + 2,
-            holder: null, energy: GEN_ENERGY, mini: false
-          });
-          placed = true;
-        }
+    let best = null;
+    for (let r = 1; r < 31; r++) {
+      for (let c = 1; c < 31; c++) {
+        const top = pixelTop(r, c);
+        if (top < 0 || inDeadzone(r, c)) continue;
+        const d = Math.hypot(r - 16, c - 16);
+        if (!best || d < best.d) best = { r, c, top, d };
       }
     }
+    if (best) activeGenerators.push({
+      id: 'gen-auto',
+      x: -64 + best.c * 4 + 2, y: surfaceY(best.top) + 0.4, z: -64 + best.r * 4 + 2,
+      holder: null, energy: GEN_ENERGY, mini: false
+    });
   }
   io.emit('currentGenerators', activeGenerators);
 }
@@ -424,71 +452,53 @@ function checkEndVote() {
 
 function finishEndVote(passed) {
   if (!endVote) return;
-  const kind = endVote.kind || 'end';
   clearTimeout(endVote.timer);
   endVote = null;
-  if (passed && kind === 'rebuild') { sysMsg('Vote passed — rebuilding the map.'); rebuildMap(); }
-  else if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
-  else sysMsg(kind === 'rebuild' ? 'Vote to rebuild the map failed.' : 'Vote to end the game failed.');
+  if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
+  else sysMsg('Vote to end the game failed.');
 }
 
-// Auto-populate item pedestals across the OPEN pixels of the creative map:
-// movement (green) and weapon (red) pedestals so a fresh round has pickups
-// without anyone god-placing them. Deterministic, capped at 12.
+// Auto-populate item pedestals so a fresh round has pickups without anyone
+// god-placing them. Placement is RANDOM (a fixed stride read as the grid it
+// was) with a minimum spacing, and each pedestal sits on top of its own
+// painted column - including plateaus - rather than always on the ground
+// floor, which is what had them half-buried in walls.
+const PED_COUNT = 12;
+const PED_SPACING = 16;   // meters between pedestals
+const PED_TYPES = ['green', 'red', 'green', 'red', 'yellow'];
+
 function autoPopulatePedestals() {
-  if (!creativeLayers) return;
   pedestals.length = 0;
-  const ground = creativeLayers[0];
-  // Autofill means paint on any upper layer implies a column at main level
-  const walls = creativeLayers[1].map((v, r) => v | creativeLayers[2][r] | creativeLayers[3][r]);
-  const types = ['green', 'red', 'green', 'red', 'yellow'];
-  let n = 0;
-  outer:
-  for (let r = 2; r < 30; r += 5) {
-    for (let c = 2; c < 30; c += 5) {
-      if (((walls[r] >>> (31 - c)) & 1) === 1) continue;  // wall column
-      if (((ground[r] >>> (31 - c)) & 1) === 0) continue; // pit
-      pedestals.push({
-        id: 'auto-' + r + '-' + c,
-        x: -64 + c * 4 + 2, y: 0, z: -64 + r * 4 + 2, ry: 0,
-        type: types[n % types.length],
-        currentItem: null, spawnTime: 0
-      });
-      if (++n >= 12) break outer;
+  if (!creativeLayers || !gameSettings.pedestals) { io.emit('currentPedestals', pedestals); return; }
+  // Candidates: any pixel with a floor, clear of the home deadzone, whose
+  // 4 neighbours are no taller than it (so nothing to clip into).
+  const candidates = [];
+  for (let r = 1; r < 31; r++) {
+    for (let c = 1; c < 31; c++) {
+      const top = pixelTop(r, c);
+      if (top < 0 || inDeadzone(r, c)) continue;
+      if (pixelTop(r - 1, c) > top || pixelTop(r + 1, c) > top) continue;
+      if (pixelTop(r, c - 1) > top || pixelTop(r, c + 1) > top) continue;
+      candidates.push({ r, c, top });
     }
   }
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  for (const cand of candidates) {
+    if (pedestals.length >= PED_COUNT) break;
+    const x = -64 + cand.c * 4 + 2;
+    const z = -64 + cand.r * 4 + 2;
+    if (pedestals.some(p => Math.hypot(p.x - x, p.z - z) < PED_SPACING)) continue;
+    pedestals.push({
+      id: 'auto-' + cand.r + '-' + cand.c,
+      x, y: surfaceY(cand.top), z, ry: Math.random() * Math.PI * 2,
+      type: PED_TYPES[pedestals.length % PED_TYPES.length],
+      currentItem: null, spawnTime: 0
+    });
+  }
   io.emit('currentPedestals', pedestals);
-}
-
-// Rebuild = round reset: world objects and terrain edits wiped, scores
-// zeroed, everyone stays in-game, pedestals repopulate, and each client
-// regenerates the map from the painted pixels.
-function rebuildMap() {
-  terrainEdits = [];
-  activeTeleporters.length = 0;
-  activeMines.length = 0;
-  activeCoins.length = 0;
-  activePads.length = 0;
-  activeBuilds.length = 0;
-  activeModels.length = 0;
-  activeChannels.length = 0;
-  activeCastles.length = 0;
-  activeVehicles.length = 0;
-  for (const id of Object.keys(scores)) scores[id] = startingScore();
-  io.emit('scores', scores);
-  io.emit('currentTeleporters', []);
-  io.emit('currentMines', []);
-  io.emit('currentPads', []);
-  io.emit('currentBuilds', []);
-  io.emit('currentModels', []);
-  io.emit('currentChannels', []);
-  io.emit('currentCastles', []);
-  io.emit('currentVehicles', []);
-  autoPopulatePedestals();
-  autoPlaceGenerator();
-  applyPaintedSpawn();
-  pickRandomHolder();
-  io.emit('mapRebuilt', { layers: creativeLayers });
 }
 
 // Ending the game is a FULL wipe: every placed object clears off the field
@@ -615,19 +625,32 @@ io.on('connection', (socket) => {
 
   socket.on('updateGameSetting', (u) => {
     if (!u || typeof u.key !== 'string' || !(u.key in gameSettings)) return;
-    if (!gameSettings.allowMidgameChanges && readyIds.size > 0 && u.key !== 'allowMidgameChanges') {
-      socket.emit('systemMessage', { text: 'Game settings are locked while a game is in progress.' });
+    if (u.key === 'slayer') return;  // derived from mode, never set directly
+    // Settings are part of the gamemode: picked in the lobby, frozen once a
+    // game is live. Build mode exists precisely to change them mid-game.
+    if (readyIds.size > 0 && gameSettings.mode !== 'build') {
+      socket.emit('systemMessage', { text: 'Settings are locked once a game starts. Build mode can change them live.' });
+      return;
+    }
+    const who = players[socket.id] ? players[socket.id].name : 'Someone';
+    if (u.key === 'mode') {
+      if (!MODES.includes(u.value)) return;
+      gameSettings.mode = u.value;
+      gameSettings.slayer = u.value === 'slayer';
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${who} set the gamemode to ${u.value}`);
       return;
     }
     const numeric = typeof gameSettings[u.key] === 'number';
     gameSettings[u.key] = numeric
       ? Math.min(3, Math.max(0.05, Number(u.value) || 1))
       : !!u.value;
-    const who = players[socket.id] ? players[socket.id].name : 'Someone';
     io.emit('gameSettings', gameSettings);
     sysMsg(numeric
       ? `${who} set ${u.key} to ${gameSettings[u.key].toFixed(2)}`
       : `${who} turned ${u.key} ${gameSettings[u.key] ? 'ON' : 'OFF'}`);
+    // Pedestals appear/vanish immediately when the toggle flips
+    if (u.key === 'pedestals') autoPopulatePedestals();
   });
 
   socket.on('placeCastle', (c) => {
@@ -715,21 +738,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startRebuildVote', () => {
-    if (!readyIds.has(socket.id) || endVote) return;
-    endVote = {
-      kind: 'rebuild',
-      voters: new Set([...readyIds]),
-      yes: new Set([socket.id]),
-      no: new Set(),
-      timer: null
-    };
-    endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
-    const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} wants to rebuild the map (full reset). /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
-    checkEndVote();
-  });
-
   // Live co-painting of the creative editor canvas (full 32-int grid per
   // stroke burst — tiny and idempotent).
   socket.on('creativePaint', (g) => {
@@ -749,7 +757,7 @@ io.on('connection', (socket) => {
     io.emit('creativeGrid', { layers: creativeLayers, spawn: creativeSpawn });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
     autoPlaceGenerator();     // and one heal generator near the center
-    applyPaintedSpawn();      // painted spawn pixel -> spawn point + building
+    applyHomeBase();          // home base + its spawn point (default or painted)
   });
 
   socket.on('terrainEdit', (e) => {
@@ -758,8 +766,13 @@ io.on('connection', (socket) => {
       x: +e.x, y: +e.y, z: +e.z,
       r: Math.min(Math.abs(+e.r) || 3, 12),
       s: e.s >= 0 ? 1 : -1,
-      st: Math.min(Math.abs(+e.st) || 1, 2)
+      st: Math.min(Math.abs(+e.st) || 1, 2),
+      m: e.m === 'smooth' ? 'smooth' : 'add'   // smooth relaxes instead of adding
     };
+    // The home base deadzone is unsculptable - a brush that would reach into
+    // it is dropped outright (clients block it locally too).
+    const h = homeWorld();
+    if (Math.max(Math.abs(edit.x - h.x), Math.abs(edit.z - h.z)) <= DEADZONE_R + edit.r) return;
     terrainEdits.push(edit);
     if (terrainEdits.length > 20000) terrainEdits.shift();
     socket.broadcast.emit('terrainEdit', edit);

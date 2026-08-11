@@ -16,8 +16,12 @@ extends CanvasLayer
 @onready var _chat_input: LineEdit = $ChatInput
 @onready var _inventory_hud: HBoxContainer = $InventoryHud
 
-const CHAT_MAX_ROWS := 8  # web: chatLog keeps the last 8 rows
+const CHAT_MAX_ROWS := 8      # web: chatLog keeps the last 8 rows
+const CHAT_LIFETIME := 120.0  # seconds a row lingers on screen
+const CHAT_HISTORY := 100     # rows kept for the scrollback
 const CMD_COLOR := Color("#ffd54a")
+const Style := preload("res://UI/ui_style.gd")
+const SettingsPanel := preload("res://UI/settings_panel.gd")
 # Web getColorForItem: category border colors
 const ITEM_COLORS := {
 	"grapple": "#44ff44", "launch_pad": "#44ff44", "boost_pad": "#44ff44", "teleporter": "#44ff44",
@@ -36,12 +40,14 @@ var _meter_fills: Array = []
 var _esc_menu: PanelContainer
 var _conn_pill: PanelContainer
 var _conn_style: StyleBoxFlat
-var _esc_toggles: Dictionary = {}
-var _esc_sliders: Dictionary = {}
+var _settings_box: PanelContainer
+var _gear_btn: Button
 var _health_label: Label
 var _death_label: Label
-var _gamemode_opt: OptionButton
 var _last_hp := -1
+var _chat_history: Array = []   # bbcode rows, oldest first
+var _chat_scroll: PanelContainer
+var _chat_scroll_rows: VBoxContainer
 
 
 func _ready() -> void:
@@ -65,6 +71,7 @@ func _ready() -> void:
 	_build_esc_menu()
 	_build_conn_pill()
 	_build_slayer_hud()
+	_build_scrollback()
 	# Full-screen shader effects (sci-fi drone view, damage datamosh)
 	var fx := Node.new()
 	fx.name = "ScreenFX"
@@ -129,6 +136,9 @@ func _open_chat() -> void:
 	_chat_input.text = ""
 	_on_chat_text_changed("")
 	_chat_input.call_deferred("grab_focus")
+	_show_scrollback(true)
+	# Free the mouse so the scrollback can actually be scrolled
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _close_chat() -> void:
@@ -136,6 +146,52 @@ func _close_chat() -> void:
 		return
 	_chat_input.visible = false
 	_chat_input.release_focus()
+	_show_scrollback(false)
+	var god: Node = get_node_or_null("GodMenu")
+	if not _esc_menu.visible and not (god and god.visible):
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Scrollable history of everything said this session, shown while typing.
+func _build_scrollback() -> void:
+	_chat_scroll = PanelContainer.new()
+	_chat_scroll.visible = false
+	_chat_scroll.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_chat_scroll.offset_left = -430
+	_chat_scroll.offset_right = -12
+	_chat_scroll.offset_top = -300
+	_chat_scroll.offset_bottom = -48
+	_chat_scroll.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_chat_scroll.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_chat_scroll.add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.7), 8))
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_chat_scroll.add_child(scroll)
+	_chat_scroll_rows = VBoxContainer.new()
+	_chat_scroll_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_chat_scroll_rows)
+	add_child(_chat_scroll)
+
+
+func _show_scrollback(on: bool) -> void:
+	_chat_scroll.visible = on
+	if not on:
+		return
+	for child in _chat_scroll_rows.get_children():
+		child.free()
+	for bb in _chat_history:
+		var row := RichTextLabel.new()
+		row.bbcode_enabled = true
+		row.fit_content = true
+		row.scroll_active = false
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_theme_font_size_override("normal_font_size", 16)
+		row.text = str(bb)
+		_chat_scroll_rows.add_child(row)
+	# Land at the newest message
+	await get_tree().process_frame
+	var scroll: ScrollContainer = _chat_scroll.get_child(0)
+	scroll.scroll_vertical = int(scroll.get_v_scroll_bar().max_value)
 
 
 func _on_chat_text_changed(text: String) -> void:
@@ -174,10 +230,8 @@ func _run_chat_command(msg: String) -> void:
 			var god: Node = get_node_or_null("GodMenu")
 			if god:
 				god.toggle()
-		"rebuild":
-			Net.emit_event("startRebuildVote")
 		"help":
-			_add_system_row("Commands: /vote yes|no, /end, /rebuild (map-reset vote), /kill (also K), /god (also Q)")
+			_add_system_row("/vote yes|no  /end  /kill [K]  /god [Q]")
 		_:
 			_add_system_row("Unknown command: /" + cmd)
 
@@ -193,14 +247,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"gameEnded":
 			_add_system_row("Game ended.")
 		"gameSettings":
-			if data is Dictionary:
-				for key in _esc_toggles:
-					_esc_toggles[key].set_pressed_no_signal(bool(data.get(key, false)))
-				for key in _esc_sliders:
-					_esc_sliders[key].set_value_no_signal(clampf(float(data.get(key, 1.0)), 0.1, 2.0))
-				if _gamemode_opt:
-					_gamemode_opt.select(0 if bool(data.get("slayer", true)) else 1)
-				_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
+			# (the settings panel wires itself to this event)
+			_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
 
 
 func _bb_escape(s: String) -> String:
@@ -218,18 +266,30 @@ func _add_system_row(text: String) -> void:
 
 
 func _push_chat_row(bbcode: String) -> void:
+	_chat_history.append(bbcode)
+	while _chat_history.size() > CHAT_HISTORY:
+		_chat_history.pop_front()
 	var row := RichTextLabel.new()
 	row.bbcode_enabled = true
 	row.fit_content = true
 	row.scroll_active = false
 	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_theme_font_size_override("normal_font_size", 15)
+	row.add_theme_font_size_override("normal_font_size", 16)
 	row.add_theme_color_override("font_outline_color", Color.BLACK)
 	row.add_theme_constant_override("outline_size", 6)
 	row.text = "[right]%s[/right]" % bbcode
+	row.set_meta("born", Time.get_ticks_msec())
 	_chat_log.add_child(row)
 	while _chat_log.get_child_count() > CHAT_MAX_ROWS:
 		_chat_log.get_child(0).free()
+
+
+## On-screen rows time out; the scrollback (T) keeps the full log.
+func _expire_chat_rows() -> void:
+	var now := Time.get_ticks_msec()
+	for row in _chat_log.get_children():
+		if now - int(row.get_meta("born", now)) > int(CHAT_LIFETIME * 1000.0):
+			row.free()
 
 
 func _run_git_pull() -> void:
@@ -333,7 +393,7 @@ func _refresh_inventory(items: Array) -> void:
 		style.bg_color = Color(0, 0, 0, 0.6)
 		style.border_color = Color(str(ITEM_COLORS.get(item, "#ffffff")))
 		style.set_border_width_all(2)
-		style.set_corner_radius_all(8)
+		style.set_corner_radius_all(0)
 		slot.add_theme_stylebox_override("panel", style)
 		var label := Label.new()
 		var ammo_text := ""
@@ -345,101 +405,57 @@ func _refresh_inventory(items: Array) -> void:
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD
-		label.add_theme_font_size_override("font_size", 10 if i > 0 else 12)
+		label.add_theme_font_size_override("font_size", 16)
 		slot.add_child(label)
 		_inventory_hud.add_child(slot)
 
 
-## Escape menu (web §6.6, trimmed: resume / vote / quit — no gfx toggles yet).
+## Escape menu (web §6.6). Settings live behind the gear and only open in
+## Build mode — every other gamemode has them locked to the lobby choice.
 func _build_esc_menu() -> void:
 	_esc_menu = PanelContainer.new()
 	_esc_menu.visible = false
 	_esc_menu.set_anchors_preset(Control.PRESET_CENTER)
 	_esc_menu.offset_left = -140
 	_esc_menu.offset_right = 140
-	_esc_menu.offset_top = -240
-	_esc_menu.offset_bottom = 240
+	_esc_menu.offset_top = -220
+	_esc_menu.offset_bottom = 220
 	_esc_menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_esc_menu.grow_vertical = Control.GROW_DIRECTION_BOTH
 	add_child(_esc_menu)
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.03, 0.04, 0.07, 0.92)
-	style.border_color = Color(1, 1, 1, 0.25)
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(8)
-	style.set_content_margin_all(14)
-	_esc_menu.add_theme_stylebox_override("panel", style)
+	_esc_menu.add_theme_stylebox_override("panel", Style.panel_box(Color(0.03, 0.04, 0.07, 0.92), 14))
 	var box := VBoxContainer.new()
 	box.custom_minimum_size = Vector2(190, 0)
 	box.add_theme_constant_override("separation", 8)
 	_esc_menu.add_child(box)
+
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 8)
+	box.add_child(head)
 	var title := Label.new()
-	title.text = "GAME SETTINGS"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_color_override("font_color", Color("#ffd54a"))
-	box.add_child(title)
+	title.text = "MENU"
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.add_theme_color_override("font_color", Style.ACCENT)
+	head.add_child(title)
+	_gear_btn = Button.new()
+	_gear_btn.text = "⚙"
+	_gear_btn.focus_mode = Control.FOCUS_NONE
+	_gear_btn.custom_minimum_size = Vector2(34, 0)
+	head.add_child(_gear_btn)
 
-	# Gamemode dropdown (server-wide; slayer is the default)
-	var mode_row := HBoxContainer.new()
-	mode_row.add_theme_constant_override("separation", 8)
-	var mode_lbl := Label.new()
-	mode_lbl.text = "Mode"
-	mode_lbl.add_theme_font_size_override("font_size", 12)
-	mode_row.add_child(mode_lbl)
-	_gamemode_opt = OptionButton.new()
-	_gamemode_opt.add_item("Slayer")
-	_gamemode_opt.add_item("Sandbox (oddball)")
-	_gamemode_opt.focus_mode = Control.FOCUS_NONE
-	_gamemode_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_gamemode_opt.select(0 if bool(Net.game_settings.get("slayer", true)) else 1)
-	_gamemode_opt.item_selected.connect(func(i: int):
-		Net.emit_event("updateGameSetting", {"key": "slayer", "value": i == 0}))
-	mode_row.add_child(_gamemode_opt)
-	box.add_child(mode_row)
-
-	# Server-wide toggles (everyone sees an alert when these change)
-	for entry in [["infiniteAmmo", "Infinite ammo"], ["selfAssign", "Self-assign items"], ["allowMidgameChanges", "Allow mid-game changes"]]:
-		var check := CheckBox.new()
-		check.text = entry[1]
-		check.focus_mode = Control.FOCUS_NONE
-		check.set_pressed_no_signal(bool(Net.game_settings.get(entry[0], false)))
-		check.toggled.connect(func(on: bool): Net.emit_event("updateGameSetting", {"key": entry[0], "value": on}))
-		box.add_child(check)
-		_esc_toggles[entry[0]] = check
-
-	# Physics sliders (server-wide)
-	for entry in [["speedScale", "Speed"], ["jumpScale", "Jump"], ["gravityScale", "Gravity"]]:
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 8)
-		var lbl := Label.new()
-		lbl.text = entry[1]
-		lbl.custom_minimum_size = Vector2(52, 0)
-		lbl.add_theme_font_size_override("font_size", 12)
-		row.add_child(lbl)
-		var slider := HSlider.new()
-		slider.min_value = 0.1
-		slider.max_value = 2.0
-		slider.step = 0.01
-		slider.custom_minimum_size = Vector2(120, 0)
-		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		slider.focus_mode = Control.FOCUS_NONE
-		slider.set_value_no_signal(clampf(float(Net.game_settings.get(entry[0], 1.0)), 0.1, 2.0))
-		slider.drag_ended.connect(func(changed: bool):
-			if changed:
-				Net.emit_event("updateGameSetting", {"key": entry[0], "value": slider.value}))
-		row.add_child(slider)
-		box.add_child(row)
-		_esc_sliders[entry[0]] = slider
+	_settings_box = PanelContainer.new()
+	_settings_box.visible = false
+	_settings_box.add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.3), 8))
+	_settings_box.add_child(SettingsPanel.new())
+	box.add_child(_settings_box)
+	_gear_btn.pressed.connect(func(): _settings_box.visible = not _settings_box.visible)
 
 	for entry in [
 		["RESUME", func(): _toggle_esc_menu(false)],
-		["VOTE: REBUILD MAP (reset)", func():
-			Net.emit_event("startRebuildVote")
-			_toggle_esc_menu(false)],
 		["VOTE: END GAME", func():
 			Net.emit_event("startEndVote")
 			_toggle_esc_menu(false)],
-		["LEAVE TO MENU", func(): get_tree().change_scene_to_file("res://UI/main_menu.tscn")],
+		["RETURN TO LOBBY", func(): get_tree().change_scene_to_file("res://UI/main_menu.tscn")],
 		["QUIT GAME", func(): get_tree().quit()],
 	]:
 		var b := Button.new()
@@ -451,6 +467,11 @@ func _build_esc_menu() -> void:
 
 func _toggle_esc_menu(open: bool) -> void:
 	_esc_menu.visible = open
+	# Only Build mode can change settings live; elsewhere the gear is dead
+	var buildable := str(Net.game_settings.get("mode", "slayer")) == "build"
+	_gear_btn.disabled = not buildable
+	if not buildable:
+		_settings_box.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
 
 
@@ -499,7 +520,7 @@ func _build_slayer_hud() -> void:
 	_death_label.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_death_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_death_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_death_label.add_theme_font_size_override("font_size", 54)
+	_death_label.add_theme_font_size_override("font_size", 56)
 	_death_label.add_theme_color_override("font_color", Color("#ff5544"))
 	_death_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	_death_label.add_theme_constant_override("outline_size", 12)
@@ -540,13 +561,13 @@ func _build_conn_pill() -> void:
 	_conn_pill.offset_bottom = 30
 	_conn_pill.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_conn_style = StyleBoxFlat.new()
-	_conn_style.set_corner_radius_all(11)
+	_conn_style.set_corner_radius_all(0)
 	_conn_style.set_content_margin_all(4)
 	_conn_pill.add_theme_stylebox_override("panel", _conn_style)
 	var label := Label.new()
 	label.name = "Text"
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", 11)
+	label.add_theme_font_size_override("font_size", 16)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	_conn_pill.add_child(label)
 	add_child(_conn_pill)
@@ -565,6 +586,7 @@ func _process(_delta: float) -> void:
 	_update_meters()
 	_update_conn_pill()
 	_update_slayer_hud()
+	_expire_chat_rows()
 
 
 func _refresh(scores: Dictionary) -> void:

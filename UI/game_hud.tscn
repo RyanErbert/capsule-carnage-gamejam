@@ -15,7 +15,7 @@ offset_right = 200.0
 offset_top = 12.0
 offset_bottom = 46.0
 grow_horizontal = 2
-theme_override_font_sizes/font_size = 22
+theme_override_font_sizes/font_size = 24
 theme_override_colors/font_color = Color(1, 0.85, 0.2, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 6
@@ -62,7 +62,7 @@ theme_override_constants/margin_bottom = 12
 
 [node name="Rows" type="Label" parent="Scoreboard/Margin"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 18
+theme_override_font_sizes/font_size = 16
 text = "..."
 
 [node name="VersionLabel" type="Label" parent="."]
@@ -77,7 +77,7 @@ offset_right = -10.0
 offset_bottom = -8.0
 grow_horizontal = 0
 grow_vertical = 0
-theme_override_font_sizes/font_size = 13
+theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(1, 1, 1, 0.5)
 horizontal_alignment = 2
 text = "build"
@@ -128,7 +128,7 @@ offset_right = -12.0
 offset_bottom = -78.0
 grow_horizontal = 0
 grow_vertical = 0
-theme_override_font_sizes/font_size = 15
+theme_override_font_sizes/font_size = 16
 placeholder_text = "Say something…"
 max_length = 200
 
@@ -141,7 +141,7 @@ offset_right = 420.0
 offset_top = 56.0
 offset_bottom = 120.0
 grow_horizontal = 2
-theme_override_font_sizes/font_size = 20
+theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(1, 0.25, 0.2, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 8
