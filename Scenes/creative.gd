@@ -19,11 +19,26 @@ const LAYER_NAMES := ["GROUND", "MAIN", "+1", "+2"]  # index 0..3, bottom up
 const BRUSH_RADIUS := 3.0       # default radius for replayed edits
 const KILL_Y := -20.0           # below the world: instant respawn backstop
 
-# Stage bounds: fog starts building the moment you leave the 128x128 play
-# area and hits full white after ~3 s of running (~38 m), at which point
-# you're turned around to face the center.
+# Stage bounds: a base haze sits over the whole world, visible fog banks
+# stand just outside the 128x128 play area, and the closer you get to the
+# edge the thicker it reads — full white ~38 m out, where you're turned
+# around to face the center.
 const FOG_START := 64.0    # the paint region's edge (max-norm)
 const FOG_WHITE := 102.0
+const FOG_BASE := 0.0015   # always-on depth-fog density inside the arena
+
+# Unshaded white haze sheet for the boundary fog banks: solid near the
+# ground, fading out toward the top so it reads as weather, not a fence.
+const FOG_WALL_SHADER := "
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_never;
+uniform float alpha_max = 0.1;
+void fragment() {
+	float fade = smoothstep(0.02, 0.55, UV.y);
+	ALBEDO = vec3(1.0);
+	ALPHA = alpha_max * fade;
+}
+"
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
@@ -272,6 +287,34 @@ func _spawn_gameplay() -> void:
 	_fog_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_fog_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	fog_layer.add_child(_fog_rect)
+	_make_fog_shells()
+
+
+## Fake volumetric fog outside the play bounds: concentric square shells of
+## translucent white haze (the Compatibility renderer has no FogVolume).
+## From inside they read as a distant fog bank; walking out you pass through
+## shell after shell, so the whiteout builds gradually instead of snapping on.
+func _make_fog_shells() -> void:
+	var shader := Shader.new()
+	shader.code = FOG_WALL_SHADER
+	var wall_h := 90.0
+	var wall_y := wall_h * 0.5 - 16.0  # from below the slabs up past their tops
+	# [half-extent, opacity] — denser the deeper into the fog you are
+	for ring in [[70.0, 0.05], [80.0, 0.08], [90.0, 0.12], [101.0, 0.16], [114.0, 0.24]]:
+		var r: float = ring[0]
+		var mat := ShaderMaterial.new()
+		mat.shader = shader
+		mat.set_shader_parameter("alpha_max", ring[1])
+		for i in 4:
+			var mi := MeshInstance3D.new()
+			var quad := QuadMesh.new()
+			quad.size = Vector2(r * 2.0 + 10.0, wall_h)
+			mi.mesh = quad
+			mi.material_override = mat
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			mi.rotation.y = i * PI / 2.0
+			mi.position = Vector3(0, wall_y, 0) + Basis(Vector3.UP, i * PI / 2.0) * Vector3(0, 0, -r)
+			add_child(mi)
 
 
 ## Spawns scattered across walkable pixels — nothing at main level or above
@@ -325,9 +368,9 @@ func _update_fog_bounds() -> void:
 		f = 0.0
 	_fog_rect.color.a = f * f  # eases in, hits solid white right at the bound
 	if _env_ref:
-		_env_ref.fog_enabled = f > 0.0
-		_env_ref.fog_light_color = Color(1, 1, 1)
-		_env_ref.fog_density = f * 0.05
+		# Thicken the ever-present base haze; the sky whites out with it
+		_env_ref.fog_density = FOG_BASE + f * 0.05
+		_env_ref.fog_sky_affect = 0.1 + 0.9 * f
 	if f < 1.0 or d < 1.0:
 		return
 	# Whited out: about-face toward the center (camera too, so W walks back)
@@ -365,6 +408,12 @@ func _setup_environment() -> void:
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	e.ambient_light_energy = 0.55  # lower ambient: shading carries the shape
 	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	# Base haze: always on, so the boundary fog is a thickening of something
+	# already there instead of an effect that snaps on at the edge
+	e.fog_enabled = true
+	e.fog_light_color = Color(1, 1, 1)
+	e.fog_density = FOG_BASE
+	e.fog_sky_affect = 0.1
 	env.environment = e
 	_env_ref = e
 	add_child(env)

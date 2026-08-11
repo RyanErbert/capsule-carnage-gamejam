@@ -198,12 +198,15 @@ func _build_visual() -> Node3D:
 
 	var model: Node3D = (DrillModel if is_drill else GhostModel).instantiate()
 	root.add_child(model)
-	# Normalize the kit model to ~3.4 m of hull, resting under the seat
+	# Normalize the kit model to ~3.4 m of hull, resting under the seat.
+	# Kenney GLB origins sit off-center, so recenter x/z on the collider too.
 	var box := _model_aabb(model)
 	if box.size.z > 0.01:
 		var s := 3.4 / maxf(box.size.z, box.size.x)
+		var c := box.get_center()
 		model.scale = Vector3.ONE * s
-		model.position.y = -0.55 - box.position.y * s
+		# The PI yaw flip below mirrors x/z, hence the positive offsets
+		model.position = Vector3(c.x * s, -0.55 - box.position.y * s, c.z * s)
 	# Kenney crafts model forward as +Z; our vehicles drive -Z
 	model.rotation.y = PI
 

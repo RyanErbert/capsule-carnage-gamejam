@@ -400,8 +400,10 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	var box: AABB = VehicleScript._model_aabb(model)
 	if box.size.y > 0.01:
 		var s := (1.4 * scale_f) / box.size.y
+		var c := box.get_center()
 		model.scale = Vector3.ONE * s
-		model.position.y = -0.7 * scale_f - box.position.y * s
+		# Recenter x/z too: Kenney GLB origins sit off-center
+		model.position = Vector3(-c.x * s, -0.7 * scale_f - box.position.y * s, -c.z * s)
 
 	# Glowing core ring
 	var ring := MeshInstance3D.new()

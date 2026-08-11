@@ -37,6 +37,7 @@ var _channel_markers: Array = []
 var _castle_nodes: Array = []
 var _castle_markers: Array = []
 var _hover_ghosts: Dictionary = {}  # tool -> ghost Node3D (blue placement preview)
+var _prop_ry := 0.0  # next prop's yaw, rolled up-front so the ghost matches
 # God build mode (web: godmode build tools + the 9^3 grid-point cloud)
 const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
 var _build_rot := 0
@@ -213,8 +214,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			Net.emit_event("placeModel", {
 				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
 				"model": _tool.substr(5),
-				"x": pos.x, "y": pos.y, "z": pos.z, "ry": randf() * TAU,
+				"x": pos.x, "y": pos.y, "z": pos.z, "ry": _prop_ry,
 			})
+			_prop_ry = randf() * TAU  # reroll: the ghost previews the NEXT one
 			_status.text = "%s placed" % _tool.substr(5).trim_suffix(".glb")
 		else:
 			Net.emit_event("placePedestal", {"x": pos.x, "y": pos.y, "z": pos.z, "ry": 0.0, "type": _tool})
@@ -329,6 +331,8 @@ func _update_hover_preview() -> void:
 		_hover_ghosts[_tool] = ghost
 	ghost.visible = true
 	ghost.global_position = hit["position"]
+	# Props place with a random yaw; the ghost shows the exact one coming
+	ghost.rotation.y = _prop_ry if _tool.begins_with("prop:") else 0.0
 
 
 func _ghost_material() -> StandardMaterial3D:
@@ -578,6 +582,8 @@ func _set_tool(tool_name: String) -> void:
 
 
 func _on_tool_pressed(tool_name: String) -> void:
+	if tool_name.begins_with("prop:"):
+		_prop_ry = randf() * TAU
 	_set_tool("" if _tool == tool_name else tool_name)
 
 

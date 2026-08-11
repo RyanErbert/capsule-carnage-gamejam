@@ -64,7 +64,11 @@ vec3 triplanar(sampler2D tex, vec3 p, vec3 w, float s) {
 	     + texture(tex, p.xy * s).rgb * w.z;
 }
 void fragment() {
-	vec3 w = abs(wnrm);
+	// Projection weights from the actual polygon (screen-space derivatives),
+	// not the density-gradient normal: on thin spires the gradient goes bad
+	// and picks a grazing projection plane, smearing the texture.
+	vec3 gnrm = normalize(cross(dFdx(wpos), dFdy(wpos)));
+	vec3 w = abs(gnrm);
 	w = pow(w, vec3(4.0));
 	w /= (w.x + w.y + w.z);
 	vec3 sand = triplanar(sand_tex, wpos, w, 0.09) * vec3(1.12, 0.98, 0.82);
