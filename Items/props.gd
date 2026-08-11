@@ -15,6 +15,9 @@ const MODEL_SCENES := {
 	"tree_1.glb": preload("res://Models/tree_1.glb"),
 }
 
+# Scenery you walk straight through
+const NO_COLLIDE := ["grass.glb"]
+
 var _models: Dictionary = {}   # id -> Node3D
 
 
@@ -59,7 +62,8 @@ func _add_model(m: Dictionary) -> void:
 	inst.position = Vector3(m.get("x", 0.0), m.get("y", 0.0), m.get("z", 0.0))
 	inst.rotation.y = float(m.get("ry", 0.0))
 	add_child(inst)
-	_add_colliders(inst)
+	if not model in NO_COLLIDE:
+		_add_colliders(inst)
 	_models[id] = inst
 
 

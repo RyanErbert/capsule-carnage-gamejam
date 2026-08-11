@@ -29,6 +29,8 @@ var terrain_edits: Array = []
 var paint_rows: Variant = null  # in-progress editor canvas, same layered shape
 var game_settings: Dictionary = {}  # server-authoritative global settings
 var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
+var spawn_zones: Dictionary = {}    # socket id -> [r, c] claimed in the editor
+var socket_id := ""                 # our own id, so we know which zone is ours
 var _reconnect_timer := 0.0
 
 
@@ -149,6 +151,13 @@ func _handle_frame(frame: String) -> void:
 					terrain_edits = data if data is Array else []
 				"creativePaint":
 					paint_rows = data
+				"paintCleared":
+					paint_rows = null
+				"hello":
+					if data is Dictionary:
+						socket_id = str(data.get("id", ""))
+				"spawnZones":
+					spawn_zones = data if data is Dictionary else {}
 				"gameSettings":
 					game_settings = data if data is Dictionary else {}
 				"gameEnded":
@@ -157,6 +166,7 @@ func _handle_frame(frame: String) -> void:
 					terrain_edits.clear()
 					paint_rows = null
 					spawn_points = []
+					spawn_zones = {}
 				"currentSpawns":
 					spawn_points = data if data is Array else []
 				"spawnPlaced":

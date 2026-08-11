@@ -1,12 +1,10 @@
 extends CanvasLayer
 
-## In-game HUD (PORT_BLUEPRINT.md §6.3/§6.4): leader display top-center,
-## "YOU'RE IT" banner, hold-Tab scoreboard, chat (T to talk, web §6.5).
-## Meters/inventory come later.
+## In-game HUD (PORT_BLUEPRINT.md §6.3/§6.4): health/sprint/jump meters,
+## inventory, "YOU'RE IT" banner, hold-Tab scoreboard, chat (T to talk).
 
 @export var sync_node: Node
 
-@onready var _leader_label: Label = $LeaderLabel
 @onready var _it_label: Label = $ItLabel
 @onready var _scoreboard: PanelContainer = $Scoreboard
 @onready var _scoreboard_text: Label = $Scoreboard/Margin/Rows
@@ -331,29 +329,79 @@ func _trigger_server_deploy() -> void:
 		_update_banner.text = "Could not reach the deploy hook - check your connection. Press F10 to retry."
 
 
-## Sprint + jump-charge meters (web §6.3: 180x10 bars bottom-center).
+## Blocky 8x8 icons, drawn from a text mask and blown up nearest-neighbour so
+## they sit in the same pixel world as the font.
+const ICON_MASKS := {
+	"heart": [
+		".##.##.",
+		"#######",
+		"#######",
+		".#####.",
+		"..###..",
+		"...#...",
+	],
+	"bolt": [
+		"...##..",
+		"..##...",
+		".####..",
+		"...##..",
+		"..##...",
+		".##....",
+	],
+	"jump": [
+		"...#...",
+		"..###..",
+		".#####.",
+		"...#...",
+		"...#...",
+		".#####.",
+	],
+}
+
+func _icon(name: String, color: Color) -> TextureRect:
+	var mask: Array = ICON_MASKS[name]
+	var img := Image.create(mask[0].length(), mask.size(), false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	for y in mask.size():
+		var row: String = mask[y]
+		for x in row.length():
+			if row[x] == "#":
+				img.set_pixel(x, y, color)
+	var tex := TextureRect.new()
+	tex.texture = ImageTexture.create_from_image(img)
+	tex.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tex.custom_minimum_size = Vector2(18, 14)
+	return tex
+
+
+## Health, sprint and jump-charge meters: matching 160x10 bars bottom-center,
+## each with its icon (web §6.3 had the two lower ones at 180x10).
 func _build_meters() -> void:
 	_meters = VBoxContainer.new()
 	_meters.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_meters.offset_left = -90
-	_meters.offset_right = 90
-	_meters.offset_top = -46
+	_meters.offset_left = -108
+	_meters.offset_right = 108
+	_meters.offset_top = -64
 	_meters.offset_bottom = -20
 	_meters.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_meters.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_meters.custom_minimum_size = Vector2(180, 26)
 	_meters.add_theme_constant_override("separation", 4)
 	add_child(_meters)
-	for i in 2:
+	for entry in [["heart", Color("#ff5560")], ["bolt", Color("#4de08a")], ["jump", Color("#7fb2ff")]]:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		row.add_child(_icon(entry[0], entry[1]))
 		var bg := ColorRect.new()
 		bg.color = Color(0, 0, 0, 0.5)
-		bg.custom_minimum_size = Vector2(180, 10)
+		bg.custom_minimum_size = Vector2(160, 10)
 		var fill := ColorRect.new()
-		fill.color = Color(0.3, 0.9, 0.4)
+		fill.color = entry[1]
 		fill.position = Vector2(1, 1)
-		fill.size = Vector2(178, 8)
+		fill.size = Vector2(158, 8)
 		bg.add_child(fill)
-		_meters.add_child(bg)
+		row.add_child(bg)
+		_meters.add_child(row)
 		_meter_fills.append(fill)
 
 
@@ -362,16 +410,22 @@ func _update_meters() -> void:
 		return
 	var p: CharacterBody3D = sync_node.player
 	_meters.visible = not p.godmode
+	# Health: same bar treatment as the other two (Slayer only)
+	var slayer := bool(Net.game_settings.get("slayer", true))
+	var hp := int(sync_node.scores.get(sync_node.self_id, 0)) if sync_node.self_id != "" else 0
+	_meter_fills[0].get_parent().get_parent().visible = slayer
+	_meter_fills[0].size.x = 158.0 * clampf(float(hp) / 100.0, 0.0, 1.0)
+	_meter_fills[0].color = Color("#ff5560") if hp <= 25 else 		(Color("#ffb347") if hp <= 50 else Color("#ff8090"))
 	# Sprint: green fill, red while exhausted (web)
-	_meter_fills[0].size.x = 178.0 * (p.sprint_stamina / p.SPRINT_DURATION)
-	_meter_fills[0].color = Color(0.9, 0.25, 0.2) if p.sprint_exhausted else Color(0.3, 0.9, 0.4)
-	# Jump: green charge (c-1)/3 while held, red cooldown drain otherwise
+	_meter_fills[1].size.x = 158.0 * (p.sprint_stamina / p.SPRINT_DURATION)
+	_meter_fills[1].color = Color(0.9, 0.25, 0.2) if p.sprint_exhausted else Color("#4de08a")
+	# Jump: charge (c-1)/3 while held, red cooldown drain otherwise
 	if p.charging_jump:
-		_meter_fills[1].size.x = 178.0 * ((p.jump_charge - 1.0) / 3.0)
-		_meter_fills[1].color = Color(0.3, 0.9, 0.4)
+		_meter_fills[2].size.x = 158.0 * ((p.jump_charge - 1.0) / 3.0)
+		_meter_fills[2].color = Color("#7fb2ff")
 	else:
-		_meter_fills[1].size.x = 178.0 * (p.jump_cooldown / p.jump_cooldown_max if p.jump_cooldown_max > 0.0 else 0.0)
-		_meter_fills[1].color = Color(0.9, 0.25, 0.2)
+		_meter_fills[2].size.x = 158.0 * (p.jump_cooldown / p.jump_cooldown_max if p.jump_cooldown_max > 0.0 else 0.0)
+		_meter_fills[2].color = Color(0.9, 0.25, 0.2)
 
 
 var _last_inventory: Array = []
@@ -385,7 +439,8 @@ func _refresh_inventory(items: Array) -> void:
 	for i in items.size():
 		var item: String = items[i]["type"]
 		var ammo: int = int(items[i]["ammo"])
-		var size := 80 if i == 0 else 50
+		# Slot 0 is the active weapon: noticeably bigger than the rest
+		var size := 104 if i == 0 else 48
 		var slot := PanelContainer.new()
 		slot.custom_minimum_size = Vector2(size, size)
 		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -496,19 +551,13 @@ func _input(event: InputEvent) -> void:
 ## Slayer readouts: health bottom-center above the meters, and the big
 ## respawn countdown while dead.
 func _build_slayer_hud() -> void:
+	# The number rides at the right end of the health bar
 	_health_label = Label.new()
-	_health_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_health_label.offset_left = -90
-	_health_label.offset_right = 90
-	_health_label.offset_top = -84
-	_health_label.offset_bottom = -52
-	_health_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_health_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_health_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_health_label.add_theme_font_size_override("font_size", 24)
+	_health_label.add_theme_font_size_override("font_size", 16)
 	_health_label.add_theme_color_override("font_outline_color", Color.BLACK)
-	_health_label.add_theme_constant_override("outline_size", 8)
-	add_child(_health_label)
+	_health_label.add_theme_constant_override("outline_size", 6)
+	_health_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_meter_fills[0].get_parent().get_parent().add_child(_health_label)
 
 	_death_label = Label.new()
 	_death_label.set_anchors_preset(Control.PRESET_CENTER)
@@ -539,7 +588,7 @@ func _update_slayer_hud() -> void:
 		return
 	var hp := int(sync_node.scores.get(sync_node.self_id, 0))
 	_health_label.visible = not p.godmode
-	_health_label.text = "♥ %d" % hp
+	_health_label.text = "%d" % hp
 	var col := Color(1, 1, 1)
 	if hp <= 25:
 		col = Color("#ff5544")
@@ -607,17 +656,10 @@ func _refresh(scores: Dictionary) -> void:
 	# The oddball "YOU'RE IT" banner belongs to the old sandbox mode
 	_it_label.visible = holder != "" and holder == sync_node.self_id and not slayer
 
-	# Leader = highest score (web: crown + "name: score" top center)
-	var best_id := ""
-	var best := -1
+	# Standings live on the hold-Tab scoreboard, not over the crosshair
 	var rows: Array = []
 	for id in scores:
-		if int(scores[id]) > best:
-			best = int(scores[id])
-			best_id = str(id)
 		rows.append([str(id), int(scores[id])])
-	_leader_label.text = "👑 %s: %d" % [sync_node.name_of(best_id), best] if best_id != "" else ""
-
 	rows.sort_custom(func(a, b): return a[1] > b[1])
 	var lines: Array = []
 	for row in rows:

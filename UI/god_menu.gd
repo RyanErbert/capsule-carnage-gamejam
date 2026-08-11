@@ -93,7 +93,9 @@ func _input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			dir = -1
 		if dir != 0:
-			if _carving():
+			if _tool.begins_with("prop:"):
+				pass  # props sit on the floor; there is no height to pick
+			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
 			else:
@@ -199,7 +201,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		if hit.is_empty():
 			_status.text = "no surface"
 			return
-		var pos: Vector3 = hit["position"] + Vector3(0, _lift, 0)
+		var lift := 0.0 if _tool.begins_with("prop:") else _lift
+		var pos: Vector3 = hit["position"] + Vector3(0, lift, 0)
 		if _tool == "delete":
 			var target := _find_delete_target(pos)
 			if target.is_empty():
@@ -435,7 +438,7 @@ func _update_hover_preview() -> void:
 		ghost = _make_hover_ghost(_tool)
 		_hover_ghosts[_tool] = ghost
 	ghost.visible = true
-	ghost.global_position = hit["position"] + Vector3(0, _lift, 0)
+	ghost.global_position = hit["position"] 		+ Vector3(0, 0.0 if _tool.begins_with("prop:") else _lift, 0)
 	# Props place with a random yaw (R nudges it); the ghost shows the exact
 	# one coming
 	ghost.rotation.y = _prop_ry if _tool.begins_with("prop:") else 0.0

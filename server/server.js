@@ -132,17 +132,8 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 // erased = pit), main, +1, +2. Each layer is 32 uint32 row bitmasks, bit
 // (31-col) = filled. Bedrock below the ground layer is implicit/uneditable.
 let creativeLayers = null;   // [4][32] after normLayers
-let creativeSpawn = null;    // painted spawn pixel [r, c] — a building generates there
 let terrainEdits = [];
 let paintLayers = null;  // in-progress editor canvas, live-synced between painters
-let paintSpawn = null;
-
-function normSpawn(g) {
-  if (!g || !Array.isArray(g.spawn) || g.spawn.length !== 2) return null;
-  const r = Math.max(0, Math.min(31, Math.floor(Number(g.spawn[0]) || 0)));
-  const c = Math.max(0, Math.min(31, Math.floor(Number(g.spawn[1]) || 0)));
-  return [r, c];
-}
 
 // --- Home base ---
 // Every generated map has one, whether or not anyone painted a SPAWN pixel.
@@ -150,31 +141,44 @@ function normSpawn(g) {
 // red), so the base can never be buried by later geometry.
 const HOME_PIXEL = [16, 16];        // dead center of the 32x32 canvas
 const DEADZONE_R = 10;              // meters (max-norm), ~a 5x5 pixel block
+const ZONE_SEPARATION = 5;          // pixels between two players' spawn pixels
 
-function homePixel() { return creativeSpawn || HOME_PIXEL; }
-function homeWorld() {
-  const h = homePixel();
-  return { x: -64 + h[1] * 4 + 2, z: -64 + h[0] * 4 + 2 };
+// Each painter claims a spawn pixel; it becomes their base, their spawn point
+// and a deadzone. With nobody claiming one, the map still gets the default.
+const spawnZones = {};              // socket.id -> [r, c]
+
+function zoneList() {
+  const z = Object.values(spawnZones);
+  return z.length ? z : [HOME_PIXEL];
+}
+function homeWorlds() {
+  return zoneList().map(h => ({ x: -64 + h[1] * 4 + 2, z: -64 + h[0] * 4 + 2 }));
 }
 function inDeadzone(r, c) {
-  const h = homePixel();
-  return Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2;
+  return zoneList().some(h => Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2);
 }
 
-// The home base as a real spawn point with a building on it, re-applied on
-// every generate.
+// Every zone becomes a spawn point with a base building, re-applied on each
+// generate. Ids are indexed so a stale set clears cleanly.
+let homeIds = [];
 function applyHomeBase() {
-  const spIdx = spawnPoints.findIndex(s => s.id === 'spawn-paint');
-  if (spIdx !== -1) { spawnPoints.splice(spIdx, 1); io.emit('spawnRemoved', 'spawn-paint'); }
-  const mIdx = activeModels.findIndex(m => m.id === 'bldg-paint');
-  if (mIdx !== -1) { activeModels.splice(mIdx, 1); io.emit('modelRemoved', 'bldg-paint'); }
-  const { x, z } = homeWorld();
-  const sp = { id: 'spawn-paint', x, y: 2, z };
-  spawnPoints.push(sp);
-  io.emit('spawnPlaced', sp);
-  const model = { id: 'bldg-paint', model: 'building_1.glb', x, y: 1, z, ry: 0 };
-  activeModels.push(model);
-  io.emit('modelPlaced', model);
+  for (const id of homeIds) {
+    const s = spawnPoints.findIndex(p => p.id === 'spawn-' + id);
+    if (s !== -1) { spawnPoints.splice(s, 1); io.emit('spawnRemoved', 'spawn-' + id); }
+    const m = activeModels.findIndex(p => p.id === 'bldg-' + id);
+    if (m !== -1) { activeModels.splice(m, 1); io.emit('modelRemoved', 'bldg-' + id); }
+  }
+  homeIds = [];
+  homeWorlds().forEach(({ x, z }, i) => {
+    const id = 'home' + i;
+    homeIds.push(id);
+    const sp = { id: 'spawn-' + id, x, y: 2, z };
+    spawnPoints.push(sp);
+    io.emit('spawnPlaced', sp);
+    const model = { id: 'bldg-' + id, model: 'building_1.glb', x, y: 1, z, ry: 0 };
+    activeModels.push(model);
+    io.emit('modelPlaced', model);
+  });
 }
 
 // Highest painted layer at a pixel (-1 = pit), and the world Y its surface
@@ -512,9 +516,11 @@ function endGame() {
   readyIds.clear();
   terrainEdits = [];
   creativeLayers = null;
-  creativeSpawn = null;
   paintLayers = null;
-  paintSpawn = null;
+  editors.clear();
+  for (const id of Object.keys(spawnZones)) delete spawnZones[id];
+  io.emit('spawnZones', spawnZones);
+  if (editVote) { clearTimeout(editVote.timer); editVote = null; io.emit('editVote', null); }
   pedestals.length = 0;
   spawnPoints.length = 0;
   activeTeleporters.length = 0;
@@ -540,6 +546,71 @@ function endGame() {
   io.emit('currentGenerators', []);
   if (levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
   io.emit('gameEnded');
+}
+
+// --- Editor votes ---
+// GENERATE and CLEAR wipe or replace what everyone in the editor is working
+// on, so they need unanimous agreement. Alone, they just happen.
+let editVote = null;   // { kind, voters:Set, yes:Set, timer }
+const EDIT_VOTE_MS = 25000;
+// Sockets sitting in the map editor. They haven't 'ready'd yet, so readyIds
+// doesn't see them - the editor announces itself instead.
+const editors = new Set();
+
+function defaultLayers() {
+  const out = [[], [], [], []];
+  for (let li = 0; li < 4; li++)
+    for (let r = 0; r < 32; r++) out[li].push(li === 0 ? 0xFFFFFFFF >>> 0 : 0);
+  return out;
+}
+
+function broadcastEditVote() {
+  if (!editVote) { io.emit('editVote', null); return; }
+  io.emit('editVote', {
+    kind: editVote.kind, yes: editVote.yes.size, need: editVote.voters.size
+  });
+}
+
+function startEditVote(socket, kind) {
+  if (editVote) return;
+  // Only people actually at the canvas vote - an in-game player can't see
+  // the confirmation bar, so counting them would deadlock it.
+  const voters = new Set([...editors]);
+  voters.add(socket.id);
+  if (voters.size <= 1) { applyEditVote(kind); return; }
+  editVote = { kind, voters, yes: new Set([socket.id]), timer: null };
+  editVote.timer = setTimeout(() => {
+    editVote = null;
+    sysMsg('Vote timed out.');
+    broadcastEditVote();
+  }, EDIT_VOTE_MS);
+  const who = players[socket.id] ? players[socket.id].name : 'Player';
+  sysMsg(`${who} wants to ${kind === 'clear' ? 'clear the canvas' : 'start the game'}.`);
+  broadcastEditVote();
+  checkEditVote();
+}
+
+function checkEditVote() {
+  if (!editVote || editVote.yes.size < editVote.voters.size) return;
+  const kind = editVote.kind;
+  clearTimeout(editVote.timer);
+  editVote = null;
+  io.emit('editVote', null);
+  applyEditVote(kind);
+}
+
+function applyEditVote(kind) {
+  if (kind === 'clear') {
+    paintLayers = null;
+    io.emit('paintCleared');
+    return;
+  }
+  creativeLayers = paintLayers || defaultLayers();
+  terrainEdits = [];
+  io.emit('creativeGrid', { layers: creativeLayers });
+  autoPopulatePedestals();
+  autoPlaceGenerator();
+  applyHomeBase();
 }
 
 // --- World items state ---
@@ -616,12 +687,18 @@ io.on('connection', (socket) => {
   // Creative-level snapshot on plain connection (scenes load after connect,
   // so this must not wait for 'ready').
   if (creativeLayers) {
-    socket.emit('creativeGrid', { layers: creativeLayers, spawn: creativeSpawn });
+    socket.emit('creativeGrid', { layers: creativeLayers });
     socket.emit('terrainEdits', terrainEdits);
   }
-  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers, spawn: paintSpawn });
+  if (paintLayers) socket.emit('creativePaint', { layers: paintLayers });
+  socket.emit('spawnZones', spawnZones);
+  socket.emit('hello', { id: socket.id });
   socket.emit('gameSettings', gameSettings);
   socket.emit('currentSpawns', spawnPoints);
+
+  socket.on('editing', (on) => {
+    if (on) editors.add(socket.id); else editors.delete(socket.id);
+  });
 
   socket.on('updateGameSetting', (u) => {
     if (!u || typeof u.key !== 'string' || !(u.key in gameSettings)) return;
@@ -738,23 +815,60 @@ io.on('connection', (socket) => {
     }
   });
 
+  // A painter claims (or drops) their spawn pixel. Zones can't overlap, so
+  // nobody can plant their base inside someone else's.
+  socket.on('setSpawn', (p) => {
+    if (p === null || p === undefined) {
+      delete spawnZones[socket.id];
+      io.emit('spawnZones', spawnZones);
+      return;
+    }
+    const r = Math.max(0, Math.min(31, Math.floor(Number(p.r) || 0)));
+    const c = Math.max(0, Math.min(31, Math.floor(Number(p.c) || 0)));
+    for (const [id, z] of Object.entries(spawnZones)) {
+      if (id === socket.id) continue;
+      if (Math.abs(r - z[0]) <= ZONE_SEPARATION && Math.abs(c - z[1]) <= ZONE_SEPARATION) {
+        socket.emit('systemMessage', { text: 'That overlaps another spawn zone.' });
+        return;
+      }
+    }
+    spawnZones[socket.id] = [r, c];
+    io.emit('spawnZones', spawnZones);
+  });
+
+  // GENERATE and CLEAR need everyone still in the editor to agree.
+  socket.on('requestGenerate', () => startEditVote(socket, 'generate'));
+  socket.on('requestClear', () => startEditVote(socket, 'clear'));
+  socket.on('castEditVote', (yes) => {
+    if (!editVote || !editVote.voters.has(socket.id)) return;
+    const who = players[socket.id] ? players[socket.id].name : 'Player';
+    if (!yes) {
+      sysMsg(`${who} declined.`);
+      clearTimeout(editVote.timer);
+      editVote = null;
+      io.emit('editVote', null);
+      return;
+    }
+    editVote.yes.add(socket.id);
+    broadcastEditVote();
+    checkEditVote();
+  });
+
   // Live co-painting of the creative editor canvas (full 32-int grid per
   // stroke burst — tiny and idempotent).
   socket.on('creativePaint', (g) => {
     const layers = normLayers(g);
     if (!layers) return;
     paintLayers = layers;
-    paintSpawn = normSpawn(g);
-    socket.broadcast.emit('creativePaint', { layers: paintLayers, spawn: paintSpawn });
+    socket.broadcast.emit('creativePaint', { layers: paintLayers });
   });
 
   socket.on('creativeGrid', (g) => {
     const layers = normLayers(g);
     if (!layers) return;
     creativeLayers = layers;
-    creativeSpawn = normSpawn(g);
     terrainEdits = [];
-    io.emit('creativeGrid', { layers: creativeLayers, spawn: creativeSpawn });
+    io.emit('creativeGrid', { layers: creativeLayers });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
     autoPlaceGenerator();     // and one heal generator near the center
     applyHomeBase();          // home base + its spawn point (default or painted)
@@ -769,10 +883,11 @@ io.on('connection', (socket) => {
       st: Math.min(Math.abs(+e.st) || 1, 2),
       m: e.m === 'smooth' ? 'smooth' : 'add'   // smooth relaxes instead of adding
     };
-    // The home base deadzone is unsculptable - a brush that would reach into
-    // it is dropped outright (clients block it locally too).
-    const h = homeWorld();
-    if (Math.max(Math.abs(edit.x - h.x), Math.abs(edit.z - h.z)) <= DEADZONE_R + edit.r) return;
+    // Spawn deadzones are unsculptable - a brush that would reach into one is
+    // dropped outright (clients block it locally too).
+    for (const h of homeWorlds()) {
+      if (Math.max(Math.abs(edit.x - h.x), Math.abs(edit.z - h.z)) <= DEADZONE_R + edit.r) return;
+    }
     terrainEdits.push(edit);
     if (terrainEdits.length > 20000) terrainEdits.shift();
     socket.broadcast.emit('terrainEdit', edit);
@@ -1179,6 +1294,14 @@ io.on('connection', (socket) => {
       }
     }
     delete deadUntil[socket.id];
+    editors.delete(socket.id);
+    if (spawnZones[socket.id]) { delete spawnZones[socket.id]; io.emit('spawnZones', spawnZones); }
+    if (editVote && editVote.voters.has(socket.id)) {
+      editVote.voters.delete(socket.id);
+      editVote.yes.delete(socket.id);
+      broadcastEditVote();
+      checkEditVote();
+    }
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
     // Drop the player from any running vote and re-evaluate the tally.
     if (endVote && endVote.voters.has(socket.id)) {

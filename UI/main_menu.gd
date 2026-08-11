@@ -257,6 +257,16 @@ func _build_ui() -> void:
 	_status.add_theme_font_size_override("font_size", 16)
 	root.add_child(_status)
 
+	# Chat, shared with the map editor and the in-game HUD
+	var chat := PanelContainer.new()
+	chat.set_script(load("res://UI/chat_box.gd"))
+	chat.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	chat.offset_left = 12
+	chat.offset_top = -206
+	chat.offset_bottom = -12
+	chat.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	add_child(chat)
+
 	var build := Label.new()
 	build.text = "build " + Net.git_commit()
 	build.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

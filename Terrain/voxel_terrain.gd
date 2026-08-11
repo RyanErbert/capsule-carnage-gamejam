@@ -257,15 +257,17 @@ func density_at(pos: Vector3) -> float:
 	return _d(clampi(roundi(g.x), 0, NX), clampi(roundi(g.y), 0, NY), clampi(roundi(g.z), 0, NZ))
 
 
-## The home base sits in a protected square (creative.gd sets the center from
-## the spawn pixel): no brush may reach into it, so the base can't be dug out
-## from under or buried. Mirrors the server's check.
-var deadzone_center := Vector3(2, 0, 2)
+## Each spawn base sits in a protected square (creative.gd sets the centres
+## from the claimed pixels): no brush may reach into one, so a base can't be
+## dug out from under or buried. Mirrors the server's check.
+var deadzone_centers: Array = [Vector3(2, 0, 2)]
 const DEADZONE_R := 10.0
 
 func in_deadzone(center: Vector3, radius := 0.0) -> bool:
-	return maxf(absf(center.x - deadzone_center.x), absf(center.z - deadzone_center.z)) \
-		<= DEADZONE_R + radius
+	for h in deadzone_centers:
+		if maxf(absf(center.x - h.x), absf(center.z - h.z)) <= DEADZONE_R + radius:
+			return true
+	return false
 
 
 ## Astroneer-style brush: add (sign +1) or carve (sign -1) a falloff sphere.

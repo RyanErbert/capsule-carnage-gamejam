@@ -66,9 +66,11 @@ var _active_layer := 1         # painting target; 1 = MAIN
 var _layer_buttons: Array = []
 var _brush := 1                # painter brush size, in cells across
 var _spire_mode := true        # painting high fills the column underneath
-var _spawn_px: Variant = null  # painted spawn pixel [r, c]; a building pops up there
-var _spawn_mode := false       # SPAWN chip armed: clicks place the spawn pixel
+var _zones: Dictionary = {}    # socket id -> [r, c]; one spawn zone each
+var _spawn_mode := false       # SPAWN chip armed: clicks claim your zone
 var _spawn_button: Button
+var _vote_bar: PanelContainer
+var _vote_label: Label
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
@@ -84,19 +86,25 @@ var _probe_cd := 0.0
 func _ready() -> void:
 	_setup_environment()
 	_layers = _default_layers()
+	_zones = Net.spawn_zones.duplicate()
 	_build_editor_ui()
 	Net.event_received.connect(_on_net_event)
+	Net.emit_event("editing", true)   # counts us in the generate/clear votes
 	# Someone already sculpted a world this session? Join it as-is.
 	var live := _norm_layers(Net.creative_grid)
 	var painting := _norm_layers(Net.paint_rows)
 	if not live.is_empty():
-		_spawn_px = _norm_spawn(Net.creative_grid)
 		_start_play(live, Net.terrain_edits.duplicate(), false)
 	elif OS.get_environment("FRIENDSLOP_AUTOJOIN") == "1":
 		_start_play.call_deferred(_layers, [], true)  # headless testing
 	elif not painting.is_empty():
 		# Someone is mid-painting: adopt their canvas
-		_adopt_paint(painting, _norm_spawn(Net.paint_rows))
+		_adopt_paint(painting)
+
+
+## Back to the menu, or any other exit: stop counting toward editor votes.
+func _exit_tree() -> void:
+	Net.emit_event("editing", false)
 
 
 ## Ground layer full (the flat plain you walk on), everything above empty.
@@ -128,22 +136,12 @@ func _norm_layers(data: Variant) -> Array:
 	return out
 
 
-## The painted spawn pixel from a payload: [r, c] or null.
-func _norm_spawn(data: Variant) -> Variant:
-	if data is Dictionary and data.get("spawn") is Array:
-		var sp: Array = data.get("spawn")
-		if sp.size() == 2:
-			return [clampi(int(sp[0]), 0, PIXELS - 1), clampi(int(sp[1]), 0, PIXELS - 1)]
-	return null
-
-
 func _grid_payload() -> Dictionary:
-	return {"layers": _layers, "spawn": _spawn_px}
+	return {"layers": _layers}
 
 
-func _adopt_paint(layers: Array, spawn: Variant) -> void:
+func _adopt_paint(layers: Array) -> void:
 	_layers = layers
-	_spawn_px = spawn
 	if _painter:
 		_painter.queue_redraw()
 
@@ -166,26 +164,26 @@ func _process(delta: float) -> void:
 		Net.emit_event("creativePaint", _grid_payload())
 
 
-func _same_spawn(other: Variant) -> bool:
-	if (other == null) != (_spawn_px == null):
-		return false
-	if other == null:
-		return true
-	return int(other[0]) == int(_spawn_px[0]) and int(other[1]) == int(_spawn_px[1])
-
-
 func _on_net_event(event: String, data: Variant) -> void:
 	match event:
 		"creativePaint":
 			var painted := _norm_layers(data)
-			var psp: Variant = _norm_spawn(data)
-			if not _playing and not painted.is_empty() \
-					and (not _same_layers(painted) or not _same_spawn(psp)):
-				_adopt_paint(painted, psp)
+			if not _playing and not painted.is_empty() and not _same_layers(painted):
+				_adopt_paint(painted)
+		"paintCleared":
+			if not _playing:
+				_adopt_paint(_default_layers())
+		"spawnZones":
+			_zones = data if data is Dictionary else {}
+			if _painter:
+				_painter.queue_redraw()
+			if _playing:
+				_make_deadzone_marker()
+		"editVote":
+			_show_vote(data)
 		"creativeGrid":
 			var grid := _norm_layers(data)
-			if not grid.is_empty() and not _same_layers(grid):
-				_spawn_px = _norm_spawn(data)
+			if not grid.is_empty() and (not _playing or not _same_layers(grid)):
 				_start_play(grid, [], false)
 		"gameEnded":
 			# Full wipe, grid included: everyone goes back to the lobby so the
@@ -229,7 +227,7 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 	if terrain == null:
 		terrain = VoxelTerrain.new()
 		add_child(terrain)
-	terrain.deadzone_center = _home_world()
+	terrain.deadzone_centers = _home_pixels().map(_px_world)
 	terrain.build_from_layers(_layers)
 	_make_deadzone_marker()
 	for e in edits:
@@ -238,6 +236,7 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 	if announce:
 		Net.emit_event("creativeGrid", _grid_payload())
 	_editor_layer.visible = false
+	Net.emit_event("editing", false)
 	if not _playing:
 		_playing = true
 		_spawn_gameplay()
@@ -361,18 +360,31 @@ func _spawn_points() -> Array:
 # --- Home base deadzone ------------------------------------------------------
 
 ## The home pixel: whatever was painted with the SPAWN chip, else the default.
-func _home_px() -> Array:
-	return _spawn_px if _spawn_px is Array else HOME_PIXEL
+func _home_pixels() -> Array:
+	var out: Array = []
+	for id in _zones:
+		var z: Array = _zones[id]
+		out.append([int(z[0]), int(z[1])])
+	if out.is_empty():
+		out.append(HOME_PIXEL)
+	return out
 
 
-func _home_world() -> Vector3:
-	var h := _home_px()
+## Our own claim, or null if we haven't placed one yet.
+func _my_px() -> Variant:
+	var z: Variant = _zones.get(Net.socket_id)
+	return [int(z[0]), int(z[1])] if z is Array else null
+
+
+func _px_world(h: Array) -> Vector3:
 	return Vector3(-64.0 + int(h[1]) * 4.0 + 2.0, 0.0, -64.0 + int(h[0]) * 4.0 + 2.0)
 
 
 func _in_deadzone(r: int, c: int) -> bool:
-	var h := _home_px()
-	return absi(r - int(h[0])) <= DEADZONE_PX and absi(c - int(h[1])) <= DEADZONE_PX
+	for h in _home_pixels():
+		if absi(r - int(h[0])) <= DEADZONE_PX and absi(c - int(h[1])) <= DEADZONE_PX:
+			return true
+	return false
 
 
 ## The protected square, drawn as a faint red volume you can see through:
@@ -385,6 +397,13 @@ func _make_deadzone_marker() -> void:
 		_deadzone_node.queue_free()
 	_deadzone_node = Node3D.new()
 	add_child(_deadzone_node)
+	if terrain:
+		terrain.deadzone_centers = _home_pixels().map(_px_world)
+	for h in _home_pixels():
+		_deadzone_box(_px_world(h))
+
+
+func _deadzone_box(at: Vector3) -> void:
 	var size := VoxelTerrain.DEADZONE_R * 2.0
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -398,7 +417,7 @@ func _make_deadzone_marker() -> void:
 	walls.mesh = box
 	walls.material_override = mat
 	walls.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	walls.position = _home_world() + Vector3(0, 5.0, 0)
+	walls.position = at + Vector3(0, 5.0, 0)
 	_deadzone_node.add_child(walls)
 	# A solid band on the ground so the boundary is unmistakable on foot
 	var edge_mat := StandardMaterial3D.new()
@@ -414,7 +433,7 @@ func _make_deadzone_marker() -> void:
 		band.mesh = quad
 		band.material_override = edge_mat
 		band.rotation = Vector3(-PI / 2.0, side * PI / 2.0, 0)
-		band.position = _home_world() + Vector3(0, 1.1, 0) \
+		band.position = at + Vector3(0, 1.1, 0) \
 			+ Basis(Vector3.UP, side * PI / 2.0) * Vector3(0, 0, -h)
 		_deadzone_node.add_child(band)
 
@@ -527,8 +546,54 @@ func _setup_ambience() -> void:
 	_wind = _looping_player("res://Audio/ambient_wind.ogg", 1.0, -16.0)
 	# Same loop, slowed and detuned: the boundary gale over the top of it
 	_gale = _looping_player("res://Audio/ambient_wind.ogg", 0.78, -60.0)
-	# CC0 Kenney machine loop dropped two octaves: a simple, dead cave drone
-	_cave = _looping_player("res://Audio/generator_hum.ogg", 0.25, -60.0)
+	# Cave drone: generated brown noise, so there's nothing tonal in it to
+	# oscillate — just a low, slow rush.
+	_cave = AudioStreamPlayer.new()
+	_cave.stream = _make_cave_noise()
+	_cave.volume_db = -60.0
+	_cave.autoplay = true
+	add_child(_cave)
+
+
+## Brown noise (integrated white noise, then heavily low-passed) rendered to a
+## looping 16-bit sample at load. The tail is cross-faded into the head so the
+## loop point is inaudible.
+func _make_cave_noise() -> AudioStreamWAV:
+	var rate := 22050
+	var total := rate * 8
+	var fade := rate * 2
+	var loop_len := total - fade
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20260810
+	var buf := PackedFloat32Array()
+	buf.resize(total)
+	var brown := 0.0
+	var slow := 0.0
+	for i in total:
+		brown = clampf(brown * 0.995 + rng.randf_range(-1.0, 1.0) * 0.03, -1.0, 1.0)
+		slow += (brown - slow) * 0.03   # only the lowest band survives
+		buf[i] = slow
+	for i in fade:
+		var t := float(i) / float(fade)
+		buf[i] = buf[i] * t + buf[loop_len + i] * (1.0 - t)
+	var peak := 0.0001
+	for i in loop_len:
+		peak = maxf(peak, absf(buf[i]))
+	var data := PackedByteArray()
+	data.resize(loop_len * 2)
+	for i in loop_len:
+		var v := int(clampf(buf[i] / peak, -1.0, 1.0) * 32000.0)
+		data[i * 2] = v & 0xFF
+		data[i * 2 + 1] = (v >> 8) & 0xFF
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	wav.data = data
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = loop_len
+	return wav
 
 
 ## Roof/wall probes from the head: the share that hit something nearby is how
@@ -621,12 +686,12 @@ func _build_editor_ui() -> void:
 	# SPIRE MODE: paint high and the column beneath fills in with it. Off,
 	# slabs are free to float.
 	var spire := Button.new()
-	spire.text = "SPIRE MODE"
+	spire.text = "SPIRE"
 	spire.toggle_mode = true
 	spire.focus_mode = Control.FOCUS_NONE
 	spire.button_pressed = _spire_mode
 	spire.custom_minimum_size = Vector2(110, 28)
-	spire.add_theme_color_override("font_color", Color("#f0cb96"))
+	spire.add_theme_color_override("font_color", Color("#ff5560"))
 	spire.toggled.connect(func(on: bool): _spire_mode = on)
 	opts.add_child(spire)
 
@@ -677,6 +742,25 @@ func _build_editor_ui() -> void:
 	layer_col.add_child(_spawn_button)
 	_set_layer(_active_layer)
 
+	# Confirmation bar: GENERATE and CLEAR need everyone at the canvas to agree
+	_vote_bar = PanelContainer.new()
+	_vote_bar.visible = false
+	_vote_bar.add_theme_stylebox_override("panel",
+		preload("res://UI/ui_style.gd").panel_box(Color(0.25, 0.06, 0.08, 0.9), 8))
+	box.add_child(_vote_bar)
+	var vrow := HBoxContainer.new()
+	vrow.add_theme_constant_override("separation", 10)
+	_vote_bar.add_child(vrow)
+	_vote_label = Label.new()
+	_vote_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	vrow.add_child(_vote_label)
+	for entry in [["YES", true], ["NO", false]]:
+		var vb := Button.new()
+		vb.text = entry[0]
+		vb.focus_mode = Control.FOCUS_NONE
+		vb.pressed.connect(func(): Net.emit_event("castEditVote", entry[1]))
+		vrow.add_child(vb)
+
 	var buttons := HBoxContainer.new()
 	buttons.alignment = BoxContainer.ALIGNMENT_CENTER
 	buttons.add_theme_constant_override("separation", 10)
@@ -684,14 +768,11 @@ func _build_editor_ui() -> void:
 	var gen := Button.new()
 	gen.text = "GENERATE & PLAY"
 	gen.custom_minimum_size = Vector2(0, 40)
-	gen.pressed.connect(func(): _start_play(_layers, [], true))
+	gen.pressed.connect(func(): Net.emit_event("requestGenerate"))
 	buttons.add_child(gen)
 	var clear := Button.new()
 	clear.text = "CLEAR"
-	clear.pressed.connect(func():
-		_layers = _default_layers()
-		_on_painted()
-		_painter.queue_redraw())
+	clear.pressed.connect(func(): Net.emit_event("requestClear"))
 	buttons.add_child(clear)
 	var back := Button.new()
 	back.text = "BACK TO MENU"
@@ -703,6 +784,29 @@ func _build_editor_ui() -> void:
 	_status.add_theme_font_size_override("font_size", 16)
 	_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	box.add_child(_status)
+
+	# Chat, so painters can talk before the map exists
+	var chat := PanelContainer.new()
+	chat.set_script(load("res://UI/chat_box.gd"))
+	chat.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	chat.offset_left = 12
+	chat.offset_top = -206
+	chat.offset_bottom = -12
+	chat.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_editor_layer.add_child(chat)
+
+
+## The server relays who still has to confirm a GENERATE or CLEAR.
+func _show_vote(data: Variant) -> void:
+	if _vote_bar == null:
+		return
+	if not data is Dictionary:
+		_vote_bar.visible = false
+		return
+	_vote_bar.visible = true
+	_vote_label.text = "%s?   %d/%d" % [
+		"CLEAR" if str(data.get("kind", "")) == "clear" else "START",
+		int(data.get("yes", 0)), int(data.get("need", 0))]
 
 
 func _set_layer(li: int) -> void:
@@ -777,9 +881,8 @@ class PixelPainter extends Control:
 		var c := clampi(int(pos.x) / CELL, 0, 31)
 		var r := clampi(int(pos.y) / CELL, 0, 31)
 		if owner_scene._spawn_mode:
-			owner_scene._spawn_px = [r, c] if _paint_value == 1 else null
-			owner_scene._on_painted()
-			queue_redraw()
+			# The server owns zones: it rejects overlaps and broadcasts the set
+			Net.emit_event("setSpawn", {"r": r, "c": c} if _paint_value == 1 else null)
 			return
 		var reach: int = owner_scene._brush - 1
 		for rr in range(r - reach, r + reach + 1):
@@ -812,9 +915,12 @@ class PixelPainter extends Control:
 				if owner_scene._in_deadzone(r, c):
 					col = col.lerp(Color(1.0, 0.25, 0.25), 0.35)
 				draw_rect(rect, col)
-		# Home base pixel
-		var sp: Array = owner_scene._home_px()
-		var srect := Rect2(int(sp[1]) * CELL, int(sp[0]) * CELL, CELL - 1, CELL - 1)
-		draw_rect(srect, Color("#7dedb0"))
-		draw_rect(srect.grow(-3), Color("#0c2018"))
-		draw_rect(srect.grow(-5), Color("#7dedb0"))
+		# Spawn zones: yours green, everyone else's blue
+		var mine: Variant = owner_scene._my_px()
+		for h in owner_scene._home_pixels():
+			var is_mine: bool = mine is Array 				and int(mine[0]) == int(h[0]) and int(mine[1]) == int(h[1])
+			var col := Color("#7dedb0") if is_mine else Color("#7fb2ff")
+			var srect := Rect2(int(h[1]) * CELL, int(h[0]) * CELL, CELL - 1, CELL - 1)
+			draw_rect(srect, col)
+			draw_rect(srect.grow(-3), Color("#0c2018"))
+			draw_rect(srect.grow(-5), col)
