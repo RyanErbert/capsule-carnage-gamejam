@@ -20,7 +20,7 @@ var model := "bear"            # "bear" | "cube"
 var starting_weapon := "rocket"  # default loadout (infinite ammo is on)
 var infinite_ammo := false
 var movement := "web"          # "web" (Cube Fight physics) | "source" (bhop/air-strafe)
-var camera_zoom := 13.0        # chain length, local only (camera_rig.gd)
+var camera_zoom := 4.5         # chain length, local only (camera_rig.gd)
 var level := "creative"        # "creative" (default) | "testworld"
 
 

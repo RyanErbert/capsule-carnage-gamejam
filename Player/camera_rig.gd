@@ -19,7 +19,7 @@ const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
 
 var yaw := PI
 var pitch := 0.4
-var base_chain_length := 13.0
+var base_chain_length := 4.5
 var follow_target: Node3D = null  # god-mode drone override; null = the player
 var _mouse_idle_timer := 999.0
 

@@ -2,11 +2,16 @@ extends Node3D
 
 ## The glass marble everybody rides around in.
 ##
-## Two hemispheres: one tinted the player's colour, one an off-white milk
-## glass. Rolling a plain sphere is invisible — every frame looks the same —
-## so the seam between the halves is what makes the spin read, the same way a
-## two-tone marble does. The shell rolls; whatever is INSIDE it does not, so
-## the character stays the right way up while their ball tumbles.
+## One sphere, two colours: the top half tinted the player's colour, the
+## bottom half an off-white milk glass. Rolling a plain sphere is invisible —
+## every frame looks the same — so the seam between the halves is what makes
+## the spin read, the same way a two-tone marble does. The shell rolls;
+## whatever is INSIDE it does not, so the character stays the right way up
+## while their ball tumbles.
+##
+## The split is a SHADER, not two hemisphere meshes: SphereMesh.is_hemisphere
+## caps each dome with a flat disc, and through glass you see that disc lying
+## across the middle of the ball like a plate.
 ##
 ## Used by the local player (Player/player.tscn CapsuleLogic) and by every
 ## remote ghost (Net/remote_player.gd), so both look like the same object.
@@ -18,56 +23,64 @@ const OFFWHITE := Color(0.93, 0.92, 0.87)
 const GLASS_A := 0.34        # how much of the model inside shows through
 const MILK_A := 0.62         # the pale half is frostier, so the seam reads
 
+# Polished, see-through, and lit on both faces — you look through the near side
+# of the ball at the far side of it, so backface culling would hollow it. The
+# object-space height of the fragment picks which half of the glass it is, and
+# because the mesh spins under the shader the seam spins with it.
+const GLASS_SHADER := "
+shader_type spatial;
+render_mode cull_disabled, blend_mix, specular_schlick_ggx;
+uniform vec4 tint : source_color = vec4(1.0);
+uniform vec4 milk : source_color = vec4(1.0);
+uniform float tint_alpha = 0.34;
+uniform float milk_alpha = 0.62;
+varying vec3 local_pos;
+void vertex() {
+	local_pos = VERTEX;
+}
+void fragment() {
+	bool upper = local_pos.y > 0.0;
+	ALBEDO = upper ? tint.rgb : milk.rgb;
+	ALPHA = upper ? tint_alpha : milk_alpha;
+	METALLIC = 0.35;
+	SPECULAR = 0.9;
+	ROUGHNESS = 0.06;
+	RIM = 0.85;
+	RIM_TINT = 0.4;
+	CLEARCOAT = 1.0;
+	CLEARCOAT_ROUGHNESS = 0.0;
+}
+"
+
 var _shell: Node3D
-var _tint: StandardMaterial3D
+var _glass: ShaderMaterial
+var _color := Color.WHITE
 
 
 func _init() -> void:
 	_shell = Node3D.new()
 	add_child(_shell)
-	# Top half in the player's colour, bottom half milk glass. A hemisphere
-	# needs height == radius, or Godot squashes it into half an ellipsoid.
-	for half in 2:
-		var mi := MeshInstance3D.new()
-		var dome := SphereMesh.new()
-		dome.is_hemisphere = true
-		dome.radius = RADIUS
-		dome.height = RADIUS
-		dome.radial_segments = 24
-		dome.rings = 12
-		var mat := _glass(OFFWHITE, MILK_A)
-		if half == 0:
-			_tint = mat
-		mi.mesh = dome
-		mi.material_override = mat
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if half == 1:
-			mi.rotation = Vector3(PI, 0, 0)
-		_shell.add_child(mi)
-
-
-## Polished, see-through, and lit on both faces — you look through the near
-## side of the ball at the far side of it, so backface culling would hollow it.
-func _glass(c: Color, alpha: float) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(c.r, c.g, c.b, alpha)
-	mat.metallic = 0.35
-	mat.metallic_specular = 0.9
-	mat.roughness = 0.06
-	mat.clearcoat_enabled = true
-	mat.clearcoat = 1.0
-	mat.clearcoat_roughness = 0.0
-	mat.rim_enabled = true
-	mat.rim = 0.85
-	mat.rim_tint = 0.4
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	return mat
+	var shader := Shader.new()
+	shader.code = GLASS_SHADER
+	_glass = ShaderMaterial.new()
+	_glass.shader = shader
+	_glass.set_shader_parameter("milk", OFFWHITE)
+	var mi := MeshInstance3D.new()
+	var ball := SphereMesh.new()
+	ball.radius = RADIUS
+	ball.height = RADIUS * 2.0
+	ball.radial_segments = 32
+	ball.rings = 16
+	mi.mesh = ball
+	mi.material_override = _glass
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_shell.add_child(mi)
+	_apply_alpha()
 
 
 func set_color(c: Color) -> void:
-	if _tint:
-		_tint.albedo_color = Color(c.r, c.g, c.b, GLASS_A * (0.25 if _ghost else 1.0))
+	_color = c
+	_glass.set_shader_parameter("tint", c)
 
 
 ## Web godmode: players flying around as builders render as barely-there ghosts.
@@ -77,12 +90,16 @@ func set_ghost(on: bool) -> void:
 	if _ghost == on:
 		return
 	_ghost = on
-	for mi in _shell.get_children():
-		var mat: StandardMaterial3D = (mi as MeshInstance3D).material_override
-		mat.albedo_color.a *= 0.25 if on else 4.0
+	_apply_alpha()
 	for child in get_children():
 		if child != _shell and child is Node3D:
 			(child as Node3D).visible = not on
+
+
+func _apply_alpha() -> void:
+	var f := 0.25 if _ghost else 1.0
+	_glass.set_shader_parameter("tint_alpha", GLASS_A * f)
+	_glass.set_shader_parameter("milk_alpha", MILK_A * f)
 
 
 ## Ride inside the glass: the model is parented to US, not to the shell, so it
