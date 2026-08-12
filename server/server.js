@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
 const mapgen = require('./mapgen');
+const { LAYERS, GROUND } = mapgen;
 
 const app = express();
 const server = http.createServer(app);
@@ -172,7 +173,9 @@ function clearZoneColumn(r, c) {
       const i = rr * words + (cc >> 5);
       const bit = 1 << (31 - (cc & 31));
       paintLayers[0][i] = (paintLayers[0][i] | bit) >>> 0;
-      for (let li = 1; li < 4; li++) paintLayers[li][i] = (paintLayers[li][i] & ~bit) >>> 0;
+      paintLayers[GROUND][i] = (paintLayers[GROUND][i] | bit) >>> 0;
+      for (let li = GROUND + 1; li < LAYERS; li++)
+        paintLayers[li][i] = (paintLayers[li][i] & ~bit) >>> 0;
     }
   }
   io.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
@@ -212,13 +215,19 @@ function gridBit(rows, r, c) {
 function pixelTop(r, c) {
   if (!creativeLayers) return 0;
   let top = -1;
-  for (let li = 0; li < 4; li++) if (gridBit(creativeLayers[li], r, c)) top = li;
+  for (let li = 0; li < LAYERS; li++) if (gridBit(creativeLayers[li], r, c)) top = li;
   return top;
 }
-function surfaceY(top) { return top < 0 ? -7 : top * 8 + 1; }
+// `top` is a layer index: GROUND meshes out at y ~= 1, each slab above adds
+// 8 m, and below GROUND you're in the basement or straight through to bedrock.
+function surfaceY(top) {
+  if (top < 0) return -15;
+  if (top < GROUND) return -7;
+  return (top - GROUND) * 8 + 1;
+}
 
 function normLayers(g) {
-  if (!g || !Array.isArray(g.layers) || g.layers.length !== 4) return null;
+  if (!g || !Array.isArray(g.layers) || g.layers.length !== LAYERS) return null;
   // A canvas painted at a stale size is dropped; clients resize on the
   // gameSettings broadcast and repaint fresh.
   const gs = Array.isArray(g.gs) ? g.gs : [32, 32];
@@ -470,7 +479,7 @@ function autoPlaceGenerator() {
       const r = 2 + Math.floor(Math.random() * Math.max(1, gridH() - 4));
       const c = 2 + Math.floor(Math.random() * Math.max(1, gridW() - 4));
       const top = pixelTop(r, c);
-      if (top < 0 || inDeadzone(r, c)) continue;
+      if (top < GROUND || inDeadzone(r, c)) continue;
       const x = -halfX() + c * 4 + 2, z = -halfZ() + r * 4 + 2;
       if (homeWorlds().some(h => Math.hypot(h.x - x, h.z - z) < away)) continue;
       if (picks.some(p => Math.hypot(p.x - x, p.z - z) < spread)) continue;
@@ -636,7 +645,7 @@ function autoPopulatePedestals() {
   for (let r = 1; r < gridH() - 1; r++) {
     for (let c = 1; c < gridW() - 1; c++) {
       const top = pixelTop(r, c);
-      if (top < 0 || inDeadzone(r, c)) continue;
+      if (top < GROUND || inDeadzone(r, c)) continue;
       if (pixelTop(r - 1, c) > top || pixelTop(r + 1, c) > top) continue;
       if (pixelTop(r, c - 1) > top || pixelTop(r, c + 1) > top) continue;
       candidates.push({ r, c, top });
@@ -724,13 +733,16 @@ let startTimer = null;
 
 function defaultLayers() {
   const w = gridW(), words = gridWords(w);
-  const out = [[], [], [], []];
-  for (let li = 0; li < 4; li++)
+  const out = [];
+  for (let li = 0; li < LAYERS; li++) {
+    out.push([]);
     for (let r = 0; r < gridH(); r++)
       for (let wi = 0; wi < words; wi++) {
         const bits = Math.min(32, w - wi * 32);
-        out[li].push(li === 0 ? ((0xFFFFFFFF << (32 - bits)) >>> 0) : 0);
+        // Basement AND ground start solid; everything above them starts empty.
+        out[li].push(li <= GROUND ? ((0xFFFFFFFF << (32 - bits)) >>> 0) : 0);
       }
+  }
   return out;
 }
 
@@ -747,29 +759,74 @@ function applyEditVote(kind) {
   io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
   autoPopulatePedestals();
   autoPlaceGenerator();
+  autoPlaceStructures();
+}
+
+// Scatter a few wave-function-collapsed compounds (Items/wfc.gd) across the
+// finished map, so the structures are part of the world instead of something
+// you have to fly the drone out and place by hand. The payload is one seed —
+// every client collapses the identical building from it.
+const WFC_FOOTPRINT = 42;   // metres per side, mirrors builds.gd WFC_SIZE * CELL
+
+function autoPlaceStructures() {
+  for (let i = activeBuilds.length - 1; i >= 0; i--)
+    if (activeBuilds[i].type === 'wfc') activeBuilds.splice(i, 1);
+  if (!creativeLayers) return;
+  const want = Math.max(1, Math.min(4, Math.round(Math.sqrt(gridW() * gridH()) / 26)));
+  const picks = [];
+  const half = WFC_FOOTPRINT / 2;
+  for (let tries = 0; tries < 500 && picks.length < want; tries++) {
+    const pad = Math.ceil(half / 4) + 1;    // keep the footprint on the map
+    const r = pad + Math.floor(Math.random() * Math.max(1, gridH() - pad * 2));
+    const c = pad + Math.floor(Math.random() * Math.max(1, gridW() - pad * 2));
+    const top = pixelTop(r, c);
+    if (top < GROUND || inDeadzone(r, c)) continue;
+    const x = -halfX() + c * 4 + 2, z = -halfZ() + r * 4 + 2;
+    if (homeWorlds().some(hm => Math.hypot(hm.x - x, hm.z - z) < 30)) continue;
+    if (picks.some(p => Math.hypot(p.x - x, p.z - z) < WFC_FOOTPRINT)) continue;
+    // Sit the ground tier just ABOVE grade: flush with the terrain the decks
+    // read as painted-on floor rather than as a building you can walk into.
+    picks.push({ x, y: surfaceY(top) + 1.5, z });
+  }
+  for (const p of picks) {
+    const build = {
+      id: 'wfc-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+      type: 'wfc', seed: (Math.random() * 0xffffffff) >>> 0,
+      x: p.x, y: p.y, z: p.z, ry: (Math.floor(Math.random() * 4) * Math.PI) / 2
+    };
+    activeBuilds.push(build);
+    io.emit('buildPlaced', build);
+  }
 }
 
 // =========================================================================
 // CLAIM PHASE (Xonix)
 // =========================================================================
 // The map creator opens on a seeded world (mapgen.js), not a blank plain, and
-// who gets to EDIT which part of it is decided by a game of Xonix. Everyone
-// starts on the outer ring, walks out leaving a trail, and closing a loop back
-// onto safe ground hands them everything they enclosed. When the clock runs
-// out the unclaimed ground fogs over: from then on you only see and sculpt
-// your own territory, until the edit timer expires or someone starts the game.
+// who gets to EDIT which part of it is decided by a game of SNAKE.
+//
+// You are always moving. You cannot stop, only turn. Behind you runs a trail
+// of placed blocks, and there is no safe edge to run back to — the only way to
+// take ground is to close a loop against your own trail or your own territory,
+// which converts everything sealed inside it. Drive into the map boundary and
+// you die. Drive into ANOTHER player's trail and THEY die, and every unclaimed
+// block on the board becomes yours.
+//
+// When the clock runs out (or someone ends it early) the unclaimed ground fogs
+// over: from then on you only see and sculpt your own territory, until the
+// edit timer expires or someone starts the game.
 //
 // Server-authoritative down to the cell: cursors move on the server's tick and
 // clients only send a direction, so nobody's map can drift from anyone else's.
 
-const EDGE = -2;                // shared safe ground: the outer ring
 const FREE = -1;                // nobody's yet
-const CLAIM_TICK_MS = 110;      // one pixel of cursor travel per tick
+const CLAIM_TICK_MS = 130;      // one pixel of travel per tick
 const EDIT_MS = 3 * 60 * 1000;  // sculpting time once the land is divided
 const GIFT_R = 3;               // radius of the consolation region, in pixels
 
 let claim = null;
 let claimTimer = null;
+let claimPending = false;       // enterEditor sent, waiting for a client
 
 // Big maps take longer to cross, so they get longer — but sub-linearly, or a
 // 96x96 claim would outlast everyone's patience.
@@ -794,7 +851,8 @@ function claimSnapshot() {
     gs: [claim.w, claim.h],
     ids: claim.ids,
     own: claimBoard(),
-    pos: claim.ids.map(id => claim.pos[id] || [0, 0]),
+    pos: claim.ids.map(id => claim.pos[id] || [-1, -1]),
+    dead: claim.ids.map(id => !id || !!claim.dead[id]),
     trail: claimTrail(),
     // Milliseconds remaining, not a wall-clock deadline: client clocks drift.
     t: Math.max(0, claim.endsAt - Date.now())
@@ -811,18 +869,19 @@ function claimTrail() {
 
 function startClaim() {
   stopClaim();
+  claimPending = false;
   const w = gridW(), h = gridH();
   const seed = (Math.random() * 0xffffffff) >>> 0;
   const world = mapgen.generate(w, h, seed);
   paintLayers = world.layers;
-  const owner = new Int8Array(w * h).fill(FREE);
-  for (let r = 0; r < h; r++)
-    for (let c = 0; c < w; c++)
-      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) owner[r * w + c] = EDGE;
+  // A grab means a NEW map: nothing from the last round survives it.
+  creativeLayers = null;
+  terrainEdits = [];
   claim = {
-    phase: 'claim', w, h, seed, owner,
+    phase: 'claim', w, h, seed,
+    owner: new Int8Array(w * h).fill(FREE),
     trail: new Int8Array(w * h).fill(-1),
-    ids: [], pos: {}, dir: {},
+    ids: [], pos: {}, dir: {}, dead: {},
     endsAt: Date.now() + claimMs(w, h)
   };
   for (const id of editors) joinClaim(id);
@@ -839,18 +898,21 @@ function stopClaim() {
   if (claimTimer) { clearInterval(claimTimer); claimTimer = null; }
   if (claim) io.emit('claimState', null);   // clients drop the board and the fog
   claim = null;
+  claimPending = false;
 }
 
-// Latecomers get a cursor too: dropped on the emptiest stretch of the ring so
-// they aren't born on top of someone else.
+// Everyone starts ALREADY MOVING, spread across the board and aimed inward so
+// nobody's first tick is into a wall.
 function joinClaim(id) {
   if (!claim || claim.ids.includes(id)) return;
   claim.ids.push(id);
-  const ring = [];
-  for (let c = 0; c < claim.w; c++) ring.push([0, c], [claim.h - 1, c]);
-  for (let r = 1; r < claim.h - 1; r++) ring.push([r, 0], [r, claim.w - 1]);
-  let best = ring[0], bestD = -1;
-  for (const cell of ring) {
+  let best = [claim.h >> 1, claim.w >> 1], bestD = -1;
+  for (let tries = 0; tries < 200; tries++) {
+    const m = 5;
+    const cell = [
+      m + Math.floor(Math.random() * Math.max(1, claim.h - m * 2)),
+      m + Math.floor(Math.random() * Math.max(1, claim.w - m * 2))
+    ];
     let d = 1e9;
     for (const other of claim.ids) {
       const p = claim.pos[other];
@@ -859,7 +921,10 @@ function joinClaim(id) {
     if (d > bestD) { bestD = d; best = cell; }
   }
   claim.pos[id] = best;
-  claim.dir[id] = [0, 0];
+  const dr = (claim.h >> 1) - best[0], dc = (claim.w >> 1) - best[1];
+  claim.dir[id] = Math.abs(dr) > Math.abs(dc)
+    ? [Math.sign(dr) || 1, 0] : [0, Math.sign(dc) || 1];
+  claim.dead[id] = false;
 }
 
 function leaveClaim(id) {
@@ -869,6 +934,7 @@ function leaveClaim(id) {
   wipeTrail(pi);
   delete claim.pos[id];
   delete claim.dir[id];
+  delete claim.dead[id];
   // Their index has to stay put — the owner grid stores it in every cell they
   // took — so the slot is blanked rather than spliced out.
   claim.ids[pi] = '';
@@ -878,29 +944,27 @@ function wipeTrail(pi) {
   for (let i = 0; i < claim.trail.length; i++) if (claim.trail[i] === pi) claim.trail[i] = -1;
 }
 
-// Cut down: trail gone, and back to the nearest ground that's safe for them.
-function resetCursor(pi) {
+// Out of the round. Whatever they already fenced off stays theirs; the trail
+// they were mid-way through drawing does not.
+function killSnake(pi, reason) {
   const id = claim.ids[pi];
-  if (!id) return;
+  if (!id || claim.dead[id]) return;
+  claim.dead[id] = true;
   wipeTrail(pi);
-  const [pr, pc] = claim.pos[id] || [0, 0];
-  let best = null, bestD = 1e9;
-  for (let r = 0; r < claim.h; r++) {
-    for (let c = 0; c < claim.w; c++) {
-      const o = claim.owner[r * claim.w + c];
-      if (o !== pi && o !== EDGE) continue;
-      const d = Math.abs(r - pr) + Math.abs(c - pc);
-      if (d < bestD) { bestD = d; best = [r, c]; }
-    }
-  }
-  if (best) claim.pos[id] = best;
-  claim.dir[id] = [0, 0];
+  delete claim.pos[id];
+  if (players[id]) sysMsg(`${players[id].name} ${reason}`);
 }
 
-// A loop closed: the trail itself becomes land, then every pocket of unclaimed
-// ground it sealed off falls in with it. "Sealed off" means no rival cursor is
-// standing in it — the original Xonix rule, which is also what stops a single
-// line across the map from handing over the whole board.
+
+function livingSnakes() {
+  return claim.ids.filter(id => id && !claim.dead[id]).length;
+}
+
+
+// A loop closed: the trail becomes land, and then every pocket of unclaimed
+// ground SEALED INSIDE it falls in with it. Sealed means it can't reach the
+// map boundary — with no safe edge to run to, the boundary is what "outside"
+// means, so anything that can't touch it is by definition within the loop.
 function closeLoop(pi) {
   const { w, h, owner, trail } = claim;
   let took = 0;
@@ -912,98 +976,101 @@ function closeLoop(pi) {
   }
   if (!took) return 0;
 
-  const cursors = new Set();
-  for (let oi = 0; oi < claim.ids.length; oi++) {
-    if (oi === pi || !claim.ids[oi]) continue;
-    const p = claim.pos[claim.ids[oi]];
-    if (p) cursors.add(p[0] * w + p[1]);
+  // Flood in from the border across everything still unclaimed: whatever the
+  // flood never reaches is enclosed.
+  const outside = new Uint8Array(w * h);
+  const queue = [];
+  for (let c = 0; c < w; c++) {
+    pushOutside(queue, outside, c);
+    pushOutside(queue, outside, (h - 1) * w + c);
   }
-
-  const seen = new Uint8Array(w * h);
-  const regions = [];
-  for (let start = 0; start < owner.length; start++) {
-    if (owner[start] !== FREE || seen[start]) continue;
-    const cells = [start];
-    seen[start] = 1;
-    let occupied = false;
-    for (let qi = 0; qi < cells.length; qi++) {
-      const i = cells[qi];
-      if (cursors.has(i)) occupied = true;
-      const r = (i / w) | 0, c = i % w;
-      if (r > 0) pushFree(cells, seen, i - w);
-      if (r < h - 1) pushFree(cells, seen, i + w);
-      if (c > 0) pushFree(cells, seen, i - 1);
-      if (c < w - 1) pushFree(cells, seen, i + 1);
-    }
-    regions.push({ cells, occupied });
+  for (let r = 0; r < h; r++) {
+    pushOutside(queue, outside, r * w);
+    pushOutside(queue, outside, r * w + w - 1);
   }
-
-  const open = regions.filter(g => !g.occupied);
-  // Nobody to hem in (a solo run, or everyone's on claimed ground): the
-  // biggest pocket is "outside" the loop and stays free, the rest is inside.
-  if (open.length === regions.length && regions.length > 1) {
-    let biggest = 0;
-    for (let i = 1; i < regions.length; i++)
-      if (regions[i].cells.length > regions[biggest].cells.length) biggest = i;
-    open.splice(open.indexOf(regions[biggest]), 1);
-  } else if (open.length === regions.length) {
-    return took;   // one pocket, nothing enclosed
+  for (let qi = 0; qi < queue.length; qi++) {
+    const i = queue[qi];
+    const r = (i / w) | 0, c = i % w;
+    if (r > 0) pushOutside(queue, outside, i - w);
+    if (r < h - 1) pushOutside(queue, outside, i + w);
+    if (c > 0) pushOutside(queue, outside, i - 1);
+    if (c < w - 1) pushOutside(queue, outside, i + 1);
   }
-  for (const g of open) {
-    for (const i of g.cells) owner[i] = pi;
-    took += g.cells.length;
+  for (let i = 0; i < owner.length; i++) {
+    if (owner[i] !== FREE || outside[i]) continue;
+    owner[i] = pi;
+    took++;
   }
   return took;
 }
 
-function pushFree(cells, seen, i) {
-  if (seen[i] || claim.owner[i] !== FREE) return;
-  seen[i] = 1;
-  cells.push(i);
+function pushOutside(queue, outside, i) {
+  if (outside[i] || claim.owner[i] !== FREE) return;
+  outside[i] = 1;
+  queue.push(i);
 }
+
+
+// Cut somebody down and the whole unclaimed board is your prize.
+function takeEverything(pi) {
+  let took = 0;
+  for (let i = 0; i < claim.owner.length; i++) {
+    if (claim.owner[i] !== FREE) continue;
+    claim.owner[i] = pi;
+    took++;
+  }
+  return took;
+}
+
 
 function claimTick() {
   if (!claim || claim.phase !== 'claim') return;
   if (Date.now() >= claim.endsAt) { endClaim(); return; }
   const adds = [];
-  const wipes = [];
-  let filled = false;
+  let board = false;   // something big enough to need a full snapshot
   for (let pi = 0; pi < claim.ids.length; pi++) {
     const id = claim.ids[pi];
-    if (!id) continue;
-    const [dr, dc] = claim.dir[id] || [0, 0];
-    if (!dr && !dc) continue;
+    if (!id || claim.dead[id]) continue;
+    const [dr, dc] = claim.dir[id];
     const [r, c] = claim.pos[id];
     const nr = r + dr, nc = c + dc;
-    if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) { claim.dir[id] = [0, 0]; continue; }
+    // No safe edge any more: the boundary is a wall, and a wall is the end.
+    if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) {
+      killSnake(pi, 'drove into the wall.');
+      board = true;
+      continue;
+    }
     const ni = nr * claim.w + nc;
     const hit = claim.trail[ni];
-    if (hit >= 0) {
-      // Trails are fragile: clip one and its owner loses the lot, whether it
-      // was theirs or yours. Running into your own is how you lose a run.
-      resetCursor(hit);
-      wipes.push(hit);
-      if (hit === pi) continue;
+    if (hit >= 0 && hit !== pi) {
+      // Cut someone off mid-loop: they're out, and every block still going
+      // begging is yours.
+      killSnake(hit, 'was cut off.');
+      takeEverything(pi);
+      claim.pos[id] = [nr, nc];
+      board = true;
+      if (livingSnakes() <= 1) { endClaim(); return; }
+      continue;
     }
     claim.pos[id] = [nr, nc];
     const o = claim.owner[ni];
-    if (o === pi || o === EDGE) {
-      if (closeLoop(pi) > 0) filled = true;
+    // Your own trail or your own ground CLOSES the loop — that's the whole
+    // game. Anyone else's ground is a neutral crossing that leaves no trail.
+    if (hit === pi || o === pi) {
+      if (closeLoop(pi) > 0) board = true;
     } else if (o === FREE) {
       claim.trail[ni] = pi;
       adds.push(ni, pi);
     }
-    // Anyone else's land is a neutral crossing: no trail, and it won't close.
   }
-  if (filled) {
+  if (board) {
     io.emit('claimState', claimSnapshot());
     return;
   }
   io.emit('claimTick', {
     t: Math.max(0, claim.endsAt - Date.now()),
-    pos: claim.ids.map(id => (id && claim.pos[id]) || [0, 0]),
-    add: adds,
-    wipe: wipes
+    pos: claim.ids.map(id => (id && claim.pos[id]) || [-1, -1]),
+    add: adds
   });
 }
 
@@ -1093,7 +1160,7 @@ function mergePaint(id, incoming) {
       if (mayEdit(id, r, c)) continue;
       const i = r * words + (c >> 5);
       const bit = 1 << (31 - (c & 31));
-      for (let li = 0; li < 4; li++) {
+      for (let li = 0; li < LAYERS; li++) {
         const keep = ((out[li][i] & ~bit) | (paintLayers[li][i] & bit)) >>> 0;
         if (keep !== out[li][i]) { out[li][i] = keep; reverted = true; }
       }
@@ -1191,6 +1258,9 @@ io.on('connection', (socket) => {
   socket.on('editing', (on) => {
     if (!on) { editors.delete(socket.id); return; }
     editors.add(socket.id);
+    // First client to reach the creator opens the land grab, so the board is
+    // on someone's screen before any cursor moves.
+    if (claimPending) { claimPending = false; startClaim(); return; }
     if (!claim) { autoClaimZone(socket.id); return; }
     // A claim is running: a latecomer gets a cursor if the land grab is still
     // on, or a gifted plot and a spawn in it if the map is already divided.
@@ -1206,29 +1276,64 @@ io.on('connection', (socket) => {
   // Lobby START: everyone in the lobby sees the same 5 s countdown, then all
   // of them land in the pixel editor together. If a session is already in
   // motion (painters at work or a live map), the caller just joins it.
+  // Back in the lobby: stop counting this socket as a player in a live game.
+  socket.on('leaveGame', () => {
+    if (!readyIds.has(socket.id)) return;
+    readyIds.delete(socket.id);
+    editors.delete(socket.id);
+    socket.broadcast.emit('playerLeft', socket.id);
+  });
+
   socket.on('requestStart', () => {
-    if (creativeLayers || paintLayers || editors.size > 0 || readyIds.size > 0) {
+    // Something LIVE to join: a land grab, people sculpting, or a running game.
+    // A finished round's leftover map is none of those — it's debris, and
+    // treating it as a session to join is what used to drop the second player
+    // straight into a generated map with no editor at all.
+    if (claim || editors.size > 0 || readyIds.size > 0) {
       socket.emit('enterEditor');
       return;
     }
     if (startTimer) return;
+    creativeLayers = null;
+    paintLayers = null;
+    terrainEdits = [];
+    for (const id of Object.keys(spawnZones)) delete spawnZones[id];
+    io.emit('paintCleared');
+    io.emit('spawnZones', spawnZones);
     io.emit('startCountdown', { ms: START_COUNTDOWN_MS });
     startTimer = setTimeout(() => {
       startTimer = null;
+      claimPending = true;
       io.emit('enterEditor');
-      // Everyone is in the creator now: roll the world and open the land grab.
-      // A beat of slack so clients have the editor up before cursors move.
-      setTimeout(startClaim, 400);
+      // The claim opens as soon as the first client reports for duty (below),
+      // so cursors never start moving before anyone can see the board. This
+      // is the backstop for the case where nobody ever announces.
+      setTimeout(() => { if (claimPending) startClaim(); }, 2500);
     }, START_COUNTDOWN_MS);
   });
 
   // Xonix cursor steering: the client only ever says which way it's holding.
   socket.on('claimDir', (d) => {
-    if (!claim || claim.phase !== 'claim' || !claim.dir[socket.id]) return;
+    if (!claim || claim.phase !== 'claim' || claim.dead[socket.id]) return;
+    const cur = claim.dir[socket.id];
+    if (!cur) return;
     const dr = Math.sign(Number(d && d.dr) || 0);
     const dc = Math.sign(Number(d && d.dc) || 0);
-    // One axis at a time — diagonal trails can't enclose anything.
-    claim.dir[socket.id] = dc !== 0 && dr !== 0 ? [0, dc] : [dr, dc];
+    if (!dr && !dc) return;                       // you never stop, only turn
+    // One axis at a time — diagonal trails can't enclose anything — and no
+    // instant reversal onto the block you just laid.
+    const next = (dr !== 0 && dc !== 0) ? [0, dc] : [dr, dc];
+    if (next[0] === -cur[0] && next[1] === -cur[1]) return;
+    claim.dir[socket.id] = next;
+  });
+
+  // Whoever's had enough ends the land grab; the fog and the edit timer start
+  // immediately. (START GAME then ends the edit phase, same as before.)
+  socket.on('endClaim', () => {
+    if (!claim || claim.phase !== 'claim') return;
+    const who = players[socket.id] ? players[socket.id].name : 'Someone';
+    sysMsg(`${who} ended the land grab.`);
+    endClaim();
   });
 
   // Live painter cursors: relay-only, so co-painters see where you're hovering.
@@ -1556,7 +1661,16 @@ io.on('connection', (socket) => {
   });
 
   // GENERATE and CLEAR need everyone still in the editor to agree.
-  socket.on('requestGenerate', () => applyEditVote('generate'));
+  socket.on('requestGenerate', () => {
+    // Mid-grab there's nothing to generate yet — END GRAB is the button for
+    // that. This also stops a client that missed the claim snapshot (and so
+    // still shows a plain painter) from skipping everyone past the editor.
+    if (claim && claim.phase === 'claim') {
+      socket.emit('systemMessage', { text: 'End the land grab first.' });
+      return;
+    }
+    applyEditVote('generate');
+  });
   socket.on('requestClear', () => applyEditVote('clear'));
 
   // Live co-painting of the creative editor canvas (full 32-int grid per
@@ -1580,7 +1694,8 @@ io.on('connection', (socket) => {
     terrainEdits = [];
     io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
     autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
-    autoPlaceGenerator();     // and one heal generator near the center
+    autoPlaceGenerator();     // buried heal cores
+    autoPlaceStructures();    // and a few collapsed compounds to fight over
   });
 
   socket.on('terrainEdit', (e) => {

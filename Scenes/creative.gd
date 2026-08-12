@@ -1,16 +1,19 @@
 extends Node3D
 
-## Creative level: paint a 32x32 pixel matrix across 4 stacked LAYERS
+## Creative level: paint a 32x32 pixel matrix across 5 stacked LAYERS
 ## (scroll wheel changes the active layer), GENERATE extrudes the stack into
-## a 128x128 m world of 4 m slabs — ground (default solid, erase for pits),
+## a 128x128 m world of 4 m slabs — basement and ground (both default solid;
+## erase the basement for cellars, the ground for a drop into them), then
 ## main, +1, +2 — sitting on an uneditable bedrock plane, surrounded by a
 ## flat unmodifiable plain instead of a rim dropoff (voxel_terrain.gd).
 ##
 ## The canvas doesn't start blank. The server rolls a seeded world (canyons,
-## plateaus, spires, tunnels) and then runs a game of XONIX on the pixel grid
-## to decide who may sculpt what: everyone starts on the outer ring, walks out
-## leaving a trail, and closing a loop takes the ground inside it. When that
-## clock stops, everything you don't own fogs over and the edit timer starts.
+## plateaus, spires, tunnels) and then runs a game of SNAKE on the pixel grid
+## to decide who may sculpt what: you are always moving, you can only turn, and
+## the only way to take ground is to close a loop against your own trail. Cut
+## someone else's trail and they are out and the rest of the board is yours.
+## When that clock stops, everything you don't own fogs over and the edit
+## timer starts.
 ##
 ## Multiplayer: the pixel grid and every brush stroke go through the server
 ## ('creativeGrid' / 'terrainEdit'); joiners get a snapshot on connect, so
@@ -19,10 +22,13 @@ extends Node3D
 ## Terraforming is gated: god mode has DIG/FILL tools (god_menu.gd) and the
 ## drill vehicle carves while driving — no free sculpting during normal play.
 
-const LAYERS := 4
-const LAYER_NAMES := ["GROUND", "MAIN", "+1", "+2"]  # index 0..3, bottom up
+# Layer 0 is the BASEMENT (solid by default; erase it to hollow out a cellar),
+# layer 1 the ground you walk on, 2..4 the slabs stacked over it.
+const LAYERS := 5
+const GROUND := 1
+const LAYER_NAMES := ["BASEMENT", "GROUND", "MAIN", "+1", "+2"]  # bottom up
 const BRUSH_RADIUS := 3.0       # default radius for replayed edits
-const KILL_Y := -20.0           # below the world: instant respawn backstop
+const KILL_Y := -30.0           # below the world: instant respawn backstop
 
 # Painted grid size in pixels — server-authoritative (gameSettings gridW/gridH,
 # and every layers payload carries its gs [w, h]). Rows are packed uint32
@@ -67,7 +73,6 @@ const AMBIENCE_LERP := 1.4      # how fast the mix follows the space you're in
 # Claim phase: territory colors by player index (mirrors the server's ids
 # array order). Yours is always drawn brighter than everyone else's.
 const CLAIM_COLORS := ["#7dedb0", "#7fb2ff", "#ffd54a", "#ff8a7d", "#c58aff", "#7dede0"]
-const CLAIM_EDGE := -2      # the shared outer ring
 const CLAIM_FREE := -1      # nobody's
 const FOG := Color("#05060a")
 
@@ -79,7 +84,7 @@ var terrain: Node3D
 var player: CharacterBody3D
 var _playing := false
 var _layers: Array = []        # 4 x (32 ints), bit (31-col) = filled
-var _active_layer := 1         # painting target; 1 = MAIN
+var _active_layer := 2         # painting target; 2 = MAIN
 var _layer_buttons: Array = []
 var _brush := 1                # painter brush size, in cells across
 var _spire_mode := true        # painting high fills the column underneath
@@ -95,6 +100,7 @@ var _claim_phase := ""         # "" none | "claim" land grab | "edit" fogged
 var _claim_own := PackedInt32Array()   # per cell: -2 edge, -1 free, else index
 var _claim_ids: Array = []
 var _claim_pos: Array = []     # [[r, c], ...] parallel to _claim_ids
+var _claim_dead: Array = []    # ...and whether each one is out of the round
 var _claim_trail: Dictionary = {}      # cell index -> player index
 var _claim_left := 0.0         # seconds on the clock, counted down locally
 var _claim_dir := Vector2i.ZERO
@@ -103,6 +109,7 @@ var _hint: Label
 var _brush_row: Control
 var _layer_col: Control
 var _start_button: Button
+var _end_claim_button: Button
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
@@ -197,7 +204,8 @@ func _default_layers() -> Array:
 		for _r in PX_H:
 			for wi in w:
 				var bits := mini(32, PX_W - wi * 32)
-				rows.append((0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if li == 0 else 0)
+				# Basement AND ground start solid, everything above them empty
+				rows.append((0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if li <= GROUND else 0)
 		out.append(rows)
 	return out
 
@@ -286,6 +294,7 @@ func _apply_claim_state(data: Variant) -> void:
 	_claim_phase = str(data.get("phase", ""))
 	_claim_ids = data.get("ids", []) if data.get("ids") is Array else []
 	_claim_pos = data.get("pos", []) if data.get("pos") is Array else []
+	_claim_dead = data.get("dead", []) if data.get("dead") is Array else []
 	_claim_left = float(data.get("t", 0)) / 1000.0
 	var own := str(data.get("own", ""))
 	_claim_own.resize(PX_W * PX_H)
@@ -309,11 +318,6 @@ func _apply_claim_tick(data: Variant) -> void:
 	_claim_left = float(data.get("t", 0)) / 1000.0
 	if data.get("pos") is Array:
 		_claim_pos = data["pos"]
-	var wipe: Variant = data.get("wipe", [])
-	if wipe is Array and not (wipe as Array).is_empty():
-		for key in _claim_trail.keys():
-			if int(wipe.find(_claim_trail[key])) != -1:
-				_claim_trail.erase(key)
 	var add: Variant = data.get("add", [])
 	if add is Array:
 		for i in range(0, (add as Array).size() - 1, 2):
@@ -322,18 +326,20 @@ func _apply_claim_tick(data: Variant) -> void:
 		_painter.queue_redraw()
 
 
-## The cursor keeps going the way you're holding, Xonix-style: we only tell
-## the server when the direction CHANGES, and it walks a pixel per tick.
-## Diagonals are collapsed to one axis so a trail can actually enclose ground.
+## Snake steering: you are ALWAYS moving and can only turn. Letting go of the
+## keys does nothing — we send a direction when you press one and never send a
+## stop. Diagonals collapse to one axis or a trail can't enclose ground, and
+## the server refuses a straight reversal onto the block you just laid.
 func _poll_claim_input() -> void:
+	if get_viewport().gui_get_focus_owner() != null:
+		return
+	var v := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	var dir := Vector2i.ZERO
-	if get_viewport().gui_get_focus_owner() == null:
-		var v := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
-		if absf(v.x) > absf(v.y):
-			dir = Vector2i(0, 1 if v.x > 0.0 else -1)
-		elif absf(v.y) > 0.3:
-			dir = Vector2i(1 if v.y > 0.0 else -1, 0)
-	if dir == _claim_dir:
+	if absf(v.x) > absf(v.y) and absf(v.x) > 0.3:
+		dir = Vector2i(0, 1 if v.x > 0.0 else -1)
+	elif absf(v.y) > 0.3:
+		dir = Vector2i(1 if v.y > 0.0 else -1, 0)
+	if dir == Vector2i.ZERO or dir == _claim_dir:
 		return
 	_claim_dir = dir
 	Net.emit_event("claimDir", {"dr": dir.x, "dc": dir.y})
@@ -346,6 +352,11 @@ func _update_banner() -> void:
 	var secs := int(_claim_left) % 60
 	var clock := "%d:%02d" % [mins, secs]
 	if _claim_phase == "claim":
+		var me := _my_claim_index()
+		if me >= 0 and me < _claim_dead.size() and bool(_claim_dead[me]):
+			_claim_banner.text = "OUT   %s" % clock
+			_claim_banner.add_theme_color_override("font_color", Color("#ff8a7d"))
+			return
 		_claim_banner.text = "CLAIM   %s   [WASD]" % clock
 		_claim_banner.add_theme_color_override("font_color", Color("#ffd54a"))
 	else:
@@ -367,6 +378,8 @@ func _refresh_phase_ui() -> void:
 		_layer_col.visible = not grabbing
 	if _start_button:
 		_start_button.visible = not grabbing
+	if _end_claim_button:
+		_end_claim_button.visible = grabbing
 	_update_banner()
 
 
@@ -679,6 +692,15 @@ func _in_deadzone(r: int, c: int) -> bool:
 	return false
 
 
+## Same test, but blind to everyone else's zones — the painter uses this so a
+## rival's deadzone tint can't leak their spawn through the fog. Their ground
+## is already unpaintable to you (it isn't yours), so nothing is lost.
+func _in_own_deadzone(r: int, c: int) -> bool:
+	var mine: Variant = _my_px()
+	return mine is Array and absi(r - int(mine[0])) <= DEADZONE_PX \
+		and absi(c - int(mine[1])) <= DEADZONE_PX
+
+
 ## Respawns land somewhere random inside YOUR zone. The zone is edit-protected,
 ## so the painted layer stack is still the truth about its surface height.
 ## Returns null with no claim — respawn_point() falls back to spawn_points.
@@ -689,7 +711,7 @@ func _zone_respawn() -> Variant:
 	for _i in 16:
 		var rr := clampi(int(mine[0]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_H - 1)
 		var cc := clampi(int(mine[1]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_W - 1)
-		if not _bit_at(_layers[0], rr, cc):
+		if not _bit_at(_layers[GROUND], rr, cc):
 			continue  # pit
 		return Vector3(-_half_x() + cc * 4.0 + 2.0, _surface_y(rr, cc) + 1.0, -_half_z() + rr * 4.0 + 2.0)
 	return null
@@ -697,13 +719,17 @@ func _zone_respawn() -> Variant:
 
 ## Painted surface height at a pixel: 8 m slabs, surface ~1 m into the slab.
 func _surface_y(r: int, c: int) -> float:
-	if _layers.is_empty() or not _bit_at(_layers[0], r, c):
+	if _layers.is_empty():
 		return 1.0
-	var top := 0
-	for li in range(1, LAYERS):
+	var top := -1
+	for li in LAYERS:
 		if _bit_at(_layers[li], r, c):
 			top = li
-	return top * 8.0 + 1.0
+	if top < 0:
+		return -15.0
+	if top < GROUND:
+		return -7.0
+	return float(top - GROUND) * 8.0 + 1.0
 
 
 ## In play a zone is just the patch respawns land on — no monolith. A faint
@@ -1088,6 +1114,15 @@ func _build_editor_ui() -> void:
 	buttons.add_child(gen)
 	_start_button = gen
 
+	# Mid-grab, START GAME is replaced by the one that stops the grab.
+	var stop := Button.new()
+	stop.text = "END GRAB"
+	stop.custom_minimum_size = Vector2(220, 40)
+	stop.visible = false
+	stop.pressed.connect(func(): Net.emit_event("endClaim"))
+	buttons.add_child(stop)
+	_end_claim_button = stop
+
 	_status = Label.new()
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_status.add_theme_font_size_override("font_size", 16)
@@ -1148,13 +1183,12 @@ func paint_cell(r: int, c: int, fill: bool) -> void:
 
 class PixelPainter extends Control:
 	# Fill colors bottom-up: ground, main, +1, +2 (lighter = higher)
-	const LAYER_FILL := ["#8a5a3a", "#c78b5e", "#dfa878", "#f0cb96"]
+	const LAYER_FILL := ["#4a3226", "#8a5a3a", "#c78b5e", "#dfa878", "#f0cb96"]
 	const BG := Color("#1a2030")
 	const PIT := Color("#07080c")
 	const GHOST_ALPHA := 0.3
 	# Claim-phase drawing (an inner class can't see the outer script's consts)
 	const FOG_COL := Color("#05060a")
-	const OWN_EDGE := -2
 	const OWN_FREE := -1
 	var owner_scene: Node
 	var cell := 14.0   # canvas cell size, shrinks to fit big grids on screen
@@ -1241,29 +1275,31 @@ class PixelPainter extends Control:
 				if fogging and holder != me:
 					draw_rect(rect, FOG_COL)
 					continue
-				var col := BG if _bit(0, r, c) else PIT
-				for li in range(1, 4):
+				var col := BG if _bit(owner_scene.GROUND, r, c) else PIT
+				for li in range(1, LAYERS):
 					if li != active and _bit(li, r, c):
 						col = col.lerp(Color(LAYER_FILL[li]), GHOST_ALPHA)
-				if active == 0:
-					if _bit(0, r, c):
-						col = col.lerp(Color(LAYER_FILL[0]), 0.85)
+				if active <= owner_scene.GROUND:
+					if _bit(active, r, c):
+						col = col.lerp(Color(LAYER_FILL[active]), 0.85)
 				elif _bit(active, r, c):
 					col = Color(LAYER_FILL[active])
 				# Territory wash: your own ground reads strongest
 				if holder >= 0:
 					col = col.lerp(owner_scene._claim_color(holder), 0.5 if holder == me else 0.3)
-				elif holder == OWN_EDGE and phase != "":
-					col = col.lerp(Color(1, 1, 1), 0.16)
 				# Home deadzone: off-limits to the brush, in play as well
-				if owner_scene._in_deadzone(r, c):
+				var blocked: bool = owner_scene._in_own_deadzone(r, c) if fogging \
+					else owner_scene._in_deadzone(r, c)
+				if blocked:
 					col = col.lerp(Color(1.0, 0.25, 0.25), 0.35)
 				draw_rect(rect, col)
 		if phase == "claim":
 			_draw_claim(CELL, me)
-		# Spawn zones: yours green, everyone else's blue
+		# Spawn zones: yours green, everyone else's blue. Once the land is
+		# divided, someone else's spawn is behind the fog like everything else
+		# of theirs — you shouldn't be able to plan around it.
 		var mine: Variant = owner_scene._my_px()
-		for h in owner_scene._home_pixels():
+		for h in (([mine] if mine is Array else []) if fogging else owner_scene._home_pixels()):
 			var is_mine: bool = mine is Array 				and int(mine[0]) == int(h[0]) and int(mine[1]) == int(h[1])
 			var col := Color("#7dedb0") if is_mine else Color("#7fb2ff")
 			var srect := Rect2(int(h[1]) * CELL, int(h[0]) * CELL, CELL - 1, CELL - 1)
@@ -1295,10 +1331,13 @@ class PixelPainter extends Control:
 			var rect := Rect2((int(idx) % w) * CELL, (int(idx) / w) * CELL, CELL - 1, CELL - 1)
 			draw_rect(rect, col.lightened(0.25))
 			draw_rect(rect.grow(-maxf(1.0, CELL * 0.28)), Color(1, 1, 1, 0.85))
+		var dead: Array = owner_scene._claim_dead
 		for pi in owner_scene._claim_pos.size():
 			var p: Variant = owner_scene._claim_pos[pi]
-			if not p is Array or (p as Array).size() != 2:
+			if not p is Array or (p as Array).size() != 2 or int(p[0]) < 0:
 				continue
+			if pi < dead.size() and bool(dead[pi]):
+				continue   # out of the round: no head on the board
 			var crect := Rect2(int(p[1]) * CELL, int(p[0]) * CELL, CELL - 1, CELL - 1)
 			draw_rect(crect, owner_scene._claim_color(pi))
 			draw_rect(crect, Color.WHITE if pi == me else Color(0, 0, 0, 0.75), false, 2.0)

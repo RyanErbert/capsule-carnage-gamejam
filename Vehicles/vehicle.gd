@@ -377,6 +377,11 @@ func _climb_bot(delta: float) -> void:
 ## as the speed we were carrying STRAIGHT INTO the collision face, so a solid
 ## clip at an angle counts and a graze along a wall doesn't.
 func _check_crash(pre_vel: Vector3) -> void:
+	# A drill that's actually drilling is SUPPOSED to be buried in rock — the
+	# wall it's eating would read as a head-on impact every frame. Boring is
+	# not crashing; let go of the trigger and the hull is fragile again.
+	if _drilling:
+		return
 	var planar := Vector3(pre_vel.x, 0.0, pre_vel.z)
 	if planar.length() < CRASH_SPEED:
 		return

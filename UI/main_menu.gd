@@ -44,6 +44,11 @@ func _ready() -> void:
 	Net.socket_disconnected.connect(_refresh_status)
 	_apply_game_settings(Net.game_settings)
 	_refresh_status()
+	# Sitting in the lobby means we are NOT in a game. Without this the server
+	# still counts us as a live player after a round, and the next START gets
+	# treated as "join the session already in progress" — which dropped you
+	# straight into the old map with no editor at all.
+	Net.emit_event("leaveGame")
 	if OS.get_environment("FRIENDSLOP_AUTOJOIN") == "1":
 		_join.call_deferred()
 

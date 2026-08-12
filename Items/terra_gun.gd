@@ -25,7 +25,13 @@ const DRY_PENALTY := 1.5      # ...times that, if you ran the cell to nothing
 const CARVE_INTERVAL := 0.08
 const CARVE_RADIUS := 5.0
 const CARVE_STRENGTH := 0.5
-const RANGE := 60.0
+const RANGE := 140.0
+# Nothing inside this gets sculpted. The brush is 5 m across: fired at your own
+# feet it scoops the floor out from under you (or buries you), which is the
+# "glitchy up close" — so the ray starts beyond arm's reach and the brush is
+# refused if it would still reach the body.
+const MIN_RANGE := 7.0
+const SELF_CLEARANCE := CARVE_RADIUS + 1.5
 const ITEM := "terragun"
 
 var charge := CHARGE_MAX
@@ -202,14 +208,27 @@ func _carve(at: Vector3, mode: String) -> void:
 	Sfx.boost(at, 0.25)
 
 
+## Where the shot lands. The ray is aimed like every other weapon (camera look,
+## corrected back to the body so the muzzle and the crosshair agree) but it
+## STARTS a few metres out — otherwise a third-person camera sitting inside a
+## hillside carves whatever the lens is buried in rather than what you can see.
 func _aim_hit() -> Dictionary:
 	var cam := get_viewport().get_camera_3d()
 	if cam == null:
 		return {}
-	var from := cam.global_position
-	var q := PhysicsRayQueryParameters3D.create(from, from + (-cam.global_transform.basis.z) * RANGE)
+	var origin := player.global_position + Vector3(0, 0.4, 0)
+	var look := -cam.global_transform.basis.z
+	# Aim through the point the camera is looking at, so the crosshair is honest
+	var focus := cam.global_position + look * RANGE
+	var dir := (focus - origin).normalized()
+	var from := origin + dir * MIN_RANGE
+	var q := PhysicsRayQueryParameters3D.create(from, origin + dir * RANGE)
 	q.exclude = [player.get_rid()]
-	return player.get_world_3d().direct_space_state.intersect_ray(q)
+	var hit := player.get_world_3d().direct_space_state.intersect_ray(q)
+	# Never sculpt a hole you're standing in
+	if hit and (hit["position"] as Vector3).distance_to(player.global_position) < SELF_CLEARANCE:
+		return {}
+	return hit
 
 
 # --- Brush marker ------------------------------------------------------------

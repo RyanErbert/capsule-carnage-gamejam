@@ -8,12 +8,14 @@
 // speaks out — so the client can't disagree about what the map looks like, and
 // the same seed always rebuilds the same world.
 //
-// Layer semantics (see Terrain/voxel_terrain.gd): layer 0 is the ground slab
-// (set = floor, cleared = a pit straight down to bedrock), 1..3 stack 8 m
-// slabs above it. A cell with 0 and 2 set but 1 CLEARED is a roofed corridor:
-// that's how tunnels are made.
+// Layer semantics (see Terrain/voxel_terrain.gd): layer 0 is the BASEMENT, a
+// slab below grade that is solid by default and carved out to make cellars and
+// canyon floors; layer 1 is the ground you walk on; 2..4 stack 8 m slabs above
+// it. A cell with 1 and 3 set but 2 CLEARED is a roofed corridor: that's how
+// tunnels are made.
 
-const LAYERS = 4;
+const LAYERS = 5;
+const GROUND = 1;   // index of the walkable default surface
 
 function words(w) { return Math.ceil(w / 32); }
 
@@ -83,12 +85,14 @@ function fbm(seed, w, h, cells, octaves) {
 }
 
 // Height bands. Quantizing continuous noise is what makes PLATEAUS: broad
-// terraces with abrupt shoulders, instead of one smooth dune field.
-const BANDS = [0.30, 0.58, 0.80];
+// terraces with abrupt shoulders, instead of one smooth dune field. Returns a
+// TOP LAYER INDEX, so GROUND is the floor of the range and the bands are
+// weighted to spend more of the map up on the higher terraces.
+const BANDS = [0.26, 0.52, 0.76];
 
 function heightAt(e) {
-  for (let i = 0; i < BANDS.length; i++) if (e < BANDS[i]) return i;
-  return 3;
+  for (let i = 0; i < BANDS.length; i++) if (e < BANDS[i]) return GROUND + i;
+  return GROUND + 3;
 }
 
 // A wandering corridor: hold a heading and turn slowly. With no `start` it
@@ -140,13 +144,12 @@ function generate(w, h, seed) {
       // winding curves. Near one, the standing ground drops away — these are
       // the valley floors the canyons will later cut down the middle of.
       const rift = Math.min(Math.abs(canyonA(r, c) - 0.5), Math.abs(canyonB(r, c) - 0.5));
-      if (rift < 0.06) top = 0;
+      if (rift < 0.06) top = GROUND;
       // Spires: rare, small, and they only grow out of ground that's already
       // standing, so they read as pillars rather than random floating teeth.
-      if (top >= 1 && spire(r, c) > 0.885) top = 3;
-      // The outer ring is the claim phase's shared safe ground and the seam
-      // the boundary bowl blends into: always plain, walkable floor.
-      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) top = 0;
+      if (top > GROUND && spire(r, c) > 0.875) top = LAYERS - 1;
+      // The map boundary is the seam the bowl blends into: always plain floor.
+      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) top = GROUND;
       tops[r * w + c] = top;
       for (let li = 0; li <= top; li++) setBit(layers, li, w, r, c);
     }
@@ -155,13 +158,15 @@ function generate(w, h, seed) {
   // Pass 2: canyons. A thresholded noise contour breaks up wherever the field
   // is steep, which gives potholes instead of chasms — so the actual cut is a
   // WALK. Continuous by construction, and it drops the floor out entirely.
+  // The floor of a canyon is the BASEMENT slab, so it's a ravine you can walk
+  // out of rather than a hole in the world.
   const canyons = 1 + Math.floor(Math.sqrt(w * h) / 34);
   for (let t = 0; t < canyons; t++) {
     for (const [r, c] of walk(rnd, w, h, (w + h) * 2)) {
       for (let dc = 0; dc <= 1; dc++) {
         const cc = Math.min(w - 2, c + dc);
-        tops[r * w + cc] = -1;
-        for (let li = 0; li < LAYERS; li++) clearBit(layers, li, w, r, cc);
+        tops[r * w + cc] = 0;
+        for (let li = GROUND; li < LAYERS; li++) clearBit(layers, li, w, r, cc);
       }
     }
   }
@@ -173,37 +178,54 @@ function generate(w, h, seed) {
   const mesas = [];
   for (let r = 1; r < h - 1; r++)
     for (let c = 1; c < w - 1; c++)
-      if (tops[r * w + c] >= 2) mesas.push([r, c]);
+      if (tops[r * w + c] >= GROUND + 1) mesas.push([r, c]);
   const tunnels = mesas.length ? 2 + Math.floor(Math.sqrt(w * h) / 26) : 0;
   for (let t = 0; t < tunnels; t++) {
     let best = null, bestScore = 0;
     for (let attempt = 0; attempt < 12; attempt++) {
       const path = walk(rnd, w, h, Math.round((w + h) * 0.6),
         mesas[Math.floor(rnd() * mesas.length)]);
-      const score = path.filter(([r, c]) => tops[r * w + c] >= 2).length;
+      const score = path.filter(([r, c]) => tops[r * w + c] >= GROUND + 1).length;
       if (score > bestScore) { bestScore = score; best = path; }
     }
     for (const [r, c] of (best || [])) {
       for (let dc = 0; dc <= 1; dc++) {
         const cc = Math.min(w - 2, c + dc);
-        if (tops[r * w + cc] >= 2) clearBit(layers, 1, w, r, cc);
+        if (tops[r * w + cc] >= GROUND + 1) clearBit(layers, GROUND, w, r, cc);
       }
     }
   }
 
-  // The outer ring stays plain walkable floor whatever the passes above did
-  // to it: it's the claim phase's shared safe ground and the seam the
-  // boundary bowl blends into.
+  // Pass 4: cellars. Hollow the basement out under standing ground so there's
+  // something below grade worth digging down into.
+  const cellars = 2 + Math.floor(Math.sqrt(w * h) / 30);
+  for (let t = 0; t < cellars; t++) {
+    const cr = 3 + Math.floor(rnd() * Math.max(1, h - 6));
+    const cc = 3 + Math.floor(rnd() * Math.max(1, w - 6));
+    const rad = 2 + Math.floor(rnd() * 3);
+    for (let dr = -rad; dr <= rad; dr++)
+      for (let dc = -rad; dc <= rad; dc++) {
+        const r = cr + dr, c = cc + dc;
+        if (r < 1 || c < 1 || r >= h - 1 || c >= w - 1) continue;
+        if (dr * dr + dc * dc > rad * rad) continue;
+        if (tops[r * w + c] < GROUND) continue;   // don't undercut a canyon
+        clearBit(layers, 0, w, r, c);
+      }
+  }
+
+  // The outer ring stays plain walkable floor whatever the passes above did to
+  // it: it's the seam the boundary bowl blends into.
   for (let r = 0; r < h; r++) {
     for (let c = 0; c < w; c++) {
       if (r !== 0 && c !== 0 && r !== h - 1 && c !== w - 1) continue;
       setBit(layers, 0, w, r, c);
-      for (let li = 1; li < LAYERS; li++) clearBit(layers, li, w, r, c);
-      tops[r * w + c] = 0;
+      setBit(layers, GROUND, w, r, c);
+      for (let li = GROUND + 1; li < LAYERS; li++) clearBit(layers, li, w, r, c);
+      tops[r * w + c] = GROUND;
     }
   }
 
   return { layers, seed };
 }
 
-module.exports = { generate, LAYERS };
+module.exports = { generate, LAYERS, GROUND };

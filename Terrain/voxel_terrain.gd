@@ -14,7 +14,7 @@ extends Node3D
 ## ConcavePolygonShape3D collider.
 
 const VOXEL := 2.0                 # meters per lattice step
-const NY := 20                     # cells along Y  (world 40 m: -12 .. +28)
+const NY := 24                     # cells along Y  (world 48 m: -20 .. +28)
 const ISO := 0.5
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
 
@@ -25,7 +25,7 @@ var PX_W := 32                     # painted pixels across X
 var PX_H := 32                     # painted pixels across Z
 var NX := 80                       # cells along X  (world 160 m incl. the bowl)
 var NZ := 80                       # cells along Z
-var ORIGIN := Vector3(-80.0, -12.0, -80.0)
+var ORIGIN := Vector3(-80.0, -20.0, -80.0)
 var FRAME_INNER_X := 78.0          # butts against the bowl's outer shelf
 var FRAME_INNER_Z := 78.0
 
@@ -37,10 +37,12 @@ var FRAME_INNER_Z := 78.0
 const MARGIN := 8
 const BRUSH_REACH := 3
 
-# Vertical layout: 8 m slabs (tall extrusion). Bedrock [-12,-8] is implicit
-# and uneditable; the 4 painted layers stack above it: ground [-8,0]
-# (default solid, erased = deep pit), main [0,8], +1 [8,16], +2 [16,24].
-# A flat ground surface meshes out at y ~= 1.0 (crossing + smoothing).
+# Vertical layout: 8 m slabs (tall extrusion). Bedrock [-20,-16] is implicit
+# and uneditable; the 5 painted layers stack above it: basement [-16,-8]
+# (default solid, erase it for cellars and canyon floors), ground [-8,0]
+# (default solid, erased = a drop into the basement), main [0,8], +1 [8,16],
+# +2 [16,24]. A flat ground surface meshes out at y ~= 1.0 (crossing +
+# smoothing), unchanged by the basement going in underneath it.
 const SLAB := 8.0
 
 # The world beyond the paintable region: a flat unmodifiable CIRCULAR plain
@@ -146,7 +148,7 @@ func configure(w: int, h: int) -> void:
 	NZ = h * 2 + 2 * MARGIN
 	var half_x := float(w * 2) + MARGIN * VOXEL
 	var half_z := float(h * 2) + MARGIN * VOXEL
-	ORIGIN = Vector3(-half_x, -12.0, -half_z)
+	ORIGIN = Vector3(-half_x, -20.0, -half_z)
 	FRAME_INNER_X = half_x - 2.0
 	FRAME_INNER_Z = half_z - 2.0
 	for key in _chunks:
@@ -181,7 +183,7 @@ func _d(x: int, y: int, z: int) -> float:
 ## Build the field from the editor's layer stack: `layers` is 4 flat Arrays
 ## of PX rows x (PX+31)/32 uint32 words (ground, main, +1, +2 — bottom to
 ## top), bit (31 - col&31) = filled pixel. Each pixel is a 4x4 m column
-## within its 8 m slab; bedrock fills [-12,-8] beneath everything regardless
+## within its 8 m slab; bedrock fills [-20,-16] beneath everything regardless
 ## of paint. What's painted is what you get, floating slabs included — SPIRE
 ## MODE in the painter fills the columns underneath at paint time instead
 ## (creative.gd), so the canvas never lies.
@@ -194,10 +196,10 @@ func build_from_layers(layers: Array) -> void:
 	# Bowl heights around the rim: per edge pixel, the topmost solid row
 	var bowl_top := _bowl_tops(eff)
 	for y in NY + 1:
-		# Lattice rows: 1-2 bedrock, then 4 rows per slab: 3-6 ground,
-		# 7-10 main, 11-14 (+1), 15-18 (+2); 19-20 stay air for the seal.
+		# Lattice rows: 1-2 bedrock, then 4 rows per slab: 3-6 basement,
+		# 7-10 ground, 11-14 main, 15-18 (+1), 19-22 (+2); 23-24 air for the seal.
 		var bedrock := y >= 1 and y <= 2
-		var li := ((y - 3) >> 2) if (y >= 3 and y <= 18) else -1
+		var li := ((y - 3) >> 2) if (y >= 3 and y <= 22) else -1
 		for z in NZ + 1:
 			var dz := maxi(MARGIN - z, z - (NZ - MARGIN))
 			var pz := clampi((z - MARGIN) / points_per_pixel, 0, PX_H - 1)
@@ -211,7 +213,7 @@ func build_from_layers(layers: Array) -> void:
 					if not solid and y >= 1:
 						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, PX_W - 1)
 						var top: int = bowl_top[pz * PX_W + px_e]
-						var band := roundi(lerpf(float(top), 6.0, clampf(d / float(MARGIN), 0.0, 1.0)))
+						var band := roundi(lerpf(float(top), 10.0, clampf(d / float(MARGIN), 0.0, 1.0)))
 						solid = y <= band
 				elif not solid and li >= 0 and li < eff.size():
 					var rows: Array = eff[li]
