@@ -24,6 +24,10 @@ const BOOST_MULT := 1.9
 const MAX_SPEED := 20.0
 const BOOST_SPEED := 33.0
 const LATERAL_GRIP := 1.5     # per-second lateral bleed — low = drifty
+# Slung a core under the nose (generators.gd, F): a 140 kg boulder on a hover
+# skirt. It still moves — that's the point of using a vehicle — but it wallows.
+const CARRY_THRUST := 0.4
+const CARRY_CAP := 0.42
 const DRAG := 0.5             # light overall drag; coasting carries
 const YAW_RATE := 3.4         # rad/s the nose chases the camera
 const NET_LERP := 10.0        # remote interpolation rate
@@ -69,6 +73,7 @@ var net_yaw := 0.0
 var net_quat := Quaternion.IDENTITY   # full orientation, used while wrecked
 
 var wrecked := false
+var carrying := false         # hauling a core on the nose rack (generators.gd)
 var crashed := false          # one-shot flag world_vehicles picks up
 var crash_vel := Vector3.ZERO # planar velocity the instant before the hit
 
@@ -237,7 +242,7 @@ func _drive(delta: float) -> void:
 	var right := global_transform.basis.x
 
 	var boosting := not typing and Input.is_action_pressed("sprint")
-	var thrust := THRUST * (BOOST_MULT if boosting else 1.0)
+	var thrust := THRUST * (BOOST_MULT if boosting else 1.0) * (CARRY_THRUST if carrying else 1.0)
 	velocity += fwd * (-input_dir.y) * thrust * delta
 	velocity += right * input_dir.x * STRAFE * delta
 
@@ -256,7 +261,7 @@ func _drive(delta: float) -> void:
 	lateral *= exp(-LATERAL_GRIP * delta)
 	hvel = fwd * f_speed + lateral
 	hvel *= exp(-DRAG * delta)
-	var cap := BOOST_SPEED if boosting else MAX_SPEED
+	var cap := (BOOST_SPEED if boosting else MAX_SPEED) * (CARRY_CAP if carrying else 1.0)
 	if hvel.length() > cap:
 		hvel = hvel.normalized() * cap
 	velocity.x = hvel.x

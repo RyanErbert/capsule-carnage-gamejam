@@ -8,7 +8,8 @@ signal inventory_changed(items: Array)
 
 const MAX_INVENTORY := 3
 # Ammo granted on pedestal pickup (web game.js:4050). Missing = 0 = single use.
-const PICKUP_AMMO := {"machinegun": 100, "rocket": 3, "bridge_gun": 3, "wall": 3, "ramp": 3, "platform": 3}
+const PICKUP_AMMO := {"machinegun": 100, "rocket": 3, "bridge_gun": 3, "wall": 3, "ramp": 3,
+	"platform": 3, "terragun": 100}
 const GRAPPLE_SPEED := 40.0
 const PLACE_RANGE := 10.0   # pads/mines must be placed within 10 u (web)
 const AIM_RANGE := 200.0
@@ -177,6 +178,8 @@ func use_item() -> void:
 			})
 			pending_teleporter = null
 			_shift_inventory()
+		"terragun":
+			pass   # polled, not clicked — TerraGun watches both buttons itself
 		"block", "wall", "ramp", "platform":
 			var builds := get_parent().get_node_or_null("BuildController")
 			if builds:

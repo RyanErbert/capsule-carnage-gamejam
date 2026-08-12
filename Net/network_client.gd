@@ -30,6 +30,7 @@ var paint_rows: Variant = null  # in-progress editor canvas, same layered shape
 var game_settings: Dictionary = {}  # server-authoritative global settings
 var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var spawn_zones: Dictionary = {}    # socket id -> [r, c] claimed in the editor
+var claim_state: Variant = null     # Xonix land-grab board, if one is running
 var socket_id := ""                 # our own id, so we know which zone is ours
 var _reconnect_timer := 0.0
 
@@ -158,6 +159,8 @@ func _handle_frame(frame: String) -> void:
 						socket_id = str(data.get("id", ""))
 				"spawnZones":
 					spawn_zones = data if data is Dictionary else {}
+				"claimState":
+					claim_state = data
 				"gameSettings":
 					game_settings = data if data is Dictionary else {}
 				"gameEnded":
@@ -167,6 +170,7 @@ func _handle_frame(frame: String) -> void:
 					paint_rows = null
 					spawn_points = []
 					spawn_zones = {}
+					claim_state = null
 				"currentSpawns":
 					spawn_points = data if data is Array else []
 				"spawnPlaced":

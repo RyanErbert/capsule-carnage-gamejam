@@ -25,6 +25,7 @@ const ITEM_COLORS := {
 	"grapple": "#44ff44", "launch_pad": "#44ff44", "boost_pad": "#44ff44", "teleporter": "#44ff44",
 	"machinegun": "#ff4444", "rocket": "#ff4444", "mines": "#ff4444", "crowbot": "#ff4444",
 	"block": "#ffff44", "wall": "#ffff44", "ramp": "#ffff44", "platform": "#ffff44", "bridge_gun": "#ffff44",
+	"terragun": "#ffff44",
 }
 
 ## Render deploy hook — kicks a server redeploy (used when the server is the
@@ -419,6 +420,11 @@ const ITEM_ICON_MASKS := {
 		"........", ".#....#.", ".#....#.", ".#....#.",
 		".######.", "...##...", "..####..", "........",
 	],
+	# Terraformer: a nozzle over a ground line pushed into a mound
+	"terragun": [
+		"..####..", "..####..", "...##...", "...##...",
+		"........", "...##...", "..####..", "########",
+	],
 }
 
 
@@ -539,7 +545,11 @@ func _refresh_inventory(items: Array) -> void:
 		icon.offset_bottom = -pad
 		holder.add_child(icon)
 		var ammo_text := ""
-		if bool(Net.game_settings.get("infiniteAmmo", false)):
+		if item == "terragun":
+			# Not ammo: a charge cell that buys itself back with your health,
+			# so infinite-ammo doesn't apply and the number always matters.
+			ammo_text = str(ammo)
+		elif bool(Net.game_settings.get("infiniteAmmo", false)):
 			ammo_text = "∞"
 		elif ammo > 0:
 			ammo_text = str(ammo)

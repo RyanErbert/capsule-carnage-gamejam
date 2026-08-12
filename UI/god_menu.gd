@@ -8,7 +8,7 @@ extends PanelContainer
 const GIVE_ITEMS := [
 	"grapple", "launch_pad", "boost_pad", "teleporter",
 	"machinegun", "rocket", "mines",
-	"block", "wall", "ramp", "platform", "bridge_gun",
+	"block", "wall", "ramp", "platform", "bridge_gun", "terragun",
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
 const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
@@ -52,8 +52,11 @@ var _selected: Dictionary = {}
 var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
-# Drone build mode (web: godmode build tools + the 9^3 grid-point cloud)
-const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
+# Drone build mode (web: godmode build tools + the 9^3 grid-point cloud).
+# "wfc" is the odd one out: it drops a whole wave-function-collapsed compound
+# rather than a single block, so its ghost is a footprint (Items/wfc.gd).
+const BUILD_TYPES := ["block", "wall", "ramp", "platform", "wfc"]
+const WfcTiles := preload("res://Items/wfc.gd")
 var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
 var _build_ghosts: Dictionary = {}
@@ -384,6 +387,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				"x": pos.x, "y": pos.y + (0.4 if vkind == "ratbot" else 1.6), "z": pos.z, "ry": 0.0,
 			})
 			_status.text = "%s  [E - %s]" % [VEHICLE_NAMES.get(vkind, vkind), "pilot" if vkind in ["crowbot", "ratbot"] else "mount"]
+		elif _tool == "build:wfc":
+			# Wave function collapse: the seed IS the building. Every client
+			# collapses the same tileset from it (Items/wfc.gd).
+			if not _build_target.is_empty():
+				Net.emit_event("placeBuild", {
+					"type": "wfc", "seed": randi(),
+					"x": _build_target["x"], "y": _build_target["y"] - 2.0,
+					"z": _build_target["z"], "ry": _build_target["ry"],
+				})
+				_status.text = "structure placed"
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -797,6 +810,13 @@ func _make_build_ghost(type: String) -> MeshInstance3D:
 			var wb := BoxMesh.new(); wb.size = Vector3(4, 4, 1); g.mesh = wb
 		"platform":
 			var pb := BoxMesh.new(); pb.size = Vector3(4, 1, 4); g.mesh = pb
+		"wfc":
+			# The collapsed structure is a whole compound, so the ghost is its
+			# FOOTPRINT — a slab you line up with the ground, not a block.
+			var fb := BoxMesh.new()
+			var side: float = preload("res://Items/builds.gd").WFC_SIZE * WfcTiles.CELL
+			fb.size = Vector3(side, 0.4, side)
+			g.mesh = fb
 		_:
 			var bb := BoxMesh.new(); bb.size = Vector3(4, 4, 4); g.mesh = bb
 	g.material_override = _ghost_mat
@@ -1016,7 +1036,7 @@ func _build_ui() -> void:
 		var color := Color("#44ff44")
 		if item in ["machinegun", "rocket", "mines"]:
 			color = Color("#ff4444")
-		elif item in ["block", "wall", "ramp", "platform", "bridge_gun"]:
+		elif item in ["block", "wall", "ramp", "platform", "bridge_gun", "terragun"]:
 			color = Color("#ffff44")
 		var b := _mk_button(item.replace("_", " "), color)
 		b.pressed.connect(func(): Net.emit_event("godmodeGive", item))

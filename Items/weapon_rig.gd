@@ -10,7 +10,7 @@ extends Node3D
 ## so everyone sees the same gun pointed the same way.
 
 const MOUNT := Vector3(0.34, -0.04, -0.42)   # right of, and ahead of, the body
-const HELD := ["machinegun", "rocket", "grapple", "bridge_gun"]
+const HELD := ["machinegun", "rocket", "grapple", "bridge_gun", "terragun"]
 const TURN := 16.0    # rad/s the rig chases a new aim direction
 const MODEL_SCALE := 0.62   # guns are modelled full size, worn at bear scale
 
@@ -73,6 +73,8 @@ static func build_model(kind: String) -> Node3D:
 			return _grapple_gun()
 		"bridge_gun":
 			return _bridge_gun()
+		"terragun":
+			return _terra_gun()
 		_:
 			return _machinegun()
 
@@ -176,6 +178,26 @@ static func _grapple_gun() -> Node3D:
 	_box(root, Vector3(0.025, 0.025, 0.14), Vector3(0, -0.03, -0.38), grip)
 	_box(root, Vector3(0.09, 0.09, 0.06), Vector3(0, 0.02, -0.06),
 		_glow(Color(0.25, 1.0, 0.4)))                                       # spool light
+	return root
+
+
+## Terraformer: a wide-mouthed earth shaper with a charge cell slung under it.
+## The flared nozzle is what tells it apart from the guns at bear scale.
+static func _terra_gun() -> Node3D:
+	var root := Node3D.new()
+	var steel := _steel()
+	var grip := _grip_mat()
+	_box(root, Vector3(0.13, 0.15, 0.34), Vector3(0, 0, 0), steel)          # body
+	_tube(root, 0.07, 0.26, Vector3(0, 0.01, -0.26), steel)                 # throat
+	_tube(root, 0.16, 0.1, Vector3(0, 0.01, -0.43), grip)                   # flared nozzle
+	_tube(root, 0.12, 0.03, Vector3(0, 0.01, -0.47),
+		_glow(Color(0.85, 0.65, 0.25)))                                     # emitter face
+	# Charge cell: the thing your health is going into
+	_tube(root, 0.07, 0.22, Vector3(0, -0.14, 0.06), grip).rotation = Vector3(0, 0, PI / 2.0)
+	_box(root, Vector3(0.16, 0.03, 0.03), Vector3(0, -0.14, -0.04),
+		_glow(Color(0.35, 1.0, 0.55)))                                      # charge bar
+	_box(root, Vector3(0.05, 0.14, 0.07), Vector3(0, -0.13, 0.13), grip, 0.25)  # grip
+	_box(root, Vector3(0.04, 0.09, 0.05), Vector3(0, 0.11, -0.1), grip)     # sight
 	return root
 
 

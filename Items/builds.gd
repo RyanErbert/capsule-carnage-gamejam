@@ -15,6 +15,11 @@ const CHANNEL_MAX_RELAX := 0.6
 const CHANNEL_RING_SPACING := 1.5
 const CHANNEL_MAX_RINGS := 260
 
+## WFC structures (Items/wfc.gd): the payload is just a seed, and every client
+## collapses the identical building from it. Nothing but the seed travels.
+const Wfc := preload("res://Items/wfc.gd")
+const WFC_SIZE := 7            # tiles per side (7 x 6 m = a 42 m footprint)
+
 var _builds: Dictionary = {}   # id -> StaticBody3D
 var _channels: Dictionary = {}  # id -> StaticBody3D
 
@@ -92,6 +97,13 @@ func _add_build(b: Dictionary) -> void:
 	if id == "" or _builds.has(id):
 		return
 	var type := str(b.get("type", "block"))
+	if type == "wfc":
+		var struct: StaticBody3D = Wfc.build(int(b.get("seed", 1)), WFC_SIZE)
+		struct.position = Vector3(b.get("x", 0.0), b.get("y", 0.0), b.get("z", 0.0))
+		struct.rotation.y = float(b.get("ry", 0.0))
+		add_child(struct)
+		_builds[id] = struct
+		return
 	var body := StaticBody3D.new()
 	body.set_meta("build_type", type)
 

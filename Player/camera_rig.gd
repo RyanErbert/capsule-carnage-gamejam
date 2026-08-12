@@ -55,7 +55,9 @@ func _physics_process(delta: float) -> void:
 		var rate := CAM_DRAG_SPEED * (1.0 + minf(1.0, diff / (PI / 2.0)) * CAM_TURN_BOOST) * delta
 		yaw = lerp_angle(yaw, target_yaw, minf(1.0, rate))
 
-	# Chain stretches when moving past walk speed (sprint/explosions)
+	# Chain stretches when moving past walk speed (sprint/explosions).
+	# The resting length is the local player's zoom slider (Esc gear).
+	base_chain_length = Settings.camera_zoom
 	var chain := clampf(base_chain_length + maxf(0.0, h_speed - 9.0) * CHAIN_SPEED_STRETCH, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
 	if spring_arm:
 		spring_arm.spring_length = chain

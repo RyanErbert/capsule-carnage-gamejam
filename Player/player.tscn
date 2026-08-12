@@ -8,6 +8,7 @@
 [ext_resource type="PackedScene" path="res://Player/roundcube_visual.tscn" id="5_cube"]
 [ext_resource type="Script" path="res://Items/item_controller.gd" id="6_items"]
 [ext_resource type="Script" path="res://Items/build_controller.gd" id="7_build"]
+[ext_resource type="Script" path="res://Items/terra_gun.gd" id="8_terra"]
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_cxbfv"]
 
@@ -63,6 +64,9 @@ script = ExtResource("6_items")
 
 [node name="BuildController" type="Node" parent="."]
 script = ExtResource("7_build")
+
+[node name="TerraGun" type="Node" parent="."]
+script = ExtResource("8_terra")
 
 [node name="CameraRig" type="Node3D" parent="." unique_id=1702733511 node_paths=PackedStringArray("spring_arm")]
 script = ExtResource("4_camrig")

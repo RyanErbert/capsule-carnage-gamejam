@@ -4,24 +4,29 @@ extends Node3D
 ## when you stand near one (the heal itself is server-side). Press E next to
 ## one to tie a rope and drag it (it slows you down a lot); E again drops it.
 ##
+## In a vehicle it's F, and it isn't a rope at all: the core is racked on the
+## nose and CARRIED. No tumbling boulder to fight, but a loaded hull crawls
+## (vehicle.gd CARRY_THRUST / CARRY_CAP).
+##
 ## Sync mirrors the vehicle pattern: the holder's client simulates the drag
 ## and relays generatorMoved ~10 Hz; everyone else interpolates. The rope is
 ## drawn on every client between the holder and the generator.
 
 const GRAB_RANGE := 3.5
-const TOW_RANGE := 6.0        # a vehicle can hitch from a little further out
+const TOW_RANGE := 6.0        # a vehicle can scoop one up from further out
 const ROPE_LEN := 3.0
 const ROPE_SNAP := 12.0       # overstretched: the rope lets go
 const GEN_MASS := 140.0       # a big core is a boulder: hauling it is a chore
 const MINI_MASS := 6.0        # corpse drops are luggable
 # A person on a rope can only pull so hard, no matter what's on the other end,
-# so a big core barely budges on foot. A vehicle has engine to spare: its
-# tension scales with the load, giving the same acceleration whatever the mass.
+# so a big core barely budges on foot. A vehicle doesn't pull at all — it
+# picks the thing up (see _drag_step) and pays for it in speed.
 const HAND_TENSION := 900.0   # newtons-ish, FLAT (not scaled by mass)
-const TOW_ACCEL := 30.0       # vehicle tow: acceleration, x mass below
 const PLAYER_PULL := 0.55     # ...times mass: the big one really fights back
 const SETTLE_TIME := 1.4      # after release it keeps tumbling before freezing
 const RELAY_INTERVAL := 0.1
+const CARRY_MOUNT := Vector3(0.0, -0.15, -2.5)   # rack point in vehicle space
+const CARRY_SNAP := 14.0      # how fast the core seats itself on the rack
 const NET_LERP := 8.0
 const HEAL_RANGE := 4.5  # matches the server's GEN_HEAL_RANGE ring
 const LABEL_RANGE := 8.0 # energy readout only shows when you're right on it
@@ -33,6 +38,10 @@ const HumStream := preload("res://Audio/generator_hum.ogg")
 
 var _gens: Dictionary = {}    # id -> {node, holder, net_pos}
 var _held_id := ""            # generator I am dragging
+var _carrying := false        # ...on a vehicle rack rather than a rope
+var _carry_veh: Node3D        # the hull currently loaded, so we can unload it
+var _gen_layer := 1           # collision bits, stashed while a core is racked
+var _gen_mask := 1
 var _settle_id := ""          # just dropped: still tumbling under physics
 var _settle_t := 0.0
 var _relay_cd := 0.0
@@ -121,6 +130,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 				var holder_id := str(holder) if holder is String else ""
 				if _gens.has(id):
 					_gens[id]["holder"] = holder_id
+					_gens[id]["carry"] = bool(data.get("carry", false))
 				# Someone else won the grab race: let go locally.
 				if _held_id == id and holder_id != _self_id():
 					_drop_held(false)
@@ -157,6 +167,7 @@ func _add_gen(g: Variant) -> void:
 	_gens[id] = {
 		"node": node,
 		"holder": str(holder) if holder is String else "",
+		"carry": bool(g.get("carry", false)),
 		"net_pos": pos,
 		"label": lbl,
 		"ring": node.get_node("HealRing"),
@@ -184,8 +195,8 @@ func nearest_deletable(pos: Vector3, radius := 4.0) -> Dictionary:
 
 # --- E interaction ----------------------------------------------------------
 
-## E hauls a core on foot. In a vehicle E is the dismount, so the tow hitch
-## is F — attach with a core in range, press again to drop it.
+## E hauls a core on foot. In a vehicle E is the dismount, so the pickup
+## is F — rack a core in range, press again to drop it.
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo) \
 			or get_viewport().gui_get_focus_owner() != null \
@@ -222,9 +233,42 @@ func _grab(id: String) -> void:
 	var body: RigidBody3D = _gens[id]["node"]
 	body.freeze = false
 	body.sleeping = false
-	player.dragging_generator = true
-	Net.emit_event("grabGenerator", id)
+	_set_carry(player.vehicle != null)
+	Net.emit_event("grabGenerator", {"id": id, "carry": _carrying})
 	Sfx.boost(body.global_position, 0.4)
+
+
+## Racked on a vehicle vs roped to a body. The mode can flip mid-hold (you
+## dismount while loaded), so it's derived from where you are, told to the
+## server for everyone else's rope drawing, and it drives both slowdowns.
+func _set_carry(on: bool) -> void:
+	if _held_id == "" or not _gens.has(_held_id):
+		return
+	_carrying = on
+	_gens[_held_id]["carry"] = on
+	if player:
+		player.dragging_generator = not on
+	# The loaded flag belongs to the hull we picked it up with, not to whatever
+	# we happen to be sitting in now — bailing out has to unload the one we left.
+	if is_instance_valid(_carry_veh):
+		_carry_veh.carrying = false
+	_carry_veh = player.vehicle if on and player else null
+	if is_instance_valid(_carry_veh):
+		_carry_veh.carrying = true
+	var body: RigidBody3D = _gens[_held_id]["node"]
+	# Racked: the mount owns its position, so physics stops fighting for it —
+	# and it stops colliding, or the hull would ram its own cargo.
+	body.freeze = on
+	if on:
+		if body.collision_layer != 0:
+			_gen_layer = body.collision_layer
+			_gen_mask = body.collision_mask
+		body.collision_layer = 0
+		body.collision_mask = 0
+	else:
+		body.collision_layer = _gen_layer
+		body.collision_mask = _gen_mask
+		body.sleeping = false
 
 
 ## Dropping doesn't stop it dead: it keeps tumbling for SETTLE_TIME (still
@@ -232,6 +276,9 @@ func _grab(id: String) -> void:
 func _drop_held(tell_server: bool) -> void:
 	if _held_id == "":
 		return
+	# Hands the core its physics and collision back (a racked one had neither)
+	# before anything else lets go of it.
+	_set_carry(false)
 	var id := _held_id
 	_held_id = ""
 	if player:
@@ -304,14 +351,28 @@ func _physics_process(delta: float) -> void:
 			})
 
 
-## The drag is FULL physics: the core is a heavy rigid body that tumbles and
-## rolls; the rope only pulls when taut, and the same tension yanks the HAULER
-## back. On foot the pull is a flat force, so a 140 kg core barely creeps —
-## hitch it to a vehicle and the tension scales with the load instead.
-## Overstretch the rope and it snaps.
+## On foot the drag is FULL physics: the core is a heavy rigid body that
+## tumbles and rolls; the rope only pulls when taut, the same tension yanks
+## the hauler back, and because the pull is a FLAT force a 140 kg core barely
+## creeps. Overstretch it and the rope snaps.
+##
+## In a vehicle there's no rope: the core rides a rack on the nose. It seats
+## itself over a few frames instead of teleporting, so picking one up looks
+## like scooping it rather than gluing it on.
 func _drag_step(body: RigidBody3D, delta: float) -> void:
 	var towing: bool = player.vehicle != null and is_instance_valid(player.vehicle)
-	var anchor: Node3D = player.vehicle if towing else player
+	if towing != _carrying:
+		# Mounted or bailed out while loaded: switch modes and re-tell the server
+		# so remote clients stop (or start) drawing a rope to us.
+		_set_carry(towing)
+		Net.emit_event("grabGenerator", {"id": _held_id, "carry": _carrying})
+	if towing:
+		var veh: Node3D = player.vehicle
+		var rack := veh.global_transform * CARRY_MOUNT
+		body.global_position = body.global_position.lerp(rack, 1.0 - exp(-CARRY_SNAP * delta))
+		body.linear_velocity = Vector3.ZERO
+		return
+	var anchor: Node3D = player
 	var to_anchor := anchor.global_position - body.global_position
 	var dist := to_anchor.length()
 	if dist > ROPE_SNAP:
@@ -320,12 +381,8 @@ func _drag_step(body: RigidBody3D, delta: float) -> void:
 	var stretch := clampf(dist - ROPE_LEN, 0.0, 6.0)
 	if stretch > 0.0 and dist > 0.01:
 		var dir := to_anchor / dist
-		if towing:
-			body.apply_central_force(dir * stretch * TOW_ACCEL * body.mass)
-			player.vehicle.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta * 0.15
-		else:
-			body.apply_central_force(dir * stretch * HAND_TENSION)
-			player.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta
+		body.apply_central_force(dir * stretch * HAND_TENSION)
+		player.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta
 	# Buried cores get dug out, and terrain keeps moving under them: anything
 	# that ends up inside solid rock is pushed up until it's free again.
 	var terrain: Node = get_tree().get_first_node_in_group("voxel_terrain")
@@ -385,7 +442,7 @@ func _update_prompt() -> void:
 		var node: Node3D = g["node"]
 		if node.global_position.distance_to(anchor.global_position) > (TOW_RANGE if towing else GRAB_RANGE):
 			continue
-		# On foot you have to be looking at it; a hitch just needs proximity
+		# On foot you have to be looking at it; a scoop just needs proximity
 		if cam and not towing:
 			var to_gen: Vector3 = (node.global_position - cam.global_position).normalized()
 			if to_gen.dot(-cam.global_transform.basis.z) < 0.5:
@@ -394,7 +451,7 @@ func _update_prompt() -> void:
 		break
 	_prompt.visible = near
 	if near:
-		_prompt_suffix.text = "tow" if towing else "drag"
+		_prompt_suffix.text = "carry" if towing else "drag"
 
 
 ## Rope lines between every held generator and its holder (self or remote).
@@ -403,7 +460,8 @@ func _draw_ropes() -> void:
 	var any := false
 	for id in _gens:
 		var g: Dictionary = _gens[id]
-		if g["holder"] == "":
+		# A racked core has no rope to draw — it's sitting on the vehicle.
+		if g["holder"] == "" or g.get("carry", false):
 			continue
 		var holder_pos: Vector3
 		if g["holder"] == _self_id():

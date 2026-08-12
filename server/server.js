@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
+const mapgen = require('./mapgen');
 
 const app = express();
 const server = http.createServer(app);
@@ -277,6 +278,7 @@ const DEATH_LINES = {
   machinegun: '%s was turned into swiss cheese',
   turret: '%s was turned by a sentry',
   drill: '%s got screwed',
+  terra: '%s dug their own grave',
   ghost: '%s headbutted a ghost',
   blast: '%s exploded'
 };
@@ -560,7 +562,7 @@ const pedestals = [];
 const ITEMS_BY_CATEGORY = {
   green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
   red: ['machinegun', 'rocket', 'mines', 'crowbot'],
-  yellow: ['block', 'wall', 'ramp', 'platform', 'bridge_gun']
+  yellow: ['block', 'wall', 'ramp', 'platform', 'bridge_gun', 'terragun']
 };
 
 setInterval(() => {
@@ -675,6 +677,8 @@ function endGame() {
   creativeLayers = null;
   paintLayers = null;
   editors.clear();
+  stopClaim();
+  io.emit('claimState', null);
   for (const id of Object.keys(spawnZones)) delete spawnZones[id];
   io.emit('spawnZones', spawnZones);
   io.emit('editVote', null);   // legacy clients still hide their vote bar on this
@@ -739,9 +743,365 @@ function applyEditVote(kind) {
   }
   creativeLayers = paintLayers || defaultLayers();
   terrainEdits = [];
+  stopClaim();
   io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
   autoPopulatePedestals();
   autoPlaceGenerator();
+}
+
+// =========================================================================
+// CLAIM PHASE (Xonix)
+// =========================================================================
+// The map creator opens on a seeded world (mapgen.js), not a blank plain, and
+// who gets to EDIT which part of it is decided by a game of Xonix. Everyone
+// starts on the outer ring, walks out leaving a trail, and closing a loop back
+// onto safe ground hands them everything they enclosed. When the clock runs
+// out the unclaimed ground fogs over: from then on you only see and sculpt
+// your own territory, until the edit timer expires or someone starts the game.
+//
+// Server-authoritative down to the cell: cursors move on the server's tick and
+// clients only send a direction, so nobody's map can drift from anyone else's.
+
+const EDGE = -2;                // shared safe ground: the outer ring
+const FREE = -1;                // nobody's yet
+const CLAIM_TICK_MS = 110;      // one pixel of cursor travel per tick
+const EDIT_MS = 3 * 60 * 1000;  // sculpting time once the land is divided
+const GIFT_R = 3;               // radius of the consolation region, in pixels
+
+let claim = null;
+let claimTimer = null;
+
+// Big maps take longer to cross, so they get longer — but sub-linearly, or a
+// 96x96 claim would outlast everyone's patience.
+function claimMs(w, h) {
+  return Math.round((20 + Math.sqrt(w * h) * 1.2) * 1000);
+}
+
+function claimIdx(r, c) { return r * claim.w + c; }
+
+// One char per cell, '0' = edge, '1' = unclaimed, '2'+ = player index. A 96x96
+// board is 9 KB of plain text instead of a 25 KB array of numbers.
+function claimBoard() {
+  let s = '';
+  for (let i = 0; i < claim.owner.length; i++) s += String.fromCharCode(50 + claim.owner[i]);
+  return s;
+}
+
+function claimSnapshot() {
+  if (!claim) return null;
+  return {
+    phase: claim.phase,
+    gs: [claim.w, claim.h],
+    ids: claim.ids,
+    own: claimBoard(),
+    pos: claim.ids.map(id => claim.pos[id] || [0, 0]),
+    trail: claimTrail(),
+    // Milliseconds remaining, not a wall-clock deadline: client clocks drift.
+    t: Math.max(0, claim.endsAt - Date.now())
+  };
+}
+
+// Every live trail cell as flat [idx, playerIndex, ...] pairs.
+function claimTrail() {
+  const out = [];
+  for (let i = 0; i < claim.trail.length; i++)
+    if (claim.trail[i] >= 0) out.push(i, claim.trail[i]);
+  return out;
+}
+
+function startClaim() {
+  stopClaim();
+  const w = gridW(), h = gridH();
+  const seed = (Math.random() * 0xffffffff) >>> 0;
+  const world = mapgen.generate(w, h, seed);
+  paintLayers = world.layers;
+  const owner = new Int8Array(w * h).fill(FREE);
+  for (let r = 0; r < h; r++)
+    for (let c = 0; c < w; c++)
+      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) owner[r * w + c] = EDGE;
+  claim = {
+    phase: 'claim', w, h, seed, owner,
+    trail: new Int8Array(w * h).fill(-1),
+    ids: [], pos: {}, dir: {},
+    endsAt: Date.now() + claimMs(w, h)
+  };
+  for (const id of editors) joinClaim(id);
+  // Any zone claimed before the grab started belongs to the old map. Spawns
+  // are placed by endClaim, inside the ground people actually won.
+  for (const id of Object.keys(spawnZones)) delete spawnZones[id];
+  io.emit('spawnZones', spawnZones);
+  io.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
+  io.emit('claimState', claimSnapshot());
+  claimTimer = setInterval(claimTick, CLAIM_TICK_MS);
+}
+
+function stopClaim() {
+  if (claimTimer) { clearInterval(claimTimer); claimTimer = null; }
+  if (claim) io.emit('claimState', null);   // clients drop the board and the fog
+  claim = null;
+}
+
+// Latecomers get a cursor too: dropped on the emptiest stretch of the ring so
+// they aren't born on top of someone else.
+function joinClaim(id) {
+  if (!claim || claim.ids.includes(id)) return;
+  claim.ids.push(id);
+  const ring = [];
+  for (let c = 0; c < claim.w; c++) ring.push([0, c], [claim.h - 1, c]);
+  for (let r = 1; r < claim.h - 1; r++) ring.push([r, 0], [r, claim.w - 1]);
+  let best = ring[0], bestD = -1;
+  for (const cell of ring) {
+    let d = 1e9;
+    for (const other of claim.ids) {
+      const p = claim.pos[other];
+      if (p) d = Math.min(d, Math.abs(p[0] - cell[0]) + Math.abs(p[1] - cell[1]));
+    }
+    if (d > bestD) { bestD = d; best = cell; }
+  }
+  claim.pos[id] = best;
+  claim.dir[id] = [0, 0];
+}
+
+function leaveClaim(id) {
+  if (!claim) return;
+  const pi = claim.ids.indexOf(id);
+  if (pi === -1) return;
+  wipeTrail(pi);
+  delete claim.pos[id];
+  delete claim.dir[id];
+  // Their index has to stay put — the owner grid stores it in every cell they
+  // took — so the slot is blanked rather than spliced out.
+  claim.ids[pi] = '';
+}
+
+function wipeTrail(pi) {
+  for (let i = 0; i < claim.trail.length; i++) if (claim.trail[i] === pi) claim.trail[i] = -1;
+}
+
+// Cut down: trail gone, and back to the nearest ground that's safe for them.
+function resetCursor(pi) {
+  const id = claim.ids[pi];
+  if (!id) return;
+  wipeTrail(pi);
+  const [pr, pc] = claim.pos[id] || [0, 0];
+  let best = null, bestD = 1e9;
+  for (let r = 0; r < claim.h; r++) {
+    for (let c = 0; c < claim.w; c++) {
+      const o = claim.owner[r * claim.w + c];
+      if (o !== pi && o !== EDGE) continue;
+      const d = Math.abs(r - pr) + Math.abs(c - pc);
+      if (d < bestD) { bestD = d; best = [r, c]; }
+    }
+  }
+  if (best) claim.pos[id] = best;
+  claim.dir[id] = [0, 0];
+}
+
+// A loop closed: the trail itself becomes land, then every pocket of unclaimed
+// ground it sealed off falls in with it. "Sealed off" means no rival cursor is
+// standing in it — the original Xonix rule, which is also what stops a single
+// line across the map from handing over the whole board.
+function closeLoop(pi) {
+  const { w, h, owner, trail } = claim;
+  let took = 0;
+  for (let i = 0; i < trail.length; i++) {
+    if (trail[i] !== pi) continue;
+    trail[i] = -1;
+    owner[i] = pi;
+    took++;
+  }
+  if (!took) return 0;
+
+  const cursors = new Set();
+  for (let oi = 0; oi < claim.ids.length; oi++) {
+    if (oi === pi || !claim.ids[oi]) continue;
+    const p = claim.pos[claim.ids[oi]];
+    if (p) cursors.add(p[0] * w + p[1]);
+  }
+
+  const seen = new Uint8Array(w * h);
+  const regions = [];
+  for (let start = 0; start < owner.length; start++) {
+    if (owner[start] !== FREE || seen[start]) continue;
+    const cells = [start];
+    seen[start] = 1;
+    let occupied = false;
+    for (let qi = 0; qi < cells.length; qi++) {
+      const i = cells[qi];
+      if (cursors.has(i)) occupied = true;
+      const r = (i / w) | 0, c = i % w;
+      if (r > 0) pushFree(cells, seen, i - w);
+      if (r < h - 1) pushFree(cells, seen, i + w);
+      if (c > 0) pushFree(cells, seen, i - 1);
+      if (c < w - 1) pushFree(cells, seen, i + 1);
+    }
+    regions.push({ cells, occupied });
+  }
+
+  const open = regions.filter(g => !g.occupied);
+  // Nobody to hem in (a solo run, or everyone's on claimed ground): the
+  // biggest pocket is "outside" the loop and stays free, the rest is inside.
+  if (open.length === regions.length && regions.length > 1) {
+    let biggest = 0;
+    for (let i = 1; i < regions.length; i++)
+      if (regions[i].cells.length > regions[biggest].cells.length) biggest = i;
+    open.splice(open.indexOf(regions[biggest]), 1);
+  } else if (open.length === regions.length) {
+    return took;   // one pocket, nothing enclosed
+  }
+  for (const g of open) {
+    for (const i of g.cells) owner[i] = pi;
+    took += g.cells.length;
+  }
+  return took;
+}
+
+function pushFree(cells, seen, i) {
+  if (seen[i] || claim.owner[i] !== FREE) return;
+  seen[i] = 1;
+  cells.push(i);
+}
+
+function claimTick() {
+  if (!claim || claim.phase !== 'claim') return;
+  if (Date.now() >= claim.endsAt) { endClaim(); return; }
+  const adds = [];
+  const wipes = [];
+  let filled = false;
+  for (let pi = 0; pi < claim.ids.length; pi++) {
+    const id = claim.ids[pi];
+    if (!id) continue;
+    const [dr, dc] = claim.dir[id] || [0, 0];
+    if (!dr && !dc) continue;
+    const [r, c] = claim.pos[id];
+    const nr = r + dr, nc = c + dc;
+    if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) { claim.dir[id] = [0, 0]; continue; }
+    const ni = nr * claim.w + nc;
+    const hit = claim.trail[ni];
+    if (hit >= 0) {
+      // Trails are fragile: clip one and its owner loses the lot, whether it
+      // was theirs or yours. Running into your own is how you lose a run.
+      resetCursor(hit);
+      wipes.push(hit);
+      if (hit === pi) continue;
+    }
+    claim.pos[id] = [nr, nc];
+    const o = claim.owner[ni];
+    if (o === pi || o === EDGE) {
+      if (closeLoop(pi) > 0) filled = true;
+    } else if (o === FREE) {
+      claim.trail[ni] = pi;
+      adds.push(ni, pi);
+    }
+    // Anyone else's land is a neutral crossing: no trail, and it won't close.
+  }
+  if (filled) {
+    io.emit('claimState', claimSnapshot());
+    return;
+  }
+  io.emit('claimTick', {
+    t: Math.max(0, claim.endsAt - Date.now()),
+    pos: claim.ids.map(id => (id && claim.pos[id]) || [0, 0]),
+    add: adds,
+    wipe: wipes
+  });
+}
+
+// Clock's up. Anyone shut out gets a plot anyway, spawns drop inside the
+// territory people actually won, and the sculpting timer starts.
+function endClaim() {
+  if (!claim) return;
+  claim.phase = 'edit';
+  for (let i = 0; i < claim.trail.length; i++) claim.trail[i] = -1;
+  for (let pi = 0; pi < claim.ids.length; pi++) if (claim.ids[pi]) giftIfLandless(pi);
+  claim.endsAt = Date.now() + EDIT_MS;
+  for (const id of claim.ids) if (id) claimSpawnFor(id);
+  io.emit('spawnZones', spawnZones);
+  io.emit('claimState', claimSnapshot());
+  sysMsg('Land divided. Sculpt your own ground, then start the game.');
+  clearInterval(claimTimer);
+  claimTimer = setInterval(() => {
+    if (!claim || claim.phase !== 'edit') return;
+    if (Date.now() >= claim.endsAt) applyEditVote('generate');
+  }, 1000);
+}
+
+// "If a player has no tiles, a small circular region is gifted to them."
+function giftIfLandless(pi) {
+  const { w, h, owner } = claim;
+  if (owner.includes(pi)) return;
+  let best = null, bestScore = -1;
+  for (let tries = 0; tries < 400; tries++) {
+    const r = GIFT_R + 1 + Math.floor(Math.random() * Math.max(1, h - GIFT_R * 2 - 2));
+    const c = GIFT_R + 1 + Math.floor(Math.random() * Math.max(1, w - GIFT_R * 2 - 2));
+    let free = 0;
+    for (let dr = -GIFT_R; dr <= GIFT_R; dr++)
+      for (let dc = -GIFT_R; dc <= GIFT_R; dc++)
+        if (dr * dr + dc * dc <= GIFT_R * GIFT_R && owner[(r + dr) * w + (c + dc)] === FREE) free++;
+    if (free > bestScore) { bestScore = free; best = [r, c]; }
+    if (bestScore >= (GIFT_R * 2 + 1) ** 2 * 0.7) break;
+  }
+  if (!best) return;
+  for (let dr = -GIFT_R; dr <= GIFT_R; dr++)
+    for (let dc = -GIFT_R; dc <= GIFT_R; dc++)
+      if (dr * dr + dc * dc <= GIFT_R * GIFT_R) owner[(best[0] + dr) * w + (best[1] + dc)] = pi;
+}
+
+// A spawn inside your own land, as deep into it as the shape allows. Every
+// owned pixel is scored rather than sampled: a gifted plot is only ~37 cells,
+// and random probing missed it often enough to leave people spawn-less.
+function claimSpawnFor(id) {
+  const pi = claim.ids.indexOf(id);
+  if (pi < 0 || spawnZones[id]) return;
+  let best = null, bestScore = -1;
+  for (let r = 3; r < claim.h - 3; r++) {
+    for (let c = 3; c < claim.w - 3; c++) {
+      if (claim.owner[r * claim.w + c] !== pi || !zoneFree(r, c, id)) continue;
+      // Prefer a pixel whose whole 5x5 deadzone block is on home ground
+      let own = 0;
+      for (let dr = -2; dr <= 2; dr++)
+        for (let dc = -2; dc <= 2; dc++)
+          if (claim.owner[(r + dr) * claim.w + (c + dc)] === pi) own++;
+      if (own > bestScore) { bestScore = own; best = [r, c]; }
+    }
+  }
+  if (!best) return;
+  spawnZones[id] = best;
+  clearZoneColumn(best[0], best[1]);
+}
+
+// Who owns the pixel a given socket wants to sculpt. Before the clock runs out
+// everything is still communal; after it, you're confined to your own ground.
+function mayEdit(id, r, c) {
+  if (!claim || claim.phase !== 'edit') return true;
+  const pi = claim.ids.indexOf(id);
+  return pi >= 0 && claim.owner[r * claim.w + c] === pi;
+}
+
+// Clients send the whole canvas per stroke burst, so the guard is a diff:
+// changes on your own ground go through, changes anywhere else are reverted to
+// what the server already had. No kick, no error - the brush just does nothing.
+// Returns null while the land grab itself is running: nobody sculpts then.
+function mergePaint(id, incoming) {
+  if (claim && claim.phase === 'claim') return null;
+  if (!claim || !paintLayers) return incoming;
+  const w = gridW(), words = gridWords();
+  const out = incoming.map(rows => rows.slice());
+  let reverted = false;
+  for (let r = 0; r < gridH(); r++) {
+    for (let c = 0; c < w; c++) {
+      if (mayEdit(id, r, c)) continue;
+      const i = r * words + (c >> 5);
+      const bit = 1 << (31 - (c & 31));
+      for (let li = 0; li < 4; li++) {
+        const keep = ((out[li][i] & ~bit) | (paintLayers[li][i] & bit)) >>> 0;
+        if (keep !== out[li][i]) { out[li][i] = keep; reverted = true; }
+      }
+    }
+  }
+  // Identity when the stroke was legal: the caller uses that to skip echoing
+  // the canvas back at the painter mid-stroke, which would eat their input.
+  return reverted ? out : incoming;
 }
 
 // --- World items state ---
@@ -822,14 +1182,25 @@ io.on('connection', (socket) => {
     socket.emit('terrainEdits', terrainEdits);
   }
   if (paintLayers) socket.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
+  if (claim) socket.emit('claimState', claimSnapshot());
   socket.emit('spawnZones', spawnZones);
   socket.emit('hello', { id: socket.id });
   socket.emit('gameSettings', gameSettings);
   socket.emit('currentSpawns', spawnPoints);
 
   socket.on('editing', (on) => {
-    if (on) { editors.add(socket.id); autoClaimZone(socket.id); }
-    else editors.delete(socket.id);
+    if (!on) { editors.delete(socket.id); return; }
+    editors.add(socket.id);
+    if (!claim) { autoClaimZone(socket.id); return; }
+    // A claim is running: a latecomer gets a cursor if the land grab is still
+    // on, or a gifted plot and a spawn in it if the map is already divided.
+    joinClaim(socket.id);
+    if (claim.phase === 'edit') {
+      giftIfLandless(claim.ids.indexOf(socket.id));
+      claimSpawnFor(socket.id);
+      io.emit('spawnZones', spawnZones);
+    }
+    io.emit('claimState', claimSnapshot());
   });
 
   // Lobby START: everyone in the lobby sees the same 5 s countdown, then all
@@ -845,7 +1216,19 @@ io.on('connection', (socket) => {
     startTimer = setTimeout(() => {
       startTimer = null;
       io.emit('enterEditor');
+      // Everyone is in the creator now: roll the world and open the land grab.
+      // A beat of slack so clients have the editor up before cursors move.
+      setTimeout(startClaim, 400);
     }, START_COUNTDOWN_MS);
+  });
+
+  // Xonix cursor steering: the client only ever says which way it's holding.
+  socket.on('claimDir', (d) => {
+    if (!claim || claim.phase !== 'claim' || !claim.dir[socket.id]) return;
+    const dr = Math.sign(Number(d && d.dr) || 0);
+    const dc = Math.sign(Number(d && d.dc) || 0);
+    // One axis at a time — diagonal trails can't enclose anything.
+    claim.dir[socket.id] = dc !== 0 && dr !== 0 ? [0, dc] : [dr, dc];
   });
 
   // Live painter cursors: relay-only, so co-painters see where you're hovering.
@@ -884,6 +1267,10 @@ io.on('connection', (socket) => {
       const w = Number(v[0]), h = Number(v[1]);
       if (!GRID_OPTIONS.some(o => o[0] === w && o[1] === h)) return;
       if (w === gameSettings.gridW && h === gameSettings.gridH) return;
+      if (claim) {
+        socket.emit('systemMessage', { text: 'The map size is set for this round.' });
+        return;
+      }
       gameSettings.gridW = w;
       gameSettings.gridH = h;
       // The canvas is meaningless at a different size: start fresh
@@ -1159,6 +1546,10 @@ io.on('connection', (socket) => {
       socket.emit('systemMessage', { text: 'That overlaps another spawn zone.' });
       return;
     }
+    if (!mayEdit(socket.id, r, c)) {
+      socket.emit('systemMessage', { text: 'Your spawn has to sit on your own ground.' });
+      return;
+    }
     spawnZones[socket.id] = [r, c];
     clearZoneColumn(r, c);
     io.emit('spawnZones', spawnZones);
@@ -1173,8 +1564,13 @@ io.on('connection', (socket) => {
   socket.on('creativePaint', (g) => {
     const layers = normLayers(g);
     if (!layers) return;
-    paintLayers = layers;
-    socket.broadcast.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
+    const merged = mergePaint(socket.id, layers);
+    if (!merged) return;
+    paintLayers = merged;
+    // Off-territory strokes were reverted, so the sender needs the corrected
+    // canvas back too — otherwise their screen keeps a stroke nobody else has.
+    if (merged === layers) socket.broadcast.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
+    else io.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
   });
 
   socket.on('creativeGrid', (g) => {
@@ -1507,22 +1903,30 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('grabGenerator', (id) => {
+  // `carry` distinguishes a core racked on a vehicle from one roped to a
+  // player on foot: only the roped kind draws a tether on other clients. The
+  // holder re-sends this when they mount or bail out mid-haul. Older clients
+  // send a bare id string, which reads as the roped case.
+  socket.on('grabGenerator', (d) => {
+    const id = (d && typeof d === 'object') ? d.id : d;
+    const carry = !!(d && typeof d === 'object' && d.carry);
     const gen = activeGenerators.find(g => g.id === id);
     if (!gen) return;
     if (gen.holder && gen.holder !== socket.id && io.sockets.sockets.get(gen.holder)) {
-      socket.emit('generatorHolder', { id: gen.id, holder: gen.holder });
+      socket.emit('generatorHolder', { id: gen.id, holder: gen.holder, carry: !!gen.carry });
       return;
     }
     gen.holder = socket.id;
-    io.emit('generatorHolder', { id: gen.id, holder: gen.holder });
+    gen.carry = carry;
+    io.emit('generatorHolder', { id: gen.id, holder: gen.holder, carry });
   });
 
   socket.on('releaseGenerator', (id) => {
     const gen = activeGenerators.find(g => g.id === id);
     if (gen && gen.holder === socket.id) {
       gen.holder = null;
-      io.emit('generatorHolder', { id: gen.id, holder: null });
+      gen.carry = false;
+      io.emit('generatorHolder', { id: gen.id, holder: null, carry: false });
     }
   });
 
@@ -1642,11 +2046,13 @@ io.on('connection', (socket) => {
     for (const gen of activeGenerators) {
       if (gen.holder === socket.id) {
         gen.holder = null;
-        io.emit('generatorHolder', { id: gen.id, holder: null });
+        gen.carry = false;
+        io.emit('generatorHolder', { id: gen.id, holder: null, carry: false });
       }
     }
     delete deadUntil[socket.id];
     editors.delete(socket.id);
+    if (claim) { leaveClaim(socket.id); io.emit('claimState', claimSnapshot()); }
     if (spawnZones[socket.id]) { delete spawnZones[socket.id]; io.emit('spawnZones', spawnZones); }
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
     // Drop the player from any running vote and re-evaluate the tally.
