@@ -97,8 +97,11 @@ func _add_build(b: Dictionary) -> void:
 	if id == "" or _builds.has(id):
 		return
 	var type := str(b.get("type", "block"))
-	if type == "wfc":
-		var struct: StaticBody3D = Wfc.build(int(b.get("seed", 1)), WFC_SIZE)
+	if type == "wfc" or type == "wfcpart":
+		# A whole collapsed compound from its seed, or one module of the same
+		# tileset placed by hand off the drone.
+		var struct: StaticBody3D = Wfc.build_part(str(b.get("part", "deck"))) \
+			if type == "wfcpart" else Wfc.build(int(b.get("seed", 1)), WFC_SIZE)
 		struct.position = Vector3(b.get("x", 0.0), b.get("y", 0.0), b.get("z", 0.0))
 		struct.rotation.y = float(b.get("ry", 0.0))
 		add_child(struct)

@@ -390,6 +390,61 @@ static func build(seed_value: int, size: int) -> StaticBody3D:
 	return body
 
 
+# --- Single parts ------------------------------------------------------------
+# The same tileset, one piece at a time, for building by hand off the drone.
+# Every part is drawn around the origin with its walking surface at y = 0, so
+# whatever the placement grid hands us is where you stand.
+
+const PART_KINDS := ["deck", "edge", "corner", "cap", "stair", "mass", "rail", "pipe", "pad"]
+
+## Which faces of a deck get a railing, by part. Faces are N, E, S, W, and the
+## piece is placed unrotated — the build tool spins the whole node instead.
+const PART_RAILS := {"deck": [], "edge": [0], "corner": [0, 1], "cap": [0, 1, 3]}
+
+
+static func build_part(kind: String) -> StaticBody3D:
+	var mass := SurfaceTool.new()
+	var trim := SurfaceTool.new()
+	var pads := SurfaceTool.new()
+	mass.begin(Mesh.PRIMITIVE_TRIANGLES)
+	trim.begin(Mesh.PRIMITIVE_TRIANGLES)
+	pads.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tris := PackedVector3Array()
+	var at := Vector3.ZERO
+	match kind:
+		"stair":
+			_stair(mass, tris, at, 0.0, 0, F_ALL)
+		"mass":
+			_box(mass, tris, at + Vector3(0, (LEVEL - SKIRT) * 0.5, 0),
+				Vector3(CELL, LEVEL + SKIRT, CELL))
+		"rail":
+			_rail_seg(trim, tris, at, 0.0, 0)
+		"pipe":
+			_pipe(trim, tris, at, 0.0, 0)
+		"pad":
+			_pad(pads, at + Vector3(0, 0.03, 0))
+		_:
+			_box(mass, tris, at + Vector3(0, -SKIRT * 0.5, 0), Vector3(CELL, SKIRT, CELL))
+			for d in PART_RAILS.get(kind, []):
+				_rail_seg(trim, tris, at, 0.0, int(d))
+	var body := StaticBody3D.new()
+	body.set_meta("build_type", "wfcpart")
+	body.add_child(_surface(mass, _mat(Color(0.52, 0.54, 0.57), 0.25, 0.7)))
+	body.add_child(_surface(trim, _mat(Color(0.95, 0.72, 0.12), 0.35, 0.45)))
+	var pad_mat := _mat(Color(0.35, 0.95, 0.5), 0.0, 0.5)
+	pad_mat.emission_enabled = true
+	pad_mat.emission = Color(0.3, 1.0, 0.45)
+	pad_mat.emission_energy_multiplier = 1.4
+	body.add_child(_surface(pads, pad_mat))
+	if not tris.is_empty():
+		var col := CollisionShape3D.new()
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(tris)
+		col.shape = shape
+		body.add_child(col)
+	return body
+
+
 static func _mat(albedo: Color, metallic: float, roughness: float) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = albedo
@@ -436,7 +491,11 @@ static func _box(st: SurfaceTool, tris: PackedVector3Array, at: Vector3, size: V
 			continue
 		var face: Array = FACES[fi]
 		st.set_normal(FACE_N[fi])
-		for tri in [[0, 1, 2], [0, 2, 3]]:
+		# Godot renders CLOCKWISE-wound triangles as the front face, which is
+		# the opposite of the usual right-hand-rule convention these corner
+		# orders read as. Wound the other way every box was inside out: near
+		# faces culled, far interior faces lit, the whole compound hollow.
+		for tri in [[0, 2, 1], [0, 3, 2]]:
 			for k in tri:
 				st.add_vertex(v[face[k]])
 				tris.append(v[face[k]])

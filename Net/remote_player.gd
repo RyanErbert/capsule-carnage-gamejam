@@ -16,6 +16,8 @@ var is_godmode := false
 @onready var _name_label: Label3D = $NameLabel
 
 var _cube: Node3D = null  # roundcube visual for web-shaped players
+var _shell: Node3D = null # ...or the glass marble, for everyone else
+var _base_color := Color.WHITE
 var _rig: Node3D = null   # the weapon they're holding (Items/weapon_rig.gd)
 
 
@@ -33,9 +35,15 @@ func setup(id: String, data: Dictionary) -> void:
 		_cube.set_color(color)
 		_cube.set_smoothing(float(data.get("smoothing", 0.25)))
 	else:
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = color
-		_mesh.material_override = mat
+		# Same glass marble the local player rides in, so everyone on the field
+		# is the same object: tinted shell, character visible inside it, and it
+		# rolls as they move.
+		_mesh.visible = false
+		_base_color = color
+		_shell = load("res://Player/marble_shell.gd").new()
+		_shell.set_color(color)
+		_shell.hold(load("res://Player/PL_bear.glb").instantiate(), 0.8)
+		add_child(_shell)
 	_name_label.text = player_name
 
 
@@ -50,6 +58,8 @@ func apply_move(d: Dictionary) -> void:
 		# Web: godmode players render as 30%-visible ghosts
 		if _cube:
 			_cube.set_alpha(0.09 if godmode else 0.3)
+		elif _shell:
+			_shell.set_ghost(godmode)
 		else:
 			_mesh.transparency = 0.7 if godmode else 0.0
 	# Whatever they're holding, aimed where they're aiming
@@ -152,13 +162,21 @@ func set_holder(holder: bool) -> void:
 	if _cube:
 		_cube.set_outline_visible(holder)  # web: white hull on the it-player
 		return
+	if _shell:
+		if not holder:
+			_shell.set_color(_base_color)
+		return
 	if not holder and _mesh.material_override is StandardMaterial3D:
 		_mesh.material_override.emission_enabled = false
 
 
 func _process(delta: float) -> void:
 	var t := 1.0 - pow(0.7, delta * 60.0)  # web: lerp factor 0.3 per 60fps frame
+	var was := global_position
 	global_position = global_position.lerp(target_position, t)
+	# Their marble rolls at whatever speed the interpolation is carrying them
+	if _shell and delta > 0.0:
+		_shell.roll((global_position - was) / delta, delta)
 	if _drone_vis and _drone_vis.visible:
 		_drone_vis.global_position = _drone_vis.global_position.lerp(_drone_target, t)
 	if _cube:
@@ -167,7 +185,10 @@ func _process(delta: float) -> void:
 		_mesh.quaternion = _mesh.quaternion.slerp(target_quat, t)
 
 	# Holder strobes gold (web §1.9: sin(t*0.008) on ms — ~1.3 Hz)
-	if _is_holder and not _cube and _mesh.material_override is StandardMaterial3D:
+	if _is_holder and _shell:
+		_strobe_t += delta
+		_shell.set_color(_base_color.lerp(Color(1.0, 0.85, 0.1), 0.5 + 0.5 * sin(_strobe_t * 8.0)))
+	elif _is_holder and not _cube and _mesh.material_override is StandardMaterial3D:
 		_strobe_t += delta
 		var mat: StandardMaterial3D = _mesh.material_override
 		mat.emission_enabled = true

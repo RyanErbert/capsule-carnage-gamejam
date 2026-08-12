@@ -53,10 +53,13 @@ var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
 # Drone build mode (web: godmode build tools + the 9^3 grid-point cloud).
-# "wfc" is the odd one out: it drops a whole wave-function-collapsed compound
-# rather than a single block, so its ghost is a footprint (Items/wfc.gd).
-const BUILD_TYPES := ["block", "wall", "ramp", "platform", "wfc"]
+# Two of these come from the collapse tileset (Items/wfc.gd): "wfc" drops a
+# whole compound, so its ghost is a footprint, and "part" places ONE module at
+# a time — scroll to pick which — on the tileset's own 6 m grid, so pieces
+# placed by hand mate with each other and with the generated compounds.
+const BUILD_TYPES := ["block", "wall", "ramp", "platform", "wfc", "part"]
 const WfcTiles := preload("res://Items/wfc.gd")
+var _wfc_part := 0    # index into WfcTiles.PART_KINDS
 var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
 var _build_ghosts: Dictionary = {}
@@ -146,6 +149,10 @@ func _input(event: InputEvent) -> void:
 			elif _tool == "tower":
 				_tower_h = clampf(_tower_h + dir, 3.0, 20.0)
 				_status.text = "H %d" % int(_tower_h)
+			elif _tool == "build:part":
+				# Scroll cycles which module of the tileset is on the cursor
+				_wfc_part = wrapi(_wfc_part + dir, 0, WfcTiles.PART_KINDS.size())
+				_status.text = str(WfcTiles.PART_KINDS[_wfc_part]).to_upper()
 			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
@@ -397,6 +404,13 @@ func _unhandled_input(event: InputEvent) -> void:
 					"z": _build_target["z"], "ry": _build_target["ry"],
 				})
 				_status.text = "structure placed"
+		elif _tool == "build:part":
+			# One module of the collapse tileset, on its own grid.
+			if not _build_target.is_empty():
+				var kind := str(WfcTiles.PART_KINDS[_wfc_part])
+				Net.emit_event("placeBuild", _build_target.merged({
+					"type": "wfcpart", "part": kind}))
+				_status.text = "%s  [Scroll - Part]" % kind.to_upper()
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -540,14 +554,24 @@ func _process(delta: float) -> void:
 			3: fx += 2.0
 	elif type == "platform":
 		fy -= 1.5
-	_build_target = {"x": fx, "y": fy, "z": fz, "ry": _build_rot * ROT_STEP, "rx": 0.0}
+	var ry := _build_rot * ROT_STEP
+	if type == "part":
+		# The tileset has its own grid — 6 m cells, 3 m floors, quarter turns.
+		# Snapping parts to the 4 m block grid would leave them unable to mate
+		# with each other or with the compounds already on the map.
+		fx = floorf(target.x / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
+		fz = floorf(target.z / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
+		fy = roundf(target.y / WfcTiles.LEVEL) * WfcTiles.LEVEL
+		ry = float(_build_rot / 2) * PI * 0.5
+		type = "part:" + str(WfcTiles.PART_KINDS[_wfc_part])
+	_build_target = {"x": fx, "y": fy, "z": fz, "ry": ry, "rx": 0.0}
 
 	if not _build_ghosts.has(type):
 		_build_ghosts[type] = _make_build_ghost(type)
-	var ghost: MeshInstance3D = _build_ghosts[type]
+	var ghost: Node3D = _build_ghosts[type]
 	ghost.visible = true
 	ghost.global_position = Vector3(fx, fy, fz)
-	ghost.rotation = Vector3(0, _build_rot * ROT_STEP, 0)
+	ghost.rotation = Vector3(0, ry, 0)
 
 	# Grid cloud re-centers when the aimed cell changes
 	var center := Vector3(floorf(target.x / 4.0) * 4.0 + 2.0, floorf(target.y / 4.0) * 4.0 + 2.0, floorf(target.z / 4.0) * 4.0 + 2.0)
@@ -795,13 +819,25 @@ func _update_delete_highlight() -> void:
 	_delete_marker.global_position = target["pos"]
 
 
-func _make_build_ghost(type: String) -> MeshInstance3D:
+func _make_build_ghost(type: String) -> Node3D:
 	if _ghost_mat == null:
 		_ghost_mat = StandardMaterial3D.new()
 		_ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		_ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_ghost_mat.albedo_color = Color(0.3, 0.6, 1.0, 0.4)
 		_ghost_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if type.begins_with("part:"):
+		# The ghost IS the part, in ghost blue: with nine of them on a scroll
+		# wheel, a generic box tells you nothing about what you're about to
+		# drop. The collider comes off — this one is scenery until it's placed.
+		var part: Node3D = WfcTiles.build_part(type.substr(5))
+		for child in part.get_children():
+			if child is MeshInstance3D:
+				(child as MeshInstance3D).material_override = _ghost_mat
+			elif child is CollisionShape3D:
+				child.queue_free()
+		_player.get_parent().add_child(part)
+		return part
 	var g := MeshInstance3D.new()
 	match type:
 		"ramp":
@@ -957,8 +993,12 @@ func _set_tool(tool_name: String) -> void:
 	for t in _tool_buttons:
 		_tool_buttons[t].button_pressed = t == tool_name
 	if _status:
-		_status.text = tool_name.trim_prefix("prop:").trim_prefix("vehicle:") \
-			.trim_prefix("build:").trim_suffix(".glb").to_upper()
+		if tool_name == "build:part":
+			_status.text = "%s  [Scroll - Part]  [R - Rotate]" % \
+				str(WfcTiles.PART_KINDS[_wfc_part]).to_upper()
+		else:
+			_status.text = tool_name.trim_prefix("prop:").trim_prefix("vehicle:") \
+				.trim_prefix("build:").trim_suffix(".glb").to_upper()
 
 
 func _on_tool_pressed(tool_name: String) -> void:

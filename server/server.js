@@ -75,6 +75,48 @@ const readyIds = new Set();
 const COLORS = ['#ff4444', '#4488ff', '#44cc44', '#ffcc00'];
 let colorIndex = 0;
 
+// Who a socket IS, from the moment it opens the lobby. `players` only exists
+// once someone has 'ready'd into an actual match, which is why the lobby roster
+// used to be blind to anyone sitting in the menu and chat called them all
+// Spectator. Profiles fill that gap; a live player entry always wins.
+const profiles = {};
+
+function profileOf(id) {
+  return players[id] || profiles[id] || null;
+}
+
+// Lobby, map editor, or out on the field.
+function whereIs(id) {
+  if (readyIds.has(id)) return 'game';
+  if (editors.has(id)) return 'editor';
+  return 'lobby';
+}
+
+function presenceList() {
+  const out = [];
+  for (const id of io.sockets.sockets.keys()) {
+    const p = profileOf(id);
+    if (!p) continue;
+    out.push({ id, name: p.name, color: p.skinColor || '#ffffff', where: whereIs(id) });
+  }
+  return out;
+}
+
+function pushPresence() {
+  io.emit('presence', presenceList());
+}
+
+// Everything said this session, replayed to anyone who connects. Scene changes
+// build a whole new chat box, so without this the conversation restarted every
+// time you moved between the lobby, the editor and the game.
+const CHAT_LOG_MAX = 80;
+const chatLog = [];
+
+function logChat(entry) {
+  chatLog.push(entry);
+  while (chatLog.length > CHAT_LOG_MAX) chatLog.shift();
+}
+
 const LEVEL_SPAWN_POINTS = {
   'level_1.glb': [
     { x: -39.64, y: 0.53, z: -31.33 },
@@ -602,6 +644,7 @@ let endVote = null;
 const END_VOTE_TIMEOUT_MS = 30000;
 
 function sysMsg(text) {
+  logChat({ sys: true, text });
   io.emit('systemMessage', { text });
 }
 
@@ -675,6 +718,7 @@ function autoPopulatePedestals() {
 function endGame() {
   if (endVote) { clearTimeout(endVote.timer); endVote = null; }
   if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+  clearStartVote();
   for (const id of Object.keys(scores)) scores[id] = startingScore();
   io.emit('scores', scores);
   for (const id of Object.keys(kills)) delete kills[id];
@@ -723,9 +767,73 @@ function endGame() {
 }
 
 // Sockets sitting in the map editor. They haven't 'ready'd yet, so readyIds
-// doesn't see them - the editor announces itself instead. (GENERATE and
-// CLEAR used to need a unanimous vote; they just apply now.)
+// doesn't see them - the editor announces itself instead.
 const editors = new Set();
+
+// --- Start vote --------------------------------------------------------------
+// Cutting the sculpting phase short takes EVERYONE in the editor: one person
+// pressing START GAME opens a poll, and the map only generates early if every
+// last painter says yes. Nobody answering isn't a yes — the edit timer runs out
+// on its own and starts the match anyway, so a vote never blocks the round.
+let startVote = null;            // { yes:Set, no:Set, timer }
+const START_VOTE_MS = 30000;
+
+function startVoteState() {
+  if (!startVote) return null;
+  return {
+    voters: [...editors],
+    yes: [...startVote.yes].filter(id => editors.has(id)),
+    no: [...startVote.no].filter(id => editors.has(id))
+  };
+}
+
+function pushStartVote() {
+  io.emit('startVote', startVoteState());
+}
+
+function clearStartVote() {
+  if (!startVote) return;
+  clearTimeout(startVote.timer);
+  startVote = null;
+  pushStartVote();
+}
+
+function openStartVote(id) {
+  if (startVote) { castStartVote(id, true); return; }
+  // Sculpting alone: there's nobody to poll, so the button is just a button.
+  if (editors.size <= 1) { applyEditVote('generate'); return; }
+  startVote = { yes: new Set([id]), no: new Set(), timer: null };
+  startVote.timer = setTimeout(() => {
+    sysMsg('Start vote expired.');
+    clearStartVote();
+  }, START_VOTE_MS);
+  const who = players[id] ? players[id].name : (profiles[id] ? profiles[id].name : 'Someone');
+  sysMsg(`${who} wants to start the game.`);
+  pushStartVote();
+  checkStartVote();
+}
+
+function castStartVote(id, yes) {
+  if (!startVote || !editors.has(id)) return;
+  if (yes) { startVote.yes.add(id); startVote.no.delete(id); }
+  else { startVote.no.add(id); startVote.yes.delete(id); }
+  pushStartVote();
+  checkStartVote();
+}
+
+function checkStartVote() {
+  if (!startVote) return;
+  const voters = [...editors];
+  if (voters.some(id => startVote.no.has(id))) {
+    sysMsg('Start vote failed.');
+    clearStartVote();
+    return;
+  }
+  if (voters.length && voters.every(id => startVote.yes.has(id))) {
+    clearStartVote();
+    applyEditVote('generate');
+  }
+}
 
 // Lobby start countdown: one shared timer so every menu counts in sync.
 const START_COUNTDOWN_MS = 3000;
@@ -746,13 +854,14 @@ function defaultLayers() {
   return out;
 }
 
-// Whoever presses GENERATE or CLEAR does it: no vote, no confirmation bar.
+// The map goes live: either the editor voted it in or the clock ran out.
 function applyEditVote(kind) {
   if (kind === 'clear') {
     paintLayers = null;
     io.emit('paintCleared');
     return;
   }
+  clearStartVote();
   creativeLayers = paintLayers || defaultLayers();
   terrainEdits = [];
   stopClaim();
@@ -805,12 +914,13 @@ function autoPlaceStructures() {
 // The map creator opens on a seeded world (mapgen.js), not a blank plain, and
 // who gets to EDIT which part of it is decided by a game of SNAKE.
 //
-// You are always moving. You cannot stop, only turn. Behind you runs a trail
-// of placed blocks, and there is no safe edge to run back to — the only way to
-// take ground is to close a loop against your own trail or your own territory,
-// which converts everything sealed inside it. Drive into the map boundary and
-// you die. Drive into ANOTHER player's trail and THEY die, and every unclaimed
-// block on the board becomes yours.
+// You are always moving. You cannot stop, only turn. Everyone starts on a small
+// home plot, and behind you runs a trail of placed blocks. Ground is taken by
+// leaving your own territory and coming back to it: the loop that draws closes
+// against LAND YOU ALREADY OWN, never against the live trail itself, and
+// everything sealed inside falls in with it. The map boundary is a wall you
+// stall against. Drive into ANOTHER player's trail and they are out of the
+// round, and you get fifteen more seconds to spend on the board.
 //
 // When the clock runs out (or someone ends it early) the unclaimed ground fogs
 // over: from then on you only see and sculpt your own territory, until the
@@ -821,8 +931,10 @@ function autoPlaceStructures() {
 
 const FREE = -1;                // nobody's yet
 const CLAIM_TICK_MS = 130;      // one pixel of travel per tick
-const EDIT_MS = 3 * 60 * 1000;  // sculpting time once the land is divided
+const EDIT_MS = 5 * 60 * 1000;  // sculpting time once the land is divided
 const GIFT_R = 3;               // radius of the consolation region, in pixels
+const HOME_R = 2;               // the plot you start the grab standing on
+const CUT_BONUS_MS = 15000;     // taking someone out buys you more runtime
 
 let claim = null;
 let claimTimer = null;
@@ -902,7 +1014,9 @@ function stopClaim() {
 }
 
 // Everyone starts ALREADY MOVING, spread across the board and aimed inward so
-// nobody's first tick is into a wall.
+// nobody's first tick is into a wall, standing on a small plot of their own.
+// The plot is the whole game's foundation: a loop only closes against ground
+// you already own, so without one there'd be nothing to run back to.
 function joinClaim(id) {
   if (!claim || claim.ids.includes(id)) return;
   claim.ids.push(id);
@@ -925,6 +1039,12 @@ function joinClaim(id) {
   claim.dir[id] = Math.abs(dr) > Math.abs(dc)
     ? [Math.sign(dr) || 1, 0] : [0, Math.sign(dc) || 1];
   claim.dead[id] = false;
+  const pi = claim.ids.indexOf(id);
+  for (let r = best[0] - HOME_R; r <= best[0] + HOME_R; r++)
+    for (let c = best[1] - HOME_R; c <= best[1] + HOME_R; c++) {
+      if (r < 0 || c < 0 || r >= claim.h || c >= claim.w) continue;
+      if (claim.owner[r * claim.w + c] === FREE) claim.owner[r * claim.w + c] = pi;
+    }
 }
 
 function leaveClaim(id) {
@@ -963,8 +1083,9 @@ function livingSnakes() {
 
 // A loop closed: the trail becomes land, and then every pocket of unclaimed
 // ground SEALED INSIDE it falls in with it. Sealed means it can't reach the
-// map boundary — with no safe edge to run to, the boundary is what "outside"
-// means, so anything that can't touch it is by definition within the loop.
+// map boundary through unclaimed ground — anybody's territory is a wall as far
+// as the flood is concerned, which is exactly what makes a run out of your own
+// plot and back into it enclose the ground it went around.
 function closeLoop(pi) {
   const { w, h, owner, trail } = claim;
   let took = 0;
@@ -1011,18 +1132,6 @@ function pushOutside(queue, outside, i) {
 }
 
 
-// Cut somebody down and the whole unclaimed board is your prize.
-function takeEverything(pi) {
-  let took = 0;
-  for (let i = 0; i < claim.owner.length; i++) {
-    if (claim.owner[i] !== FREE) continue;
-    claim.owner[i] = pi;
-    took++;
-  }
-  return took;
-}
-
-
 function claimTick() {
   if (!claim || claim.phase !== 'claim') return;
   if (Date.now() >= claim.endsAt) { endClaim(); return; }
@@ -1034,31 +1143,28 @@ function claimTick() {
     const [dr, dc] = claim.dir[id];
     const [r, c] = claim.pos[id];
     const nr = r + dr, nc = c + dc;
-    // No safe edge any more: the boundary is a wall, and a wall is the end.
-    if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) {
-      killSnake(pi, 'drove into the wall.');
-      board = true;
-      continue;
-    }
+    // The boundary is a wall you lean on, not a cliff: you stall against it
+    // until you steer away.
+    if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) continue;
     const ni = nr * claim.w + nc;
     const hit = claim.trail[ni];
     if (hit >= 0 && hit !== pi) {
-      // Cut someone off mid-loop: they're out, and every block still going
-      // begging is yours.
+      // Cut someone off mid-loop: they're out of the round, and the clock
+      // gives you fifteen more seconds to spend on the board. Alone out there,
+      // fifteen seconds is ALL that's left — a solo victory lap, not a stroll.
       killSnake(hit, 'was cut off.');
-      takeEverything(pi);
-      claim.pos[id] = [nr, nc];
+      claim.endsAt = livingSnakes() <= 1
+        ? Date.now() + CUT_BONUS_MS : claim.endsAt + CUT_BONUS_MS;
       board = true;
-      if (livingSnakes() <= 1) { endClaim(); return; }
-      continue;
     }
     claim.pos[id] = [nr, nc];
     const o = claim.owner[ni];
-    // Your own trail or your own ground CLOSES the loop — that's the whole
-    // game. Anyone else's ground is a neutral crossing that leaves no trail.
-    if (hit === pi || o === pi) {
+    // Only LAND YOU ALREADY OWN closes the loop. A live trail is not ground
+    // yet — running back over your own is inert, and anyone else's territory
+    // is a neutral crossing that leaves no trail behind.
+    if (o === pi) {
       if (closeLoop(pi) > 0) board = true;
-    } else if (o === FREE) {
+    } else if (o === FREE && claim.trail[ni] < 0) {
       claim.trail[ni] = pi;
       adds.push(ni, pi);
     }
@@ -1254,10 +1360,22 @@ io.on('connection', (socket) => {
   socket.emit('hello', { id: socket.id });
   socket.emit('gameSettings', gameSettings);
   socket.emit('currentSpawns', spawnPoints);
+  // Pick the conversation up where the room left it, whichever menu you're in
+  socket.emit('chatHistory', chatLog);
+  socket.emit('presence', presenceList());
+  if (startVote) socket.emit('startVote', startVoteState());
 
   socket.on('editing', (on) => {
-    if (!on) { editors.delete(socket.id); return; }
+    if (!on) {
+      editors.delete(socket.id);
+      pushPresence();
+      checkStartVote();     // the last holdout walking out settles the poll
+      pushStartVote();
+      return;
+    }
     editors.add(socket.id);
+    pushPresence();
+    if (startVote) pushStartVote();   // a latecomer is a vote still outstanding
     // First client to reach the creator opens the land grab, so the board is
     // on someone's screen before any cursor moves.
     if (claimPending) { claimPending = false; startClaim(); return; }
@@ -1278,10 +1396,11 @@ io.on('connection', (socket) => {
   // motion (painters at work or a live map), the caller just joins it.
   // Back in the lobby: stop counting this socket as a player in a live game.
   socket.on('leaveGame', () => {
-    if (!readyIds.has(socket.id)) return;
+    if (!readyIds.has(socket.id)) { pushPresence(); return; }
     readyIds.delete(socket.id);
     editors.delete(socket.id);
     socket.broadcast.emit('playerLeft', socket.id);
+    pushPresence();
   });
 
   socket.on('requestStart', () => {
@@ -1660,7 +1779,9 @@ io.on('connection', (socket) => {
     io.emit('spawnZones', spawnZones);
   });
 
-  // GENERATE and CLEAR need everyone still in the editor to agree.
+  // START GAME polls the editor: everyone sculpting has to agree to cut the
+  // phase short. The edit timer is the backstop, so a stalled vote costs
+  // nothing but the rest of the clock.
   socket.on('requestGenerate', () => {
     // Mid-grab there's nothing to generate yet — END GRAB is the button for
     // that. This also stops a client that missed the claim snapshot (and so
@@ -1669,8 +1790,9 @@ io.on('connection', (socket) => {
       socket.emit('systemMessage', { text: 'End the land grab first.' });
       return;
     }
-    applyEditVote('generate');
+    openStartVote(socket.id);
   });
+  socket.on('startVoteCast', (v) => castStartVote(socket.id, !!v));
   socket.on('requestClear', () => applyEditVote('clear'));
 
   // Live co-painting of the creative editor canvas (full 32-int grid per
@@ -1756,7 +1878,9 @@ io.on('connection', (socket) => {
     };
     scores[socket.id] = startingScore();
     readyIds.add(socket.id);
+    profiles[socket.id] = { name: players[socket.id].name, skinColor: color };
     lastActivity[socket.id] = Date.now();
+    pushPresence();
     // First player to join locks the lobby (level + game settings) for everyone.
     if (!levelLocked) { levelLocked = true; io.emit('lobbyLocked', true); }
     console.log(`Player connected: ${socket.id} (${players[socket.id].name}, ${players[socket.id].shape})`);
@@ -2106,13 +2230,30 @@ io.on('connection', (socket) => {
     if (typeof text !== 'string') return;
     const msg = text.trim().slice(0, 200);
     if (!msg) return;
-    const p = players[socket.id];
-    io.emit('chatMessage', {
+    const p = profileOf(socket.id);
+    const line = {
       id: socket.id,
       name: p ? p.name : 'Spectator',
-      color: p ? p.skinColor : '#ffffff',
+      color: (p && p.skinColor) || '#ffffff',
       text: msg
-    });
+    };
+    logChat(line);
+    io.emit('chatMessage', line);
+  });
+
+  // Who you are before you're a player: the lobby sends this the moment it
+  // opens, and again whenever you change your name or colour.
+  socket.on('profile', (d) => {
+    if (!d || typeof d !== 'object') return;
+    const name = (typeof d.name === 'string' ? d.name.slice(0, 16) : '') || 'Player';
+    const color = typeof d.skinColor === 'string' ? d.skinColor.slice(0, 9) : '#ffffff';
+    profiles[socket.id] = { name, skinColor: color };
+    if (players[socket.id]) {
+      players[socket.id].name = name;
+      players[socket.id].skinColor = color;
+      players[socket.id].color = color;
+    }
+    pushPresence();
   });
 
   socket.on('startEndVote', () => {
@@ -2166,7 +2307,11 @@ io.on('connection', (socket) => {
       }
     }
     delete deadUntil[socket.id];
+    delete profiles[socket.id];
     editors.delete(socket.id);
+    pushPresence();
+    checkStartVote();       // one fewer holdout can settle a running poll
+    if (startVote) pushStartVote();
     if (claim) { leaveClaim(socket.id); io.emit('claimState', claimSnapshot()); }
     if (spawnZones[socket.id]) { delete spawnZones[socket.id]; io.emit('spawnZones', spawnZones); }
     if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);

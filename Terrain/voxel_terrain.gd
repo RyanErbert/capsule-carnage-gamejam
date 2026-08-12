@@ -184,8 +184,8 @@ func _d(x: int, y: int, z: int) -> float:
 ## of PX rows x (PX+31)/32 uint32 words (ground, main, +1, +2 — bottom to
 ## top), bit (31 - col&31) = filled pixel. Each pixel is a 4x4 m column
 ## within its 8 m slab; bedrock fills [-20,-16] beneath everything regardless
-## of paint. What's painted is what you get, floating slabs included — SPIRE
-## MODE in the painter fills the columns underneath at paint time instead
+## of paint. What's painted is what you get, floating slabs included — the
+## painter's FILL tool works the whole column at paint time instead
 ## (creative.gd), so the canvas never lies.
 func build_from_layers(layers: Array) -> void:
 	var eff: Array = layers

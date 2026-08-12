@@ -72,6 +72,10 @@ func _ready() -> void:
 	_build_conn_pill()
 	_build_slayer_hud()
 	_build_scrollback()
+	# Newest row sits against the input and the column grows UPWARD, so a long
+	# kill feed runs off the top of the screen instead of over the input box.
+	_chat_log.alignment = BoxContainer.ALIGNMENT_END
+	_hydrate_chat()
 	# Full-screen shader effects (sci-fi drone view, damage datamosh)
 	var fx := Node.new()
 	fx.name = "ScreenFX"
@@ -157,10 +161,12 @@ func _build_scrollback() -> void:
 	_chat_scroll = PanelContainer.new()
 	_chat_scroll.visible = false
 	_chat_scroll.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	# Exactly where the live rows sit, so opening it swaps one for the other
+	# instead of laying a panel over the top of them and the input box.
 	_chat_scroll.offset_left = -430
 	_chat_scroll.offset_right = -12
-	_chat_scroll.offset_top = -300
-	_chat_scroll.offset_bottom = -48
+	_chat_scroll.offset_top = -424
+	_chat_scroll.offset_bottom = -120
 	_chat_scroll.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_chat_scroll.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_chat_scroll.add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.7), 8))
@@ -175,6 +181,7 @@ func _build_scrollback() -> void:
 
 func _show_scrollback(on: bool) -> void:
 	_chat_scroll.visible = on
+	_chat_log.visible = not on   # one stream, one place on screen
 	if not on:
 		return
 	for child in _chat_scroll_rows.get_children():
@@ -260,6 +267,33 @@ func _bb_escape(s: String) -> String:
 	return s.replace("[", "[lb]")
 
 
+## Everything said before this scene existed (lobby and editor included). The
+## scrollback gets all of it; only the last few rows go back on screen, so
+## dropping into a match doesn't paint the whole session over the crosshair.
+const HYDRATE_ON_SCREEN := 4
+
+func _hydrate_chat() -> void:
+	var past: Array = Net.chat_log
+	for i in past.size():
+		var row: Variant = past[i]
+		if not row is Dictionary or str(row.get("text", "")) == "":
+			continue
+		var bb: String
+		if bool(row.get("sys", false)):
+			bb = "[color=#ffd54a]%s[/color]" % _bb_escape(str(row.get("text")))
+		else:
+			var col := str(row.get("color", "#ffffff"))
+			if not col.begins_with("#"):
+				col = "#ffffff"
+			bb = "[color=%s]%s:[/color] %s" % [
+				col, _bb_escape(str(row.get("name", "Player"))), _bb_escape(str(row.get("text")))]
+		_chat_history.append(bb)
+		if i >= past.size() - HYDRATE_ON_SCREEN:
+			_screen_row(bb)
+	while _chat_history.size() > CHAT_HISTORY:
+		_chat_history.pop_front()
+
+
 func _add_chat_row(pname: String, color_hex: String, text: String) -> void:
 	if not color_hex.begins_with("#"):
 		color_hex = "#ffffff"
@@ -274,6 +308,12 @@ func _push_chat_row(bbcode: String) -> void:
 	_chat_history.append(bbcode)
 	while _chat_history.size() > CHAT_HISTORY:
 		_chat_history.pop_front()
+	_screen_row(bbcode)
+	if _chat_scroll and _chat_scroll.visible:
+		_show_scrollback(true)   # keep the open log live as messages land
+
+
+func _screen_row(bbcode: String) -> void:
 	var row := RichTextLabel.new()
 	row.bbcode_enabled = true
 	row.fit_content = true

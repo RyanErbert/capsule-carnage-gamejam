@@ -12,7 +12,10 @@ const WEAPONS := ["none", "machinegun", "rocket", "mines", "grapple", "terragun"
 const STARTING_AMMO := {"machinegun": 100, "rocket": 3, "mines": 3, "grapple": 5, "terragun": 100}
 
 var player_name: String = RANDOM_NAMES[randi() % RANDOM_NAMES.size()]
-var color := Color("#b5651d")
+# Same saturation and brightness as the old fixed orange, random hue: two
+# people opening the game are a different colour without touching the picker.
+const DEFAULT_COLOR := Color("#b5651d")
+var color := Color.from_hsv(randf(), DEFAULT_COLOR.s, DEFAULT_COLOR.v)
 var model := "bear"            # "bear" | "cube"
 var starting_weapon := "rocket"  # default loadout (infinite ammo is on)
 var infinite_ammo := false

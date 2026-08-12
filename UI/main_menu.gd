@@ -29,7 +29,7 @@ var _join_btn: Button
 var _gamemode_opt: OptionButton
 var _size_opt: OptionButton
 var _settings_box: PanelContainer
-var _players: Dictionary = {}   # id -> {name, skinColor, x, y, z}
+var _presence: Array = []       # everyone connected: {id, name, color, where}
 var _map: BirdseyeMap
 var _preview_model: Node3D
 var _countdown: Label            # shared 5 s pre-editor countdown
@@ -43,7 +43,11 @@ func _ready() -> void:
 	Net.socket_connected.connect(_refresh_status)
 	Net.socket_disconnected.connect(_refresh_status)
 	_apply_game_settings(Net.game_settings)
+	_presence = Net.presence.duplicate()
 	_refresh_status()
+	# Tell the server who we are before we're a "player": the roster and every
+	# chat line we send in the lobby hang off this.
+	_send_profile()
 	# Sitting in the lobby means we are NOT in a game. Without this the server
 	# still counts us as a live player after a round, and the next START gets
 	# treated as "join the session already in progress" — which dropped you
@@ -53,26 +57,18 @@ func _ready() -> void:
 		_join.call_deferred()
 
 
+func _send_profile() -> void:
+	if _name_edit and _name_edit.text.strip_edges() != "":
+		Settings.player_name = _name_edit.text.strip_edges().left(16)
+	Net.emit_event("profile", {
+		"name": Settings.player_name, "skinColor": Settings.color_hex()})
+
+
 func _on_net_event(event: String, data: Variant) -> void:
 	match event:
-		"spectatorPlayers":
-			if data is Dictionary:
-				_players = data.get("players", {})
-				_refresh_status()
-		"newPlayer":
-			if data is Dictionary and data.has("id"):
-				_players[str(data["id"])] = data
-				_refresh_status()
-		"playerDisconnected":
-			_players.erase(str(data))
+		"presence":
+			_presence = data if data is Array else []
 			_refresh_status()
-		"playerMoved":
-			# Keeps the overhead map live while a game is in progress
-			if data is Dictionary and _players.has(str(data.get("id", ""))):
-				var p: Dictionary = _players[str(data["id"])]
-				p["x"] = data.get("x", 0.0)
-				p["y"] = data.get("y", 0.0)
-				p["z"] = data.get("z", 0.0)
 		"gameSettings":
 			_apply_game_settings(data)
 		"startCountdown":
@@ -109,14 +105,25 @@ func _refresh_status() -> void:
 	var my_name := Settings.player_name
 	if _name_edit and _name_edit.text.strip_edges() != "":
 		my_name = _name_edit.text.strip_edges().left(16)
-	# Everyone the server reports is already on the field; you're still here
-	var lines: Array = ["%s  -  In Lobby" % my_name]
-	for id in _players:
-		var p: Dictionary = _players[id]
-		lines.append("%s  -  In Game" % str(p.get("name", "???")))
+	# The server reports EVERYONE connected and where they are, so a second
+	# player sitting in this same menu shows up here too.
+	const WHERE := {"game": "In Game", "editor": "Editing", "lobby": "In Lobby"}
+	var lines: Array = []
+	var live := false
+	for row in _presence:
+		if not row is Dictionary:
+			continue
+		var id := str(row.get("id", ""))
+		var where := str(row.get("where", "lobby"))
+		live = live or where != "lobby"
+		lines.append("%s  -  %s" % [
+			my_name if id == Net.socket_id else str(row.get("name", "???")),
+			WHERE.get(where, "In Lobby")])
+	if lines.is_empty():
+		lines.append("%s  -  In Lobby" % my_name)
 	_roster.text = "\n".join(lines)
-	# Nobody in the arena yet: you'd be STARTING the game, not joining one
-	_join_btn.text = "START GAME" if _players.is_empty() else "JOIN GAME"
+	# Nobody in the arena or the editor yet: you'd be STARTING, not joining
+	_join_btn.text = "JOIN GAME" if live else "START GAME"
 
 
 func _join() -> void:
@@ -126,7 +133,8 @@ func _join() -> void:
 		Settings.player_name = _name_edit.text.strip_edges().left(16)
 	# STARTING a creative session goes through the server's shared countdown so
 	# every lobby lands in the editor together. Joining one in motion is direct.
-	if Settings.level == "creative" and _players.is_empty() \
+	# The server makes the same call itself and answers with 'enterEditor'.
+	if Settings.level == "creative" \
 			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		Net.emit_event("requestStart")
 		return
@@ -171,7 +179,6 @@ func _build_ui() -> void:
 	add_child(bg)
 
 	_map = BirdseyeMap.new()
-	_map.menu = self
 	_map.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_map.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_map)
@@ -220,7 +227,9 @@ func _build_ui() -> void:
 	_name_edit = LineEdit.new()
 	_name_edit.text = Settings.player_name
 	_name_edit.max_length = 16
-	_name_edit.text_changed.connect(func(_t: String): _refresh_status())
+	_name_edit.text_changed.connect(func(_t: String):
+		_refresh_status()
+		_send_profile())
 	fields.add_child(_name_edit)
 	var color_btn := ColorPickerButton.new()
 	color_btn.color = Settings.color
@@ -228,6 +237,7 @@ func _build_ui() -> void:
 	color_btn.custom_minimum_size = Vector2(0, 28)
 	color_btn.color_changed.connect(func(c: Color):
 		Settings.color = c
+		_send_profile()
 		_build_model_preview())
 	fields.add_child(color_btn)
 	var model_opt := OptionButton.new()
@@ -406,17 +416,18 @@ func _build_model_preview() -> void:
 
 class BirdseyeMap extends SubViewportContainer:
 	## A real 3D birdseye view of the map behind the lobby: the painted layer
-	## stack extruded into blocks in its own little world, slowly orbiting,
-	## with a marker per player. Rebuilt whenever the grid changes.
-	const LAYER_TINT := [Color("#8a5a3a"), Color("#c78b5e"), Color("#dfa878"), Color("#f0cb96")]
+	## stack extruded into blocks in its own little world, slowly orbiting.
+	## Rebuilt whenever the grid changes.
+	# Bottom up: basement, ground, main, +1, +2 (mirrors the painter's chips)
+	const LAYER_TINT := [Color("#4a3226"), Color("#8a5a3a"), Color("#c78b5e"),
+		Color("#dfa878"), Color("#f0cb96")]
+	const LAYERS := 5
 	const SLAB := 8.0
 
-	var menu: Node
 	var _vp: SubViewport
 	var _cam: Camera3D
 	var _world: Node3D
 	var _blocks: MultiMeshInstance3D
-	var _dots: Dictionary = {}     # player id -> marker
 	var _built := ""               # signature of the grid we rendered
 	var _orbit := 0.0
 	var _span := 128.0
@@ -473,7 +484,6 @@ class BirdseyeMap extends SubViewportContainer:
 		var r := _span * 0.7
 		_cam.position = Vector3(cos(_orbit) * r, _span * 1.05, sin(_orbit) * r)
 		_cam.look_at(Vector3(0, 0, 0))
-		_update_dots()
 
 	## Extrude the painted grid into one MultiMesh of slab blocks (top layer
 	## per pixel only — the stack below is hidden anyway from up here).
@@ -484,7 +494,7 @@ class BirdseyeMap extends SubViewportContainer:
 			return
 		_built = sig
 		var live := grid is Dictionary and (grid.get("layers") is Array) \
-			and (grid["layers"] as Array).size() == 4
+			and (grid["layers"] as Array).size() == LAYERS
 		var layers: Array = grid["layers"] if live else []
 		var raw: Variant = grid.get("gs", [32, 32]) if live else [32, 32]
 		var gw := int(raw[0]) if raw is Array else 32
@@ -501,7 +511,7 @@ class BirdseyeMap extends SubViewportContainer:
 				var top := -1
 				if live:
 					var wi := r * words + (c >> 5)
-					for li in 4:
+					for li in LAYERS:
 						if wi < (layers[li] as Array).size() \
 								and (int(layers[li][wi]) >> (31 - (c & 31))) & 1:
 							top = li
@@ -521,26 +531,6 @@ class BirdseyeMap extends SubViewportContainer:
 			mm.set_instance_transform(i, xforms[i])
 			mm.set_instance_color(i, cols[i])
 
-	## One floating marker per player, in their own color.
-	func _update_dots() -> void:
-		for id in _dots.keys():
-			if not menu._players.has(id):
-				(_dots[id] as Node).queue_free()
-				_dots.erase(id)
-		for id in menu._players:
-			var p: Dictionary = menu._players[id]
-			var dot: MeshInstance3D = _dots.get(id)
-			if dot == null:
-				dot = MeshInstance3D.new()
-				var sphere := SphereMesh.new()
-				sphere.radius = 2.2
-				sphere.height = 4.4
-				var m := StandardMaterial3D.new()
-				m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-				m.albedo_color = Color(str(p.get("skinColor", "#ffffff")))
-				sphere.material = m
-				dot.mesh = sphere
-				_world.add_child(dot)
-				_dots[id] = dot
-			dot.position = Vector3(float(p.get("x", 0.0)),
-				float(p.get("y", 0.0)) + 3.0, float(p.get("z", 0.0)))
+	## Deliberately no player markers. The lobby watches the map being built,
+	## which is half the fun of sitting one out, but where everybody IS while
+	## they build it is not the lobby's business.

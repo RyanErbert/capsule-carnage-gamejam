@@ -31,6 +31,10 @@ var game_settings: Dictionary = {}  # server-authoritative global settings
 var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var spawn_zones: Dictionary = {}    # socket id -> [r, c] claimed in the editor
 var claim_state: Variant = null     # Xonix land-grab board, if one is running
+var start_vote: Variant = null      # editor poll on cutting the sculpt short
+var presence: Array = []            # everyone connected: {id, name, color, where}
+var chat_log: Array = []            # the room's conversation, replayed on connect
+const CHAT_LOG_MAX := 80
 var socket_id := ""                 # our own id, so we know which zone is ours
 var _reconnect_timer := 0.0
 
@@ -143,6 +147,21 @@ func _handle_frame(frame: String) -> void:
 			var event: String = str(parsed[0])
 			var data: Variant = parsed[1] if parsed.size() > 1 else null
 			match event:
+				"chatHistory":
+					chat_log = data if data is Array else []
+				"chatMessage", "systemMessage":
+					# Mirror of the server's log, so a chat box built by the
+					# NEXT scene opens on the conversation so far.
+					if data is Dictionary:
+						var row: Dictionary = (data as Dictionary).duplicate()
+						row["sys"] = event == "systemMessage"
+						chat_log.append(row)
+						while chat_log.size() > CHAT_LOG_MAX:
+							chat_log.pop_front()
+				"presence":
+					presence = data if data is Array else []
+				"startVote":
+					start_vote = data
 				"creativeGrid":
 					creative_grid = data
 					terrain_edits.clear()

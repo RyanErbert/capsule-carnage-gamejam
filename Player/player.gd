@@ -94,6 +94,7 @@ func respawn_point() -> Vector3:
 var use_cube := false
 var smoothing := 1.0  # sent to the server; bear reads as a full sphere
 var _sprint_morph_t := 0.0
+var _shell: Node3D    # the glass marble, when we're not playing the cube
 
 @onready var _cube_visual: Node3D = get_node_or_null("CubeVisual")
 @onready var _capsule_logic: Node3D = get_node_or_null("CapsuleLogic")
@@ -112,6 +113,15 @@ func _ready() -> void:
 		_cube_visual.set_color(Settings.color)
 		if _capsule_logic:
 			_capsule_logic.visible = false
+	elif _capsule_logic:
+		# Two-tone glass marble around the bear, replacing the plain shell the
+		# scene ships with: it rolls, so you can actually see yourself moving.
+		var old: Node = _capsule_logic.get_node_or_null("CapsuleModel")
+		if old:
+			old.visible = false
+		_shell = load("res://Player/marble_shell.gd").new()
+		_shell.set_color(Settings.color)
+		_capsule_logic.add_child(_shell)
 
 
 ## Multiplayer sync calls this when the oddball holder changes (web: white
@@ -398,6 +408,8 @@ func _physics_process(delta: float) -> void:
 		if h_roll.length() > 0.3 and is_on_floor():
 			var axis := Vector3.UP.cross(h_roll.normalized()).normalized()
 			_cube_visual.global_rotate(axis, (h_roll.length() / 0.5) * delta)
+	elif _shell and is_on_floor():
+		_shell.roll(velocity, delta)
 
 	move_and_slide()
 

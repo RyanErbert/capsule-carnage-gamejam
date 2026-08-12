@@ -40,8 +40,8 @@ var PX_H := 32
 # stand just outside the play area, and the closer you get to the edge the
 # thicker it reads — full white ~38 m out, where you're turned around to
 # face the center. Derived from the grid size when the world generates.
-var _fog_start := 72.0     # partway up the boundary bowl (max-norm)
-var _fog_white := 108.0
+const FOG_MARGIN := 8.0    # metres past the painted edge before it thickens
+const FOG_RAMP := 36.0     # ...and how much further to a full whiteout
 const FOG_BASE := 0.0015   # always-on depth-fog density inside the arena
 
 # Unshaded white haze sheet for the boundary fog banks: solid near the
@@ -76,6 +76,8 @@ const CLAIM_COLORS := ["#7dedb0", "#7fb2ff", "#ffd54a", "#ff8a7d", "#c58aff", "#
 const CLAIM_FREE := -1      # nobody's
 const FOG := Color("#05060a")
 
+const FILL_ON := Color("#ff9a2e")   # armed FILL, impossible to miss
+const Style := preload("res://UI/ui_style.gd")
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
@@ -87,7 +89,7 @@ var _layers: Array = []        # 4 x (32 ints), bit (31-col) = filled
 var _active_layer := 2         # painting target; 2 = MAIN
 var _layer_buttons: Array = []
 var _brush := 1                # painter brush size, in cells across
-var _spire_mode := true        # painting high fills the column underneath
+var _fill_mode := false        # clicks work the whole column, not one layer
 var _zones: Dictionary = {}    # socket id -> [r, c]; one spawn zone each
 var _cursors: Dictionary = {}  # socket id -> {r, c, t}; co-painters' hovers
 var _hover_px := Vector2i(-1, -1)
@@ -110,6 +112,9 @@ var _brush_row: Control
 var _layer_col: Control
 var _start_button: Button
 var _end_claim_button: Button
+var _vote_row: Control          # START GAME poll, while one is running
+var _vote_label: Label
+var _vote: Variant = null       # {voters, yes, no} from the server
 var _editor_layer: CanvasLayer
 var _painter: Control
 var _status: Label
@@ -136,6 +141,8 @@ func _ready() -> void:
 	# before this scene exists) — pick it up before announcing ourselves.
 	if Net.claim_state != null:
 		_apply_claim_state(Net.claim_state)
+	if Net.start_vote != null:
+		_apply_start_vote(Net.start_vote)
 	Net.emit_event("editing", true)   # counts us in the generate/clear votes
 	# Someone already sculpted a world this session? Join it as-is.
 	var live := _norm_layers(Net.creative_grid)
@@ -377,10 +384,25 @@ func _refresh_phase_ui() -> void:
 	if _layer_col:
 		_layer_col.visible = not grabbing
 	if _start_button:
-		_start_button.visible = not grabbing
+		_start_button.visible = not grabbing and _vote == null
 	if _end_claim_button:
 		_end_claim_button.visible = grabbing
+	if _vote_row:
+		_vote_row.visible = not grabbing and _vote != null
 	_update_banner()
+	_update_hint()
+
+
+## Cutting the sculpting short takes everyone: START GAME opens a poll and the
+## button becomes the tally until it passes, fails, or nobody answers and the
+## edit clock starts the match on its own.
+func _apply_start_vote(data: Variant) -> void:
+	_vote = data if data is Dictionary else null
+	if _vote != null and _vote_label:
+		var voters: Array = _vote.get("voters", []) if _vote.get("voters") is Array else []
+		var yes: Array = _vote.get("yes", []) if _vote.get("yes") is Array else []
+		_vote_label.text = "START?  %d/%d" % [yes.size(), voters.size()]
+	_refresh_phase_ui()
 
 
 ## Our slot in the server's ids array; -1 before we're counted in.
@@ -422,6 +444,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_painter.queue_redraw()
 			if _playing:
 				_make_deadzone_marker()
+		"startVote":
+			_apply_start_vote(data)
 		"claimState":
 			_apply_claim_state(data)
 		"claimTick":
@@ -480,8 +504,6 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 		terrain = VoxelTerrain.new()
 		add_child(terrain)
 	terrain.configure(PX_W, PX_H)
-	_fog_start = maxf(_half_x(), _half_z()) + 8.0
-	_fog_white = _fog_start + 36.0
 	terrain.deadzone_centers = _home_pixels().map(_px_world)
 	terrain.build_from_layers(_layers)
 	_make_deadzone_marker()
@@ -607,7 +629,7 @@ func _spawn_gameplay() -> void:
 	_make_fog_shells()
 
 
-## Fake volumetric fog outside the play bounds: concentric square shells of
+## Fake volumetric fog outside the play bounds: nested rectangular shells of
 ## translucent white haze (the Compatibility renderer has no FogVolume).
 ## From inside they read as a distant fog bank; walking out you pass through
 ## shell after shell, so the whiteout builds gradually instead of snapping on.
@@ -616,26 +638,27 @@ func _make_fog_shells() -> void:
 	shader.code = FOG_WALL_SHADER
 	var wall_h := 90.0
 	var wall_y := wall_h * 0.5 - 16.0  # from below the slabs up past their tops
-	# Square banks sized off the LONGER axis, so a rectangular map is still
-	# ringed (the fog line itself is max-norm, same as _update_fog_bounds).
-	var half := maxf(_half_x(), _half_z())
-	# [half-extent, opacity] — denser the deeper into the fog you are
-	# (first bank stands just past the boundary bowl's rim at half+16)
-	for ring in [[half + 18.0, 0.05], [half + 26.0, 0.08], [half + 34.0, 0.12],
-			[half + 43.0, 0.16], [half + 56.0, 0.24]]:
-		var r: float = ring[0]
+	# Banks offset from EACH axis of the painted rectangle, so a 96x48 map gets
+	# an oblong of fog around it instead of a square drawn on its longest side.
+	# [offset past the edge, opacity] — denser the deeper into the fog you are
+	# (the first bank stands just past the boundary bowl's rim at +16).
+	for ring in [[18.0, 0.05], [26.0, 0.08], [34.0, 0.12], [43.0, 0.16], [56.0, 0.24]]:
+		var m: float = ring[0]
 		var mat := ShaderMaterial.new()
 		mat.shader = shader
 		mat.set_shader_parameter("alpha_max", ring[1])
 		for i in 4:
+			# Sides 0/2 stand off the Z edges and span X; 1/3 the other way.
+			var across: float = (_half_x() if i % 2 == 0 else _half_z()) + m
+			var out: float = (_half_z() if i % 2 == 0 else _half_x()) + m
 			var mi := MeshInstance3D.new()
 			var quad := QuadMesh.new()
-			quad.size = Vector2(r * 2.0 + 10.0, wall_h)
+			quad.size = Vector2(across * 2.0 + 10.0, wall_h)
 			mi.mesh = quad
 			mi.material_override = mat
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			mi.rotation.y = i * PI / 2.0
-			mi.position = Vector3(0, wall_y, 0) + Basis(Vector3.UP, i * PI / 2.0) * Vector3(0, 0, -r)
+			mi.position = Vector3(0, wall_y, 0) + Basis(Vector3.UP, i * PI / 2.0) * Vector3(0, 0, -out)
 			add_child(mi)
 
 
@@ -797,9 +820,11 @@ func _update_fog_bounds() -> void:
 	if _fog_rect == null:
 		return
 	var hpos := Vector2(player.global_position.x, player.global_position.z)
-	# Max-norm distance so the fog line hugs the SQUARE play area exactly
-	var d := maxf(absf(hpos.x), absf(hpos.y))
-	var f := clampf((d - _fog_start) / (_fog_white - _fog_start), 0.0, 1.0)
+	# How far OUTSIDE the painted rectangle you are, per axis: on a 96x48 map
+	# the boundary has to be an oblong like the map is, not a square drawn
+	# around its longest side.
+	var d := maxf(absf(hpos.x) - _half_x(), absf(hpos.y) - _half_z())
+	var f := clampf((d - FOG_MARGIN) / FOG_RAMP, 0.0, 1.0)
 	if player.godmode or player.dead:
 		f = 0.0
 	_fog_f = f
@@ -808,7 +833,7 @@ func _update_fog_bounds() -> void:
 		# Thicken the ever-present base haze; the sky whites out with it
 		_env_ref.fog_density = FOG_BASE + f * 0.05
 		_env_ref.fog_sky_affect = 0.1 + 0.9 * f
-	if f < 1.0 or d < 1.0:
+	if f < 1.0 or hpos.length() < 1.0:
 		return
 	# Whited out: about-face toward the center (camera too, so W walks back)
 	var dir := Vector3(-hpos.x, 0.0, -hpos.y).normalized()
@@ -999,7 +1024,7 @@ func _build_editor_ui() -> void:
 	box.add_child(_claim_banner)
 
 	_hint = Label.new()
-	_hint.text = "[LMB - Paint]  [RMB - Erase]  [Scroll - Layer]"
+	_hint.text = HINT_PAINT
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint.add_theme_font_size_override("font_size", 16)
 	_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
@@ -1027,26 +1052,33 @@ func _build_editor_ui() -> void:
 		bb.button_pressed = shape == _brush
 		bb.pressed.connect(func(): _brush = shape)
 		opts.add_child(bb)
-	# SPIRE MODE: paint high and the column beneath fills in with it. Off,
-	# slabs are free to float.
-	var spire := Button.new()
-	spire.text = "SPIRE"
-	spire.toggle_mode = true
-	spire.focus_mode = Control.FOCUS_NONE
-	spire.button_pressed = _spire_mode
-	spire.custom_minimum_size = Vector2(110, 28)
-	# Armed reads as pressed-in and greyed, not alarm-red. A toggled Button
-	# draws its label with font_pressed_color, so every state has to be set.
+	# FILL: the whole column at once, for shaping a seeded world fast. Off it
+	# sits greyed out of the way; armed it goes bright orange, because with it
+	# on every click does something far bigger than a brush stroke.
+	var fill := Button.new()
+	fill.text = "FILL"
+	fill.toggle_mode = true
+	fill.focus_mode = Control.FOCUS_NONE
+	fill.button_pressed = _fill_mode
+	fill.custom_minimum_size = Vector2(110, 28)
+	# A toggled Button draws its label with font_pressed_color, so every state
+	# has to be set or the "on" look only survives until the mouse moves.
 	var tint := func(on: bool) -> void:
-		var c := Color(1, 1, 1, 0.32) if on else Color(1, 1, 1, 0.9)
+		var c := Color("#1a1006") if on else Color(1, 1, 1, 0.32)
 		for slot in ["font_color", "font_pressed_color", "font_hover_color",
 				"font_hover_pressed_color", "font_focus_color"]:
-			spire.add_theme_color_override(slot, c)
-	spire.toggled.connect(func(on: bool):
-		_spire_mode = on
-		tint.call(on))
-	tint.call(_spire_mode)
-	opts.add_child(spire)
+			fill.add_theme_color_override(slot, c)
+		for slot in ["normal", "pressed", "hover", "focus"]:
+			if on:
+				fill.add_theme_stylebox_override(slot, Style.panel_box(FILL_ON, 4))
+			else:
+				fill.remove_theme_stylebox_override(slot)
+	fill.toggled.connect(func(on: bool):
+		_fill_mode = on
+		tint.call(on)
+		_update_hint())
+	tint.call(_fill_mode)
+	opts.add_child(fill)
 
 	var canvas_row := HBoxContainer.new()
 	canvas_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -1123,11 +1155,41 @@ func _build_editor_ui() -> void:
 	buttons.add_child(stop)
 	_end_claim_button = stop
 
+	# ...and while the room is being polled on it, by the poll itself.
+	var vote := HBoxContainer.new()
+	vote.alignment = BoxContainer.ALIGNMENT_CENTER
+	vote.add_theme_constant_override("separation", 8)
+	vote.visible = false
+	buttons.add_child(vote)
+	_vote_row = vote
+	_vote_label = Label.new()
+	_vote_label.add_theme_font_size_override("font_size", 20)
+	_vote_label.add_theme_color_override("font_color", Color("#ffd54a"))
+	_vote_label.custom_minimum_size = Vector2(160, 40)
+	_vote_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	vote.add_child(_vote_label)
+	for opt in [["YES", true, Color("#7dedb0")], ["NO", false, Color("#ff8a7d")]]:
+		var vb := Button.new()
+		vb.text = str(opt[0])
+		vb.focus_mode = Control.FOCUS_NONE
+		vb.custom_minimum_size = Vector2(90, 40)
+		vb.add_theme_color_override("font_color", opt[2])
+		vb.pressed.connect(func(): Net.emit_event("startVoteCast", bool(opt[1])))
+		vote.add_child(vb)
+
 	_status = Label.new()
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_status.add_theme_font_size_override("font_size", 16)
 	_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	box.add_child(_status)
+
+
+const HINT_PAINT := "[LMB - Paint]  [RMB - Erase]  [Scroll - Layer]"
+const HINT_FILL := "[LMB - Fill]  [RMB - Strip]  [Scroll - Layer]"
+
+func _update_hint() -> void:
+	if _hint:
+		_hint.text = HINT_FILL if _fill_mode else HINT_PAINT
 
 
 func _set_layer(li: int) -> void:
@@ -1163,20 +1225,25 @@ func brush_offsets() -> Array:
 	return out
 
 
-## One canvas cell on the active layer. SPIRE MODE fills the layers beneath
-## as you paint high, so a tower comes with its column; with it off, slabs
-## are free to hang in the air. The home deadzone refuses paint entirely.
+## One canvas cell. Normally that's a single bit on the active layer; with FILL
+## armed a click works the whole column instead — left builds the cell solid
+## from basement to roof, right takes the sky back off it and leaves the ground
+## and the basement standing. The home deadzone refuses paint entirely.
 func paint_cell(r: int, c: int, fill: bool) -> void:
 	if _in_deadzone(r, c) or not _claim_mine(r, c):
 		return
 	var i := r * _wc() + (c >> 5)
 	var bit := 1 << (31 - (c & 31))
+	if _fill_mode:
+		for li in LAYERS:
+			if fill or li <= GROUND:
+				_layers[li][i] = int(_layers[li][i]) | bit
+			else:
+				_layers[li][i] = int(_layers[li][i]) & ~bit
+		return
 	var rows: Array = _layers[_active_layer]
 	if fill:
 		rows[i] = int(rows[i]) | bit
-		if _spire_mode:
-			for li in _active_layer:
-				_layers[li][i] = int(_layers[li][i]) | bit
 	else:
 		rows[i] = int(rows[i]) & ~bit
 
@@ -1287,25 +1354,24 @@ class PixelPainter extends Control:
 				# Territory wash: your own ground reads strongest
 				if holder >= 0:
 					col = col.lerp(owner_scene._claim_color(holder), 0.5 if holder == me else 0.3)
-				# Home deadzone: off-limits to the brush, in play as well
-				var blocked: bool = owner_scene._in_own_deadzone(r, c) if fogging \
-					else owner_scene._in_deadzone(r, c)
-				if blocked:
+				# Home deadzone: off-limits to the brush, in play as well. Only
+				# ever YOUR OWN — a rival's red block would give their spawn
+				# away, fog or no fog, and the fog lifts the moment the map
+				# generates.
+				if owner_scene._in_own_deadzone(r, c):
 					col = col.lerp(Color(1.0, 0.25, 0.25), 0.35)
 				draw_rect(rect, col)
 		if phase == "claim":
 			_draw_claim(CELL, me)
-		# Spawn zones: yours green, everyone else's blue. Once the land is
-		# divided, someone else's spawn is behind the fog like everything else
-		# of theirs — you shouldn't be able to plan around it.
+		# Spawn zones: only ever your own. Where the others chose to land is
+		# theirs to know — the fog hides it during the edit phase, and this
+		# keeps hiding it through the moment the fog lifts and the map goes up.
 		var mine: Variant = owner_scene._my_px()
-		for h in (([mine] if mine is Array else []) if fogging else owner_scene._home_pixels()):
-			var is_mine: bool = mine is Array 				and int(mine[0]) == int(h[0]) and int(mine[1]) == int(h[1])
-			var col := Color("#7dedb0") if is_mine else Color("#7fb2ff")
-			var srect := Rect2(int(h[1]) * CELL, int(h[0]) * CELL, CELL - 1, CELL - 1)
-			draw_rect(srect, col)
+		if mine is Array:
+			var srect := Rect2(int(mine[1]) * CELL, int(mine[0]) * CELL, CELL - 1, CELL - 1)
+			draw_rect(srect, Color("#7dedb0"))
 			draw_rect(srect.grow(-3), Color("#0c2018"))
-			draw_rect(srect.grow(-5), col)
+			draw_rect(srect.grow(-5), Color("#7dedb0"))
 		# Co-painters' live cursors: an outline where they're hovering (the
 		# claim phase draws its own, so don't double up)
 		var now := Time.get_ticks_msec()

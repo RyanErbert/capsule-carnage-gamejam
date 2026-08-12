@@ -33,19 +33,40 @@ func _ready() -> void:
 	_input.text_submitted.connect(_send)
 	box.add_child(_input)
 	Net.event_received.connect(_on_net_event)
+	_hydrate()
+
+
+## Changing scenes builds a brand new chat box, so it opens on the room's
+## running conversation (Net mirrors the server's log) instead of empty.
+func _hydrate() -> void:
+	for row in Net.chat_log:
+		if row is Dictionary:
+			_render(row, bool(row.get("sys", false)))
 
 
 func _on_net_event(event: String, data: Variant) -> void:
+	if event == "chatHistory":
+		for child in _rows.get_children():
+			child.free()
+		_hydrate()
+		return
 	if not data is Dictionary or str(data.get("text", "")) == "":
 		return
-	if event == "chatMessage":
-		var color := str(data.get("color", "#ffffff"))
-		if not color.begins_with("#"):
-			color = "#ffffff"
-		_push("[color=%s]%s:[/color] %s" % [
-			color, _esc(str(data.get("name", "Player"))), _esc(str(data.get("text")))])
-	elif event == "systemMessage":
-		_push("[color=#ffd54a]%s[/color]" % _esc(str(data.get("text"))))
+	if event == "chatMessage" or event == "systemMessage":
+		_render(data, event == "systemMessage")
+
+
+func _render(data: Dictionary, sys: bool) -> void:
+	var text := str(data.get("text", ""))
+	if text == "":
+		return
+	if sys:
+		_push("[color=#ffd54a]%s[/color]" % _esc(text))
+		return
+	var color := str(data.get("color", "#ffffff"))
+	if not color.begins_with("#"):
+		color = "#ffffff"
+	_push("[color=%s]%s:[/color] %s" % [color, _esc(str(data.get("name", "Player"))), _esc(text)])
 
 
 func _esc(s: String) -> String:
