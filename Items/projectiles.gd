@@ -344,7 +344,12 @@ func _physics_process(delta: float) -> void:
 				if remotes[id].global_position.distance_to(b["pos"]) < HIT_RADIUS:
 					hit = true
 					var d := vel.normalized()
-					Net.emit_event("machinegunHit", {"targetId": id, "dir": {"x": d.x, "y": d.y, "z": d.z}})
+					# A turret's rounds are relayed through its owner, so the
+					# death line has to be told it was the sentry, not them
+					Net.emit_event("machinegunHit", {
+						"targetId": id, "dir": {"x": d.x, "y": d.y, "z": d.z},
+						"src": "turret" if b["tid"] != "" else "machinegun",
+					})
 					break
 				# Their drone is a target too — smaller, so a tighter sphere
 				var dp: Variant = remotes[id].drone_pos()

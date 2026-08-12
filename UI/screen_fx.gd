@@ -2,25 +2,25 @@ extends Node
 
 ## Full-screen shader effects:
 ## - SCI-FI: cyan grade + scanlines + chromatic fringe + faint grid while
-##   you're flying the god-mode drone (god_menu toggles it).
-## - DATAMOSH: a REAL mosh — a feedback buffer holds the previous frame and
-##   re-warps it every frame along per-block motion vectors (stale P-frames),
-##   while only a few macroblocks refresh from the live image. The picture
-##   genuinely melts and smears while you're taking damage, then heals.
+##   you're flying the build drone (god_menu toggles it); red for the
+##   rat-attack's hunter vision.
+## - DATAMOSH: taking damage tears the picture into macroblocks that grab a
+##   motion vector and HOLD it — smearing along it, chroma planes pulling
+##   apart, whole scan rows slipping sideways, a few blocks flattening to a
+##   lost DC coefficient. It decays back to a clean image over a few seconds.
+##
+## The mosh is a single screen-space pass. The old version bounced the frame
+## between two SubViewports to build real optical flow; it was fragile, hard
+## to verify, and most of the time you couldn't tell it had fired. Holding a
+## per-block motion vector across many frames reproduces the part of real
+## datamoshing you actually SEE, and it either draws or it doesn't.
 ## Everything sits below the HUD layer so menus stay readable.
 
-const GLITCH_DECAY := 0.85   # slow decay: a big hit melts for ~4 s
-const DEAD_HP := 0.35        # below this health fraction, dead pixels set in
+const GLITCH_DECAY := 0.75   # a solid hit stays legible for ~4 s
+const MIN_VISIBLE := 0.02
 
 var _scifi_rect: ColorRect
-# Ping-pong feedback pair: reading the render target you're writing is
-# undefined, so each frame ONE viewport renders while sampling the OTHER.
-var _mosh_a: SubViewport
-var _mosh_b: SubViewport
-var _copy_vp: SubViewport       # 1-frame-delayed copy of the live screen
-var _mosh_display: ColorRect    # on screen: shows the buffer while moshing
-var _flip := false
-var _was_active := false
+var _mosh_rect: ColorRect
 var _glitch_amount := 0.0
 var _t := 0.0
 
@@ -45,74 +45,54 @@ void fragment() {
 }
 "
 
-## Passthrough that copies the live screen into a viewport — sampling that
-## viewport's texture next frame gives us the PREVIOUS live frame, which the
-## mosh shader needs to estimate optical flow.
-const COPY_SHADER := "
-shader_type canvas_item;
-uniform sampler2D live_tex : filter_linear;
-void fragment() { COLOR = vec4(texture(live_tex, UV).rgb, 1.0); }
-"
-
-## The actual mosh, the way real datamoshing works: per-macroblock OPTICAL
-## FLOW is estimated between the current and previous live frames
-## (gradient/Lucas-Kanade step), and the feedback buffer — the held
-## \"P-frames\" — is advected along that flow instead of refreshing. Only a
-## few random macroblocks receive fresh \"I-frame\" data each frame, so the
-## picture melts and smears along real motion until the effect decays.
-const MOSH_FEEDBACK_SHADER := "
-shader_type canvas_item;
-uniform sampler2D live_tex : filter_linear;
-uniform sampler2D prev_live_tex : filter_linear;
-uniform sampler2D prev_tex : filter_linear;
-uniform float amount = 0.0;
-uniform float t = 0.0;
-float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-void fragment() {
-	vec2 uv = UV;
-	vec2 bsize = vec2(48.0, 27.0);
-	vec2 block = floor(uv * bsize);
-	vec2 buv = (block + 0.5) / bsize;
-	// One-step gradient optical flow at the macroblock center
-	float e = 0.004;
-	float gx = lum(texture(live_tex, buv + vec2(e, 0.0)).rgb) - lum(texture(live_tex, buv - vec2(e, 0.0)).rgb);
-	float gy = lum(texture(live_tex, buv + vec2(0.0, e)).rgb) - lum(texture(live_tex, buv - vec2(0.0, e)).rgb);
-	float gt = lum(texture(live_tex, buv).rgb) - lum(texture(prev_live_tex, buv).rgb);
-	vec2 flow = -gt * vec2(gx, gy) / (gx * gx + gy * gy + 1e-4);
-	flow = clamp(flow, vec2(-0.03), vec2(0.03));
-	// P-frame step: carry the held image along the estimated motion
-	vec3 held = texture(prev_tex, uv - flow).rgb;
-	vec3 cur = texture(live_tex, uv).rgb;
-	// Sparse I-frame refresh: barely any blocks re-key while the mosh is hot,
-	// so held frames drag long smears before the image heals
-	float refresh = step(rnd(block + floor(t * 20.0)), mix(1.0, 0.012, amount));
-	COLOR = vec4(mix(held, cur, max(refresh, 1.0 - amount)), 1.0);
-}
-"
-
-## On the main screen: fade the mosh buffer in over the live image. The
-## luminance guard falls back to the live frame if the buffer is dead.
-## `dead` (0..1) permanently kills a scattering of macroblocks — stuck sensor
-## pixels that stay on screen while your health is critical.
-const MOSH_DISPLAY_SHADER := "
+## The mosh. `amount` (0..1) drives how much of the frame is corrupted, how
+## far it smears, and how violently rows slip.
+const MOSH_SHADER := "
 shader_type canvas_item;
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear;
-uniform sampler2D mosh_tex : filter_linear;
 uniform float amount = 0.0;
-uniform float dead = 0.0;
+uniform float t = 0.0;
+const vec2 GRID = vec2(44.0, 26.0);
 float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+vec2 safe(vec2 uv) { return clamp(uv, vec2(0.002), vec2(0.998)); }
 void fragment() {
-	vec3 live = texture(screen_tex, SCREEN_UV).rgb;
-	vec3 mosh = texture(mosh_tex, SCREEN_UV).rgb;
-	float ok = step(0.005, dot(mosh, vec3(1.0)));
-	vec3 col = mix(live, mosh, clamp(amount * 2.2, 0.0, 1.0) * ok);
-	// Dead pixels: a static mask of stuck blocks, flat corrupted color
-	vec2 block = floor(SCREEN_UV * vec2(96.0, 54.0));
-	float dp = step(1.0 - dead, rnd(block * 1.37));
-	vec3 stuck = vec3(rnd(block), rnd(block + 4.2), rnd(block + 9.1));
-	stuck = mix(vec3(0.02), stuck * vec3(0.5, 0.9, 0.4), step(0.6, stuck.g)) * 0.4;
-	COLOR = vec4(mix(col, stuck, dp), 1.0);
+	float a = clamp(amount, 0.0, 1.0);
+	vec2 uv = SCREEN_UV;
+	vec2 block = floor(uv * GRID);
+
+	// Each macroblock re-keys on its own stagger and HOLDS its motion vector
+	// in between — that hold is what drags the image instead of shimmering it.
+	float key = floor(t * 2.5 + rnd(block) * 3.0);
+	vec2 mv = (vec2(rnd(block + key), rnd(block + key + 31.7)) - 0.5) * 2.0;
+	// Most blocks go bad at high amount; a few always survive, so the frame
+	// stays readable enough to keep playing through it.
+	float sick = step(1.0 - a, rnd(block * 1.31 + floor(key * 0.5)) * 0.85 + 0.15);
+	vec2 off = mv * 0.12 * a * sick;
+
+	// Smear: taps trailing back along the motion vector
+	vec3 col = vec3(0.0);
+	for (int i = 0; i < 5; i++)
+		col += texture(screen_tex, safe(uv + off * float(i) * 0.28)).rgb;
+	col *= 0.2;
+
+	// Chroma planes pull apart inside a corrupted block
+	float cs = 0.018 * a * sick;
+	col.r = texture(screen_tex, safe(uv + off + vec2(cs, 0.0))).r;
+	col.b = texture(screen_tex, safe(uv + off - vec2(cs, 0.0))).b;
+
+	// Whole scan rows slip sideways for a frame or two
+	float row = floor(uv.y * 120.0);
+	float tick = floor(t * 12.0);
+	if (step(0.97 - a * 0.14, rnd(vec2(row, tick))) > 0.5) {
+		float d = (rnd(vec2(row + 5.0, tick)) - 0.5) * 0.3 * a;
+		col = texture(screen_tex, safe(uv + vec2(d, 0.0))).rgb;
+	}
+
+	// Lost DC coefficient: the odd block flattens to one washed-out color
+	float flat_block = step(0.995 - a * 0.045, rnd(block + floor(t * 4.0)));
+	col = mix(col, texture(screen_tex, (block + 0.5) / GRID).rgb * 1.3, flat_block);
+
+	COLOR = vec4(col, 1.0);
 }
 "
 
@@ -120,7 +100,7 @@ void fragment() {
 func _ready() -> void:
 	add_to_group("screen_fx")
 	_scifi_rect = _make_screen_rect(SCIFI_SHADER)
-	_build_mosh.call_deferred()
+	_mosh_rect = _make_screen_rect(MOSH_SHADER)
 
 
 func _make_screen_rect(code: String) -> ColorRect:
@@ -140,63 +120,8 @@ func _make_screen_rect(code: String) -> ColorRect:
 	return rect
 
 
-func _build_mosh() -> void:
-	var vp_size: Vector2i = get_viewport().size
-
-	# The ping-pong pair FIRST in tree order: sibling viewports render in
-	# attach order, so when a mosh pass samples the copy buffer below it,
-	# that buffer still holds the PREVIOUS frame — real optical flow.
-	_mosh_a = _make_mosh_vp(vp_size)
-	_mosh_b = _make_mosh_vp(vp_size)
-	_fb_mat(_mosh_a).set_shader_parameter("prev_tex", _mosh_b.get_texture())
-	_fb_mat(_mosh_b).set_shader_parameter("prev_tex", _mosh_a.get_texture())
-
-	# Live-frame history buffer (its texture lags the screen by one frame)
-	_copy_vp = SubViewport.new()
-	_copy_vp.size = vp_size
-	_copy_vp.disable_3d = true
-	_copy_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	add_child(_copy_vp)
-	var copy_rect := ColorRect.new()
-	copy_rect.size = vp_size
-	var copy_shader := Shader.new()
-	copy_shader.code = COPY_SHADER
-	var copy_mat := ShaderMaterial.new()
-	copy_mat.shader = copy_shader
-	copy_mat.set_shader_parameter("live_tex", get_viewport().get_texture())
-	copy_rect.material = copy_mat
-	_copy_vp.add_child(copy_rect)
-	_fb_mat(_mosh_a).set_shader_parameter("prev_live_tex", _copy_vp.get_texture())
-	_fb_mat(_mosh_b).set_shader_parameter("prev_live_tex", _copy_vp.get_texture())
-
-	_mosh_display = _make_screen_rect(MOSH_DISPLAY_SHADER)
-	(_mosh_display.material as ShaderMaterial).set_shader_parameter("mosh_tex", _mosh_a.get_texture())
-
-
-func _make_mosh_vp(vp_size: Vector2i) -> SubViewport:
-	var vp := SubViewport.new()
-	vp.size = vp_size
-	vp.disable_3d = true
-	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	add_child(vp)
-	var rect := ColorRect.new()
-	rect.size = vp_size
-	var shader := Shader.new()
-	shader.code = MOSH_FEEDBACK_SHADER
-	var mat := ShaderMaterial.new()
-	mat.shader = shader
-	mat.set_shader_parameter("live_tex", get_viewport().get_texture())
-	rect.material = mat
-	vp.add_child(rect)
-	return vp
-
-
-func _fb_mat(vp: SubViewport) -> ShaderMaterial:
-	return (vp.get_child(0) as ColorRect).material as ShaderMaterial
-
-
-## `grade` tints the whole overlay: default cyan (drone/crow-bot), red for
-## the rat-attack's hunter vision.
+## `grade` tints the whole overlay: default cyan (build drone / crow-bot),
+## red for the rat-attack's hunter vision.
 func set_scifi(on: bool, grade := Vector3(0.72, 1.05, 1.28)) -> void:
 	if _scifi_rect:
 		_scifi_rect.visible = on
@@ -208,54 +133,21 @@ func pulse(strength: float) -> void:
 	_glitch_amount = clampf(maxf(_glitch_amount, strength), 0.0, 1.0)
 
 
-## Health fraction (0..1). Critical health burns dead pixels into the screen;
-## they stay until you heal back over the threshold.
-var _health := 1.0
-
-func set_health(frac: float) -> void:
-	_health = clampf(frac, 0.0, 1.0)
-
-
-func _dead_amount() -> float:
-	return clampf((DEAD_HP - _health) / DEAD_HP, 0.0, 1.0) * 0.12
+## Current mosh strength (headless tests read this).
+func glitch_amount() -> float:
+	return _glitch_amount
 
 
 func _process(delta: float) -> void:
-	if _mosh_display == null:
+	if _mosh_rect == null:
 		return
 	_t += delta
 	_glitch_amount *= exp(-GLITCH_DECAY * delta)
-	var dead := _dead_amount()
-	var active := _glitch_amount > 0.03
-	_mosh_display.visible = active or dead > 0.001
-	(_mosh_display.material as ShaderMaterial).set_shader_parameter("dead", dead)
-	if not active:
-		_was_active = false
-		_mosh_a.render_target_update_mode = SubViewport.UPDATE_DISABLED
-		_mosh_b.render_target_update_mode = SubViewport.UPDATE_DISABLED
-		_copy_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
-		if _mosh_display.visible:
-			# Dead pixels only: keep the melt off the live image
-			(_mosh_display.material as ShaderMaterial).set_shader_parameter("amount", 0.0)
+	if _glitch_amount < MIN_VISIBLE:
+		_glitch_amount = 0.0
+	_mosh_rect.visible = _glitch_amount > 0.0
+	if not _mosh_rect.visible:
 		return
-	# Track window size so the buffers never stretch
-	if _mosh_a.size != Vector2i(get_viewport().size):
-		for vp: SubViewport in [_mosh_a, _mosh_b, _copy_vp]:
-			vp.size = get_viewport().size
-			(vp.get_child(0) as ColorRect).size = vp.size
-	# Ping-pong: this frame's writer advects the other buffer's last frame
-	_flip = not _flip
-	var writer := _mosh_a if _flip else _mosh_b
-	var reader := _mosh_b if _flip else _mosh_a
-	writer.render_target_update_mode = SubViewport.UPDATE_ONCE
-	reader.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	_copy_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-	var fb := _fb_mat(writer)
-	# Rising edge: seed the buffer with a clean copy of the screen (amount 0
-	# forces a full I-frame refresh), THEN let it melt on following frames
-	fb.set_shader_parameter("amount", _glitch_amount if _was_active else 0.0)
-	fb.set_shader_parameter("t", _t)
-	_was_active = true
-	var disp := _mosh_display.material as ShaderMaterial
-	disp.set_shader_parameter("amount", _glitch_amount)
-	disp.set_shader_parameter("mosh_tex", writer.get_texture())
+	var mat := _mosh_rect.material as ShaderMaterial
+	mat.set_shader_parameter("amount", _glitch_amount)
+	mat.set_shader_parameter("t", _t)

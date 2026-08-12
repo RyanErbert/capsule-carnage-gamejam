@@ -16,6 +16,7 @@ var is_godmode := false
 @onready var _name_label: Label3D = $NameLabel
 
 var _cube: Node3D = null  # roundcube visual for web-shaped players
+var _rig: Node3D = null   # the weapon they're holding (Items/weapon_rig.gd)
 
 
 func setup(id: String, data: Dictionary) -> void:
@@ -51,7 +52,16 @@ func apply_move(d: Dictionary) -> void:
 			_cube.set_alpha(0.09 if godmode else 0.3)
 		else:
 			_mesh.transparency = 0.7 if godmode else 0.0
-	# Their god-mode drone, rendered where they reported it (shootable!)
+	# Whatever they're holding, aimed where they're aiming
+	if d.has("w"):
+		if _rig == null:
+			_rig = load("res://Items/weapon_rig.gd").new()
+			_rig.position = Vector3(0, 0.15, 0)
+			add_child(_rig)
+		_rig.set_weapon(str(d.get("w", "")))
+		_rig.aim(Vector3(d.get("ax", 0.0), d.get("ay", 0.0), d.get("az", -1.0)))
+		_rig.set_holstered(godmode)
+	# Their build drone, rendered where they reported it (shootable!)
 	var dd: Variant = d.get("drone")
 	if dd is Dictionary:
 		_drone_target = Vector3(dd.get("x", 0.0), dd.get("y", 0.0), dd.get("z", 0.0))

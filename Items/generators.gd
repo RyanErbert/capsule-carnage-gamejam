@@ -9,11 +9,16 @@ extends Node3D
 ## drawn on every client between the holder and the generator.
 
 const GRAB_RANGE := 3.5
+const TOW_RANGE := 6.0        # a vehicle can hitch from a little further out
 const ROPE_LEN := 3.0
 const ROPE_SNAP := 12.0       # overstretched: the rope lets go
-const GEN_MASS := 26.0        # the full-size unit is genuinely heavy
+const GEN_MASS := 140.0       # a big core is a boulder: hauling it is a chore
 const MINI_MASS := 6.0        # corpse drops are luggable
-const SPRING_A := 34.0        # rope tension as an ACCELERATION (x mass below)
+# A person on a rope can only pull so hard, no matter what's on the other end,
+# so a big core barely budges on foot. A vehicle has engine to spare: its
+# tension scales with the load, giving the same acceleration whatever the mass.
+const HAND_TENSION := 900.0   # newtons-ish, FLAT (not scaled by mass)
+const TOW_ACCEL := 30.0       # vehicle tow: acceleration, x mass below
 const PLAYER_PULL := 0.55     # ...times mass: the big one really fights back
 const SETTLE_TIME := 1.4      # after release it keeps tumbling before freezing
 const RELAY_INTERVAL := 0.1
@@ -35,6 +40,7 @@ var _sync: Node
 var _rope: MeshInstance3D
 var _rope_mesh: ImmediateMesh
 var _prompt: PanelContainer
+var _prompt_key: Label
 var _prompt_suffix: Label
 
 
@@ -67,10 +73,10 @@ func _build_prompt() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 8)
 	_prompt.add_child(row)
-	var key := Label.new()
-	key.text = " E "
-	key.add_theme_font_size_override("font_size", 16)
-	row.add_child(key)
+	_prompt_key = Label.new()
+	_prompt_key.text = " E "
+	_prompt_key.add_theme_font_size_override("font_size", 16)
+	row.add_child(_prompt_key)
 	_prompt_suffix = Label.new()
 	_prompt_suffix.add_theme_font_size_override("font_size", 16)
 	_prompt_suffix.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
@@ -178,28 +184,34 @@ func nearest_deletable(pos: Vector3, radius := 4.0) -> Dictionary:
 
 # --- E interaction ----------------------------------------------------------
 
+## E hauls a core on foot. In a vehicle E is the dismount, so the tow hitch
+## is F — attach with a core in range, press again to drop it.
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_E \
-			and get_viewport().gui_get_focus_owner() == null \
-			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
-			and player != null and not player.godmode and player.vehicle == null:
-		if _held_id != "":
-			_drop_held(true)
-			get_viewport().set_input_as_handled()
-			return
-		var best_id := ""
-		var best_d := GRAB_RANGE
-		for id in _gens:
-			if _gens[id]["holder"] != "" and _gens[id]["holder"] != _self_id():
-				continue
-			var d: float = _gens[id]["node"].global_position.distance_to(player.global_position)
-			if d < best_d:
-				best_d = d
-				best_id = id
-		if best_id != "":
-			_grab(best_id)
-			get_viewport().set_input_as_handled()
+	if not (event is InputEventKey and event.pressed and not event.echo) \
+			or get_viewport().gui_get_focus_owner() != null \
+			or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED \
+			or player == null or player.godmode:
+		return
+	var towing := player.vehicle != null
+	if event.keycode != (KEY_F if towing else KEY_E):
+		return
+	if _held_id != "":
+		_drop_held(true)
+		get_viewport().set_input_as_handled()
+		return
+	var anchor: Node3D = player.vehicle if towing else player
+	var best_id := ""
+	var best_d := TOW_RANGE if towing else GRAB_RANGE
+	for id in _gens:
+		if _gens[id]["holder"] != "" and _gens[id]["holder"] != _self_id():
+			continue
+		var d: float = _gens[id]["node"].global_position.distance_to(anchor.global_position)
+		if d < best_d:
+			best_d = d
+			best_id = id
+	if best_id != "":
+		_grab(best_id)
+		get_viewport().set_input_as_handled()
 
 
 func _grab(id: String) -> void:
@@ -226,6 +238,9 @@ func _drop_held(tell_server: bool) -> void:
 		player.dragging_generator = false
 	if not _gens.has(id):
 		return
+	# Let go of the rope the instant you press the key — the settle tumble
+	# below is the core falling, not you still holding it.
+	_gens[id]["holder"] = ""
 	if tell_server:
 		_settle_id = id
 		_settle_t = SETTLE_TIME
@@ -251,8 +266,8 @@ func _finish_settle(id: String, tell_server: bool) -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Dropped implicitly (death, godmode, vehicle)
-	if _held_id != "" and player and (player.godmode or player.vehicle != null or player.dead):
+	# Dropped implicitly (death, godmode)
+	if _held_id != "" and player and (player.godmode or player.dead):
 		_drop_held(true)
 
 	for id in _gens:
@@ -289,23 +304,34 @@ func _physics_process(delta: float) -> void:
 			})
 
 
-## The drag is FULL physics: the generator is a heavy rigid body that
-## tumbles and rolls; the rope only pulls when taut, and the same tension
-## yanks the PLAYER back — its weight (plus it snagging on terrain and
-## walls) is what slows you down. Overstretch it and the rope snaps.
+## The drag is FULL physics: the core is a heavy rigid body that tumbles and
+## rolls; the rope only pulls when taut, and the same tension yanks the HAULER
+## back. On foot the pull is a flat force, so a 140 kg core barely creeps —
+## hitch it to a vehicle and the tension scales with the load instead.
+## Overstretch the rope and it snaps.
 func _drag_step(body: RigidBody3D, delta: float) -> void:
-	var to_player := player.global_position - body.global_position
-	var dist := to_player.length()
+	var towing: bool = player.vehicle != null and is_instance_valid(player.vehicle)
+	var anchor: Node3D = player.vehicle if towing else player
+	var to_anchor := anchor.global_position - body.global_position
+	var dist := to_anchor.length()
 	if dist > ROPE_SNAP:
 		_drop_held(true)
 		return
 	var stretch := clampf(dist - ROPE_LEN, 0.0, 6.0)
 	if stretch > 0.0 and dist > 0.01:
-		var dir := to_player / dist
-		# Tension scales with mass on BOTH ends: the generator accelerates the
-		# same either way, but the heavy one hauls you back much harder.
-		body.apply_central_force(dir * stretch * SPRING_A * body.mass)
-		player.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta
+		var dir := to_anchor / dist
+		if towing:
+			body.apply_central_force(dir * stretch * TOW_ACCEL * body.mass)
+			player.vehicle.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta * 0.15
+		else:
+			body.apply_central_force(dir * stretch * HAND_TENSION)
+			player.velocity -= dir * stretch * PLAYER_PULL * body.mass * delta
+	# Buried cores get dug out, and terrain keeps moving under them: anything
+	# that ends up inside solid rock is pushed up until it's free again.
+	var terrain: Node = get_tree().get_first_node_in_group("voxel_terrain")
+	if terrain and terrain.density_at(body.global_position) > 0.55:
+		body.global_position.y += 3.0 * delta
+		body.linear_velocity.y = maxf(body.linear_velocity.y, 0.0)
 	# Fell out of the world mid-drag: haul it back to a spawn
 	if body.global_position.y < -20.0:
 		body.global_position = player.respawn_point() + Vector3(0, 2, 0)
@@ -326,7 +352,13 @@ func _update_gen_visuals() -> void:
 	for id in _gens:
 		var g: Dictionary = _gens[id]
 		var tethered: bool = g["holder"] != "" or id == _settle_id
-		g["ring"].visible = not tethered
+		var ring: Node3D = g["ring"]
+		ring.visible = not tethered
+		# The ring is ground furniture, not part of the core: it's top-level so
+		# a rolling core can't tip it on its side.
+		ring.global_transform = Transform3D(
+			Basis().scaled(Vector3(1.0, 0.06, 1.0)),
+			g["node"].global_position + Vector3(0, -0.62, 0))
 		g["label"].visible = player != null \
 			and g["node"].global_position.distance_to(eye) < LABEL_RANGE
 
@@ -334,32 +366,35 @@ func _update_gen_visuals() -> void:
 func _update_prompt() -> void:
 	if _prompt == null or player == null:
 		return
-	if player.godmode or player.dead or player.vehicle != null \
-			or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+	if player.godmode or player.dead or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		_prompt.visible = false
 		return
+	var towing: bool = player.vehicle != null and is_instance_valid(player.vehicle)
+	_prompt_key.text = " F " if towing else " E "
 	if _held_id != "":
 		_prompt.visible = true
 		_prompt_suffix.text = "release"
 		return
+	var anchor: Node3D = player.vehicle if towing else player
 	var cam := get_viewport().get_camera_3d()
-	var looking := false
+	var near := false
 	for id in _gens:
 		var g: Dictionary = _gens[id]
 		if g["holder"] != "" and g["holder"] != _self_id():
 			continue
 		var node: Node3D = g["node"]
-		if node.global_position.distance_to(player.global_position) > GRAB_RANGE:
+		if node.global_position.distance_to(anchor.global_position) > (TOW_RANGE if towing else GRAB_RANGE):
 			continue
-		if cam:
+		# On foot you have to be looking at it; a hitch just needs proximity
+		if cam and not towing:
 			var to_gen: Vector3 = (node.global_position - cam.global_position).normalized()
 			if to_gen.dot(-cam.global_transform.basis.z) < 0.5:
 				continue
-		looking = true
+		near = true
 		break
-	_prompt.visible = looking
-	if looking:
-		_prompt_suffix.text = "drag"
+	_prompt.visible = near
+	if near:
+		_prompt_suffix.text = "tow" if towing else "drag"
 
 
 ## Rope lines between every held generator and its holder (self or remote).
@@ -383,14 +418,9 @@ func _draw_ropes() -> void:
 		if not any:
 			any = true
 			_rope_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
-		var a: Vector3 = holder_pos + Vector3(0, 0.4, 0)
-		var b: Vector3 = g["node"].global_position + Vector3(0, 0.6, 0)
-		# Slight sag: draw as two segments through a dipped midpoint
-		var mid := (a + b) / 2.0 + Vector3(0, -0.35, 0)
-		_rope_mesh.surface_add_vertex(a)
-		_rope_mesh.surface_add_vertex(mid)
-		_rope_mesh.surface_add_vertex(mid)
-		_rope_mesh.surface_add_vertex(b)
+		# One taut line, hauler to core
+		_rope_mesh.surface_add_vertex(holder_pos + Vector3(0, 0.4, 0))
+		_rope_mesh.surface_add_vertex(g["node"].global_position + Vector3(0, 0.6, 0))
 	if any:
 		_rope_mesh.surface_end()
 
@@ -461,8 +491,7 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	torus2.material = ring_mat
 	ring_r.mesh = torus2
-	ring_r.scale.y = 0.06
-	ring_r.position.y = -0.62
+	ring_r.top_level = true   # stays flat on the ground while the core rolls
 	root.add_child(ring_r)
 
 	return root

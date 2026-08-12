@@ -182,7 +182,7 @@ func _build_ui() -> void:
 	add_child(center)
 
 	var root := VBoxContainer.new()
-	root.custom_minimum_size = Vector2(720, 0)
+	root.custom_minimum_size = Vector2(860, 0)
 	root.add_theme_constant_override("separation", 12)
 	center.add_child(root)
 
@@ -256,19 +256,17 @@ func _build_ui() -> void:
 	gear.custom_minimum_size = Vector2(34, 0)
 	mode_row.add_child(gear)
 
-	var map_row := HBoxContainer.new()
-	map_row.add_theme_constant_override("separation", 6)
-	settings_col.add_child(map_row)
+	# One column: gamemode and level on top, map size underneath them
 	var level_opt := OptionButton.new()
 	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	level_opt.add_item("Canyon Sandbox")
 	level_opt.add_item("Testworld")
 	level_opt.select(1 if Settings.level == "testworld" else 0)
 	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")
-	map_row.add_child(level_opt)
+	settings_col.add_child(level_opt)
 	# Painted-map size (server-wide, like the mode). Bigger = slower generate.
 	_size_opt = OptionButton.new()
-	_size_opt.custom_minimum_size = Vector2(120, 0)
+	_size_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for s: Vector2i in GRID_OPTIONS:
 		_size_opt.add_item("%d x %d" % [s.x, s.y])
 	_size_opt.select(maxi(0, GRID_OPTIONS.find(Vector2i(
@@ -276,7 +274,7 @@ func _build_ui() -> void:
 	_size_opt.item_selected.connect(func(i: int):
 		Net.emit_event("updateGameSetting",
 			{"key": "gridW", "value": [GRID_OPTIONS[i].x, GRID_OPTIONS[i].y]}))
-	map_row.add_child(_size_opt)
+	settings_col.add_child(_size_opt)
 
 	_settings_box = PanelContainer.new()
 	_settings_box.visible = false
@@ -285,9 +283,25 @@ func _build_ui() -> void:
 	settings_col.add_child(_settings_box)
 	gear.pressed.connect(func(): _settings_box.visible = not _settings_box.visible)
 
-	# --- PLAYERS (live roster, full width under the 2x2) ---
+	# --- Bottom row: chat on the left, roster + JOIN + status on the right ---
+	var bottom := HBoxContainer.new()
+	bottom.add_theme_constant_override("separation", 12)
+	root.add_child(bottom)
+
+	# Chat docked into the lobby, shared with the editor and HUD
+	var chat := PanelContainer.new()
+	chat.set_script(load("res://UI/chat_box.gd"))
+	chat.custom_minimum_size = Vector2(0, 190)
+	chat.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bottom.add_child(chat)
+
+	var right := VBoxContainer.new()
+	right.custom_minimum_size = Vector2(320, 0)
+	right.add_theme_constant_override("separation", 8)
+	bottom.add_child(right)
+
 	var roster_box := _panel("PLAYERS")
-	root.add_child(roster_box.get_meta("panel"))
+	right.add_child(roster_box.get_meta("panel"))
 	_roster = Label.new()
 	_roster.add_theme_font_size_override("font_size", 16)
 	roster_box.add_child(_roster)
@@ -297,18 +311,12 @@ func _build_ui() -> void:
 	_join_btn.custom_minimum_size = Vector2(0, 46)
 	_join_btn.add_theme_font_size_override("font_size", 16)
 	_join_btn.pressed.connect(_join)
-	root.add_child(_join_btn)
+	right.add_child(_join_btn)
 
 	_status = Label.new()
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_status.add_theme_font_size_override("font_size", 16)
-	root.add_child(_status)
-
-	# Chat docked into the lobby column, shared with the editor and HUD
-	var chat := PanelContainer.new()
-	chat.set_script(load("res://UI/chat_box.gd"))
-	chat.custom_minimum_size = Vector2(0, 160)
-	root.add_child(chat)
+	right.add_child(_status)
 
 	# Big shared countdown before everyone is dropped into the editor
 	_countdown = Label.new()

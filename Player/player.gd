@@ -160,6 +160,7 @@ func suicide() -> void:
 		return
 	Net.emit_event("triggerExplosion", {
 		"x": global_position.x, "y": global_position.y, "z": global_position.z,
+		"cause": "blast",
 	})
 	global_position = respawn_point()
 	velocity = Vector3.ZERO

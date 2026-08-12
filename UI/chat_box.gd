@@ -13,7 +13,8 @@ var _input: LineEdit
 
 
 func _ready() -> void:
-	add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.55), 8))
+	# Matches the lobby's other panels: the 3D background behind it is busy
+	add_theme_stylebox_override("panel", Style.panel_box(Color(0.071, 0.082, 0.11, 0.94), 10))
 	if custom_minimum_size == Vector2.ZERO:
 		custom_minimum_size = Vector2(330, 190)  # hosts may pre-size to dock it
 	var box := VBoxContainer.new()

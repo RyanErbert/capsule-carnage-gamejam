@@ -31,6 +31,18 @@ var _sync: Node
 var _mg_firing := false
 var _mg_timer := 0.0
 var _rocket_cd := 0.0
+var _rig: Node3D          # the held weapon on the body (Items/weapon_rig.gd)
+var _aim_cache := Vector3.FORWARD
+
+
+## What the body is holding, and where it's pointing — multiplayer_sync ships
+## both so remotes can mount the same gun at the same angle.
+func held_type() -> String:
+	return str(inventory[0]["type"]) if not inventory.is_empty() else ""
+
+
+func aim_dir() -> Vector3:
+	return _aim_cache
 
 
 func _ready() -> void:
@@ -48,6 +60,12 @@ func _ready() -> void:
 	mat.albedo_color = Color(0.2, 1.0, 0.3)
 	_grapple_line.material_override = mat
 	add_child(_grapple_line)
+	# The gun rides on the body, at chest height, swinging with the aim ray
+	_rig = load("res://Items/weapon_rig.gd").new()
+	_rig.position = Vector3(0, 0.15, 0)
+	player.add_child.call_deferred(_rig)
+	inventory_changed.connect(func(_items: Array): _rig.set_weapon(held_type()))
+	_rig.set_weapon.call_deferred(held_type())
 
 
 func _on_net_event(event: String, data: Variant) -> void:
@@ -286,6 +304,11 @@ func _shift_inventory() -> void:
 
 func _process(delta: float) -> void:
 	_rocket_cd = maxf(0.0, _rocket_cd - delta)
+	_aim_cache = _aim_direction()
+	if _rig and is_instance_valid(_rig):
+		_rig.aim(_aim_cache)
+		_rig.set_holstered(player.godmode or player.piloting or player.dead
+			or player.vehicle != null)
 
 	# Machinegun loop (web setInterval 80 ms while mousedown)
 	if _mg_firing:

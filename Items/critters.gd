@@ -153,6 +153,11 @@ func _player_pos(pid: String) -> Variant:
 	return null
 
 
+## What a bite from this flock reads as on the death line.
+static func _bite_cause(flock: Dictionary) -> String:
+	return "crows" if str(flock.get("kind", "rats")) == "crows" else "rats"
+
+
 ## Contact damage against the grudge target: the local player hurts itself
 ## (the standing selfDamage pattern); a turret is gnawed by ITS OWNER's
 ## client only, so the damage isn't applied once per connected player.
@@ -168,7 +173,7 @@ func _aggro_bite(flock: Dictionary, pos: Vector3) -> void:
 		Sfx.boost(pos, 0.3)
 	else:
 		if _sync and str(ag["id"]) == str(_sync.self_id):
-			Net.emit_event("selfDamage", 1)
+			Net.emit_event("selfDamage", {"n": 1, "cause": _bite_cause(flock)})
 		Sfx.jump(pos)
 
 
@@ -418,7 +423,7 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 					and player.global_position.distance_to(strike_p) < 2.4 \
 					and float(flock["bite_cd"]) <= 0.0:
 				flock["bite_cd"] = STRIKE_BITE_CD
-				Net.emit_event("selfDamage", 1)
+				Net.emit_event("selfDamage", {"n": 1, "cause": "crows"})
 				Sfx.jump(pos)
 		elif b["diving"] and can_aggro:
 			var target: Vector3 = (dive_at as Vector3) + Vector3(0, 0.8, 0)
@@ -430,7 +435,7 @@ func _tick_crows(flock: Dictionary, delta: float) -> void:
 					_aggro_bite(flock, pos)  # revenge hit (player or turret)
 				elif float(flock["bite_cd"]) <= 0.0:
 					flock["bite_cd"] = BITE_CD
-					Net.emit_event("selfDamage", 1)
+					Net.emit_event("selfDamage", {"n": 1, "cause": "crows"})
 					Sfx.jump(pos)  # sharp flap-snap on the hit
 		else:
 			b["diving"] = false
@@ -508,7 +513,7 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 			accel += (hp - pos).normalized() * 18.0
 			if hunting_me and hp.distance_to(pos) < 1.2 and float(flock["bite_cd"]) <= 0.0:
 				flock["bite_cd"] = STRIKE_BITE_CD
-				Net.emit_event("selfDamage", 1)
+				Net.emit_event("selfDamage", {"n": 1, "cause": "rats"})
 				Sfx.boost(pos, 0.3)
 		elif grudge != null and (grudge as Vector3).distance_to(pos) < RAT_CHASE * 2.5:
 			# Revenge mob: swarm whatever shot the pack (player or turret)
@@ -520,7 +525,7 @@ func _tick_rats(flock: Dictionary, delta: float) -> void:
 			accel += (player.global_position - pos).normalized() * 14.0
 			if player.global_position.distance_to(pos) < 1.0 and float(flock["bite_cd"]) <= 0.0:
 				flock["bite_cd"] = BITE_CD
-				Net.emit_event("selfDamage", 1)
+				Net.emit_event("selfDamage", {"n": 1, "cause": "rats"})
 				Sfx.boost(pos, 0.3)
 		else:
 			# Guided packs hug the bot much tighter than they'd hold home turf

@@ -31,10 +31,6 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -180.0
-offset_top = -120.0
-offset_right = 180.0
-offset_bottom = 120.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -45,10 +41,9 @@ theme_override_constants/margin_top = 12
 theme_override_constants/margin_right = 16
 theme_override_constants/margin_bottom = 12
 
-[node name="Rows" type="Label" parent="Scoreboard/Margin"]
+[node name="Rows" type="VBoxContainer" parent="Scoreboard/Margin"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 16
-text = "..."
+theme_override_constants/separation = 4
 
 [node name="VersionLabel" type="Label" parent="."]
 anchors_preset = 3
@@ -79,8 +74,8 @@ script = ExtResource("2_god")
 [node name="InventoryHud" type="HBoxContainer" parent="."]
 offset_left = 10.0
 offset_top = 80.0
-offset_right = 260.0
-offset_bottom = 170.0
+offset_right = 300.0
+offset_bottom = 200.0
 mouse_filter = 2
 theme_override_constants/separation = 10
 

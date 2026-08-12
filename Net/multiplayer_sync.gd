@@ -173,4 +173,13 @@ func _physics_process(delta: float) -> void:
 		if drone is Node3D and drone.get("return_to") == null:
 			var dp: Vector3 = drone.global_position
 			payload["drone"] = {"x": dp.x, "y": dp.y, "z": dp.z}
+	# Held weapon + where it's pointing, so remotes mount the same gun at the
+	# same angle instead of everyone else running around empty-handed.
+	var items: Node = player.get_node_or_null("ItemController")
+	if items:
+		var a: Vector3 = items.aim_dir()
+		payload["w"] = items.held_type()
+		payload["ax"] = a.x
+		payload["ay"] = a.y
+		payload["az"] = a.z
 	Net.emit_event("playerMoved", payload)

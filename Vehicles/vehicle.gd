@@ -33,17 +33,22 @@ const DRILL_STRENGTH := 0.8
 const DRILL_INTERVAL := 0.09
 const DRILL_HP_PER_TICK := 0.5  # ~5.5 health/s while the drill is eating
 
-# Crash physics: a hard head-on stop knocks the vehicle into free rigid-body
+# Crash physics: slamming a wall knocks the vehicle into free rigid-body
 # "wreck" physics — it can bounce, tumble, and settle upside down. Landing
 # upright parks it again on its own; upside down it waits for an E-flip.
-const CRASH_SPEED := 11.0     # planar speed you must shed in one hit
-const CRASH_REMAINDER := 3.0
+#
+# What counts is CLOSING SPEED into the wall, not how much speed the hit
+# happened to erase: sliding along a wall you clipped keeps most of your
+# velocity, so the old "did we stop dead" test almost never fired.
+const CRASH_SPEED := 10.0     # m/s straight into a wall face
+const CRASH_WALL_Y := 0.6     # |normal.y| below this counts as a wall
 
 # Machine-animal bots
 const CROWBOT_SPEED := 14.0   # full-3D flight, camera-directed
 const CROWBOT_ACCEL := 5.0    # velocity chase rate (soft, floaty)
 const RATBOT_SPEED := 11.0
 const RATBOT_STICK := 4.0     # adhesion pull along the surface normal
+const CLIMB_TURN := 6.0       # rad/s the body re-aligns to a new surface
 # A parked crow-bot doesn't freeze mid-air: it flies a lazy loiter ring while
 # it sinks, then settles on the ground. Client-local and cosmetic, like the
 # boids — the synced park position anchors the ring, so every client watches
@@ -258,17 +263,8 @@ func _drive(delta: float) -> void:
 	velocity.z = hvel.z
 
 	var pre_vel := velocity
-	var pre_speed := hvel.length()
 	move_and_slide()
-
-	# Crash check: a lot of speed gone in one hit against something vertical
-	var post_speed := Vector2(velocity.x, velocity.z).length()
-	if pre_speed > CRASH_SPEED and post_speed < CRASH_REMAINDER:
-		for ci in get_slide_collision_count():
-			if absf(get_slide_collision(ci).get_normal().y) < 0.5:
-				crashed = true
-				crash_vel = pre_vel
-				break
+	_check_crash(pre_vel)
 
 	# Visual lean: bank into lateral slide, dip the nose under thrust
 	_input_pitch = lerpf(_input_pitch, -input_dir.y * 0.10, minf(1.0, 8.0 * delta))
@@ -329,28 +325,29 @@ func _climb_bot(delta: float) -> void:
 	wish = wish.limit_length(1.0)
 
 	var space := get_world_3d().direct_space_state
-	var attached := false
-	# A surface right ahead of the crawl: adopt it (floor -> wall transition)
-	if wish.length() > 0.1:
-		var ahead := _climb_ray(space, global_position, global_position + wish.normalized() * 0.9)
-		if not ahead.is_empty():
-			_climb_n = ahead["normal"]
-			attached = true
-	# The surface we're riding
-	if not attached:
-		var down := _climb_ray(space, global_position + _climb_n * 0.3, global_position - _climb_n * 1.1)
-		if not down.is_empty():
-			_climb_n = down["normal"]
-			attached = true
+	# The surface we're RIDING wins by default. A wall only takes over when
+	# we're actually driving into it and close enough to touch it — otherwise
+	# every pebble the nose ray clipped rolled the whole body over.
+	var target_n := Vector3.ZERO
+	var down := _climb_ray(space, global_position + _climb_n * 0.3, global_position - _climb_n * 1.1)
+	if not down.is_empty():
+		target_n = down["normal"]
+	if wish.length() > 0.35:
+		var ahead := _climb_ray(space, global_position, global_position + wish.normalized() * 0.6)
+		if not ahead.is_empty() and (ahead["normal"] as Vector3).dot(_climb_n) > -0.2:
+			target_n = ahead["normal"]
 	# Outer corner: wrap around the edge we just crawled past
-	if not attached and velocity.length() > 0.5:
+	if target_n == Vector3.ZERO and velocity.length() > 0.5:
 		var lip := global_position - _climb_n * 0.7
 		var back := _climb_ray(space, lip, lip - velocity.normalized() * 0.9)
 		if not back.is_empty():
-			_climb_n = back["normal"]
-			attached = true
-
+			target_n = back["normal"]
+	var attached := target_n != Vector3.ZERO
 	if attached:
+		# Ease onto the new surface instead of snapping to it
+		if target_n.dot(_climb_n) < -0.999:
+			target_n = (target_n + global_transform.basis.x * 0.01).normalized()
+		_climb_n = _climb_n.slerp(target_n, minf(1.0, CLIMB_TURN * delta)).normalized()
 		velocity = velocity.lerp(wish * RATBOT_SPEED - _climb_n * RATBOT_STICK,
 			minf(1.0, 10.0 * delta))
 	else:
@@ -369,6 +366,26 @@ func _climb_bot(delta: float) -> void:
 	if fwd_t.length() > 0.05:
 		var target := Basis.looking_at(fwd_t.normalized(), _climb_n)
 		global_transform.basis = global_transform.basis.slerp(target, minf(1.0, 8.0 * delta)).orthonormalized()
+
+
+## Did that move_and_slide put us into a wall hard enough to wreck? Measured
+## as the speed we were carrying STRAIGHT INTO the collision face, so a solid
+## clip at an angle counts and a graze along a wall doesn't.
+func _check_crash(pre_vel: Vector3) -> void:
+	var planar := Vector3(pre_vel.x, 0.0, pre_vel.z)
+	if planar.length() < CRASH_SPEED:
+		return
+	for ci in get_slide_collision_count():
+		var n := get_slide_collision(ci).get_normal()
+		if absf(n.y) > CRASH_WALL_Y:
+			continue  # floor or ceiling: that's landing, not crashing
+		var face := Vector3(n.x, 0.0, n.z)
+		if face.length() < 0.01:
+			continue
+		if -planar.dot(face.normalized()) > CRASH_SPEED:
+			crashed = true
+			crash_vel = pre_vel
+			return
 
 
 ## Ground height under a parked crow-bot (its own current y if nothing's there).
@@ -477,7 +494,7 @@ func _drill(typing: bool, delta: float) -> void:
 		_drain_acc += DRILL_HP_PER_TICK
 		if _drain_acc >= 1.0:
 			_drain_acc -= 1.0
-			Net.emit_event("selfDamage", 1)
+			Net.emit_event("selfDamage", {"n": 1, "cause": "drill"})
 
 
 func _ground_ray() -> Dictionary:

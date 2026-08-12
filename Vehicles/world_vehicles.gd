@@ -13,6 +13,9 @@ const RESCUE_Y := -20.0   # vehicle fell out of the world: teleport it back up
 const STRIKE_CD := 4.0    # crow-bot strike / rat-attack hunt cooldown
 const HUNT_RANGE := 30.0  # rat-attack: how far a target can be marked from
 const HUNT_CONE := 0.75   # dot(camera fwd, to-target) to count as "in front"
+const RAM_SPEED := 9.0    # planar speed at which the hull starts hurting
+const RAM_RANGE := 3.4
+const RAM_CD := 1.2       # seconds before the same hull can hit again
 const VehicleScript := preload("res://Vehicles/vehicle.gd")
 
 @export var player: CharacterBody3D
@@ -24,6 +27,7 @@ var _pending_pilot_id := ""      # weapon-deployed bot: pilot it on vehiclePlace
 var _wrecking: Dictionary = {}   # id -> vehicle whose wreck WE are simulating
 var _relay_cd := 0.0
 var _strike_cd := 0.0
+var _ram_cd := 0.0
 var _sync: Node
 # Rat-attack hunter vision: red overlays on enemies, one of them selected
 var _marks: Dictionary = {}      # remote id -> overlay MeshInstance3D
@@ -417,6 +421,9 @@ func _process(delta: float) -> void:
 		_mounted.global_position = (player.global_position + Vector3(0, 2.5, 0)) if _piloting \
 			else (player.respawn_point() + Vector3(0, 2.5, 0))
 		_mounted.velocity = Vector3.ZERO
+	_ram_cd = maxf(0.0, _ram_cd - delta)
+	if not _piloting and _ram_cd <= 0.0:
+		_check_ram()
 	if relay:
 		var out := {
 			"id": _mounted.id,
@@ -431,6 +438,34 @@ func _process(delta: float) -> void:
 			out["qz"] = q.z
 			out["qw"] = q.w
 		Net.emit_event("vehicleMoved", out)
+
+
+## Running someone down. The driver's client owns the collision test (same
+## authority rule as bullets); the server applies the damage and names the
+## hull on the death line.
+func _check_ram() -> void:
+	var v: Vector3 = _mounted.velocity
+	var spd := Vector2(v.x, v.z).length()
+	if spd < RAM_SPEED:
+		return
+	if _sync == null:
+		_sync = get_tree().get_first_node_in_group("net_sync")
+	var remotes: Dictionary = _sync.remotes() if _sync else {}
+	for rid in remotes:
+		var node: Node3D = remotes[rid]
+		if not is_instance_valid(node):
+			continue
+		if node.global_position.distance_to(_mounted.global_position) > RAM_RANGE:
+			continue
+		_ram_cd = RAM_CD
+		# Punt them along the hull's heading, with some lift so they tumble
+		var dir := (Vector3(v.x, 0.0, v.z).normalized() + Vector3.UP * 0.7).normalized()
+		Net.emit_event("ramPlayer", {
+			"t": str(rid), "kind": _mounted.kind, "dmg": int(spd * 1.6),
+			"dir": {"x": dir.x, "y": dir.y, "z": dir.z},
+		})
+		Sfx.bomb(node.global_position)
+		return
 
 
 ## Eject the driver but KEEP server authority (the driver slot) so our tumble

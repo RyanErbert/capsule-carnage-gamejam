@@ -104,41 +104,43 @@ static func _add_colliders(node: Node) -> void:
 		node.create_trimesh_collision()
 
 
-# --- Cave lamp (procedural: post + lantern + a real light) ------------------
+# --- Cave lamp (procedural: a lantern sitting on the floor + a real light) ---
+# No post: it's a lamp you set down. The light itself does the work — big
+# range and enough energy to actually open up a dug-out cavern.
 
 static func make_lamp() -> Node3D:
 	var root := Node3D.new()
-	var post := MeshInstance3D.new()
-	var post_mesh := CylinderMesh.new()
-	post_mesh.top_radius = 0.06
-	post_mesh.bottom_radius = 0.09
-	post_mesh.height = 2.2
-	var post_mat := StandardMaterial3D.new()
-	post_mat.albedo_color = Color(0.16, 0.15, 0.14)
-	post_mat.metallic = 0.4
-	post_mesh.material = post_mat
-	post.mesh = post_mesh
-	post.position.y = 1.1
-	root.add_child(post)
+	var base := MeshInstance3D.new()
+	var plate := CylinderMesh.new()
+	plate.top_radius = 0.22
+	plate.bottom_radius = 0.28
+	plate.height = 0.12
+	var plate_mat := StandardMaterial3D.new()
+	plate_mat.albedo_color = Color(0.16, 0.15, 0.14)
+	plate_mat.metallic = 0.5
+	plate.material = plate_mat
+	base.mesh = plate
+	base.position.y = 0.06
+	root.add_child(base)
 	var lantern := MeshInstance3D.new()
 	var box := BoxMesh.new()
-	box.size = Vector3(0.34, 0.42, 0.34)
+	box.size = Vector3(0.4, 0.5, 0.4)
 	var glow := StandardMaterial3D.new()
 	glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	glow.albedo_color = Color(1.0, 0.82, 0.5)
+	glow.albedo_color = Color(1.0, 0.86, 0.6)
 	glow.emission_enabled = true
-	glow.emission = Color(1.0, 0.75, 0.4)
-	glow.emission_energy_multiplier = 2.4
+	glow.emission = Color(1.0, 0.8, 0.45)
+	glow.emission_energy_multiplier = 4.5
 	box.material = glow
 	lantern.mesh = box
-	lantern.position.y = 2.35
+	lantern.position.y = 0.37
 	root.add_child(lantern)
 	var light := OmniLight3D.new()
-	light.light_color = Color(1.0, 0.8, 0.5)
-	light.light_energy = 2.6
-	light.omni_range = 14.0
-	light.omni_attenuation = 1.4
-	light.position.y = 2.35
+	light.light_color = Color(1.0, 0.84, 0.58)
+	light.light_energy = 6.0
+	light.omni_range = 44.0
+	light.omni_attenuation = 0.9   # slow falloff: lights a whole chamber
+	light.position.y = 0.55
 	light.shadow_enabled = false  # cheap: these get sprinkled through caves
 	root.add_child(light)
 	return root

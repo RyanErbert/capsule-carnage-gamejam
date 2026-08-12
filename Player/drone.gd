@@ -1,14 +1,29 @@
 extends CharacterBody3D
 
-## God-mode drone: the camera flies THIS, while the player's body stays where
-## it was — visible, taggable, and blast-able. Slower than the old free-fly
+## Build drone: the camera flies THIS, while the player's body stays where it
+## was — visible, taggable, and blast-able. Slower than the old free-fly
 ## (15 vs 40) and moved with move_and_slide, so it can't pass through walls.
 
 const FLY_SPEED := 15.0
 const RETURN_SPEED := 42.0
+const ROTOR_IDLE := 26.0     # rad/s with the sticks centered
+const ROTOR_GAIN := 2.2      # ...plus this per m/s of airspeed
 
 var camera_rig: Node3D
 var return_to: Node3D = null  # set on god-mode exit: fly home, then despawn
+
+@onready var _rotors: Node3D = get_node_or_null("Rotors")
+
+
+## Props spin with airspeed; alternate pairs turn opposite ways, like a real
+## quad. Purely cosmetic.
+func _process(delta: float) -> void:
+	if _rotors == null:
+		return
+	var rate := ROTOR_IDLE + velocity.length() * ROTOR_GAIN
+	var kids := _rotors.get_children()
+	for i in kids.size():
+		(kids[i] as Node3D).rotate_y(rate * delta * (1.0 if i % 2 == 0 else -1.0))
 
 
 func _physics_process(_delta: float) -> void:

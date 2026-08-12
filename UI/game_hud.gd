@@ -7,7 +7,7 @@ extends CanvasLayer
 
 @onready var _it_label: Label = $ItLabel
 @onready var _scoreboard: PanelContainer = $Scoreboard
-@onready var _scoreboard_text: Label = $Scoreboard/Margin/Rows
+@onready var _scoreboard_rows: VBoxContainer = $Scoreboard/Margin/Rows
 @onready var _version_label: Label = $VersionLabel
 @onready var _update_banner: Label = $UpdateBanner
 @onready var _chat_log: VBoxContainer = $ChatLog
@@ -46,6 +46,7 @@ var _last_hp := -1
 var _chat_history: Array = []   # bbcode rows, oldest first
 var _chat_scroll: PanelContainer
 var _chat_scroll_rows: VBoxContainer
+var _kills: Dictionary = {}     # id -> confirmed kills (server-authoritative)
 
 
 func _ready() -> void:
@@ -224,12 +225,12 @@ func _run_chat_command(msg: String) -> void:
 		"kill":
 			if sync_node and sync_node.player:
 				sync_node.player.suicide()
-		"god":
+		"drone", "god":
 			var god: Node = get_node_or_null("GodMenu")
 			if god:
 				god.toggle()
 		"help":
-			_add_system_row("/vote yes|no  /end  /kill [K]  /god [Q]")
+			_add_system_row("/vote yes|no  /end  /kill [K]  /drone [Q]")
 		_:
 			_add_system_row("Unknown command: /" + cmd)
 
@@ -242,6 +243,11 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"systemMessage":
 			if data is Dictionary and str(data.get("text", "")) != "":
 				_add_system_row(str(data.get("text", "")))
+		"kills":
+			if data is Dictionary:
+				_kills = data
+				if sync_node:
+					_refresh(sync_node.scores)
 		"gameEnded":
 			_add_system_row("Game ended.")
 		"gameSettings":
@@ -358,8 +364,75 @@ const ICON_MASKS := {
 	],
 }
 
+## Loose 8x8 pixel glyphs for the inventory, in the same blown-up nearest
+## -neighbour style as the meter icons. Anything unknown falls back to a box.
+const ITEM_ICON_MASKS := {
+	"machinegun": [
+		"........", "........", "#######.", ".#######",
+		"...##..#", "...##...", "...##...", "........",
+	],
+	"rocket": [
+		"......##", ".....###", "....####", "...####.",
+		"..####..", ".####...", "###.#...", "#..##...",
+	],
+	"mines": [
+		"..#..#..", "...##...", "..####..", ".######.",
+		"########", ".######.", "........", "........",
+	],
+	"grapple": [
+		"...##...", "...##...", "...##...", "...##...",
+		"#..##..#", "#.####.#", ".######.", "..####..",
+	],
+	"launch_pad": [
+		"...##...", "..####..", ".######.", "...##...",
+		"...##...", "........", "########", "########",
+	],
+	"boost_pad": [
+		"..#..#..", ".##.##..", "###.###.", ".##.##..",
+		"..#..#..", "........", "########", "########",
+	],
+	"teleporter": [
+		"..####..", ".#....#.", "#..##..#", "#.####.#",
+		"#.####.#", "#..##..#", ".#....#.", "..####..",
+	],
+	"crowbot": [
+		"........", "..##....", ".###....", "#######.",
+		".#####..", "..###...", "..#.#...", "........",
+	],
+	"block": [
+		"........", ".######.", ".#....#.", ".#....#.",
+		".#....#.", ".#....#.", ".######.", "........",
+	],
+	"wall": [
+		"########", "#..#..#.", "########", ".#..#..#",
+		"########", "#..#..#.", "########", "........",
+	],
+	"ramp": [
+		".......#", "......##", ".....###", "....####",
+		"...#####", "..######", ".#######", "########",
+	],
+	"platform": [
+		"........", "........", "########", "########",
+		"..#..#..", "..#..#..", "..#..#..", "........",
+	],
+	"bridge_gun": [
+		"........", ".#....#.", ".#....#.", ".#....#.",
+		".######.", "...##...", "..####..", "........",
+	],
+}
+
+
+func _item_icon(item: String, color: Color) -> TextureRect:
+	return _mask_texture(ITEM_ICON_MASKS.get(item, ITEM_ICON_MASKS["block"]), color)
+
+
 func _icon(name: String, color: Color) -> TextureRect:
-	var mask: Array = ICON_MASKS[name]
+	var tex := _mask_texture(ICON_MASKS[name], color)
+	tex.custom_minimum_size = Vector2(18, 14)
+	return tex
+
+
+func _mask_texture(mask: Array, color: Color) -> TextureRect:
 	var img := Image.create(mask[0].length(), mask.size(), false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	for y in mask.size():
@@ -371,7 +444,6 @@ func _icon(name: String, color: Color) -> TextureRect:
 	tex.texture = ImageTexture.create_from_image(img)
 	tex.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	tex.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	tex.custom_minimum_size = Vector2(18, 14)
 	return tex
 
 
@@ -430,8 +502,9 @@ func _update_meters() -> void:
 
 var _last_inventory: Array = []
 
-## Web updateInventoryUI: slot 0 is 80px (active), others 50px, borders in the
-## item's category color, red ammo count (blank when 0 = single-use).
+## Slot 0 is the active weapon: a big square with a big icon. The rest are
+## small squares of equal width, tops flush with the active slot's top.
+## Icons carry the identity — the only text is the ammo count.
 func _refresh_inventory(items: Array) -> void:
 	_last_inventory = items
 	for child in _inventory_hud.get_children():
@@ -439,49 +512,70 @@ func _refresh_inventory(items: Array) -> void:
 	for i in items.size():
 		var item: String = items[i]["type"]
 		var ammo: int = int(items[i]["ammo"])
-		# Slot 0 is the active weapon: noticeably bigger than the rest
-		var size := 104 if i == 0 else 48
+		var size := 88 if i == 0 else 44
+		var pad := 12.0 if i == 0 else 6.0
+		var tint := Color(str(ITEM_COLORS.get(item, "#ffffff")))
 		var slot := PanelContainer.new()
 		slot.custom_minimum_size = Vector2(size, size)
 		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN   # tops aligned
 		var style := StyleBoxFlat.new()
 		style.bg_color = Color(0, 0, 0, 0.6)
-		style.border_color = Color(str(ITEM_COLORS.get(item, "#ffffff")))
+		style.border_color = tint
 		style.set_border_width_all(2)
 		style.set_corner_radius_all(0)
+		style.set_content_margin_all(0)
 		slot.add_theme_stylebox_override("panel", style)
-		var label := Label.new()
+		# Icon fills the slot; the ammo count floats in the corner so it can
+		# never squeeze the glyph.
+		var holder := Control.new()
+		holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(holder)
+		var icon := _item_icon(item, tint)
+		icon.set_anchors_preset(Control.PRESET_FULL_RECT)
+		icon.offset_left = pad
+		icon.offset_top = pad
+		icon.offset_right = -pad
+		icon.offset_bottom = -pad
+		holder.add_child(icon)
 		var ammo_text := ""
 		if bool(Net.game_settings.get("infiniteAmmo", false)):
-			ammo_text = "\n∞"
+			ammo_text = "∞"
 		elif ammo > 0:
-			ammo_text = "\n%d" % ammo
-		label.text = item.replace("_", " ").to_upper() + ammo_text
-		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		label.autowrap_mode = TextServer.AUTOWRAP_WORD
-		label.add_theme_font_size_override("font_size", 16)
-		slot.add_child(label)
+			ammo_text = str(ammo)
+		if ammo_text != "":
+			var label := Label.new()
+			label.text = ammo_text
+			label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+			label.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+			label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+			label.offset_left = -34
+			label.offset_top = -20
+			label.offset_right = -3
+			label.offset_bottom = -1
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+			label.add_theme_font_size_override("font_size", 16)
+			label.add_theme_color_override("font_outline_color", Color.BLACK)
+			label.add_theme_constant_override("outline_size", 6)
+			holder.add_child(label)
 		_inventory_hud.add_child(slot)
 
 
 ## Escape menu (web §6.6). Settings live behind the gear and only open in
 ## Build mode — every other gamemode has them locked to the lobby choice.
 func _build_esc_menu() -> void:
+	# Sized by its contents, centered: no dead space above or below the buttons
 	_esc_menu = PanelContainer.new()
 	_esc_menu.visible = false
 	_esc_menu.set_anchors_preset(Control.PRESET_CENTER)
-	_esc_menu.offset_left = -140
-	_esc_menu.offset_right = 140
-	_esc_menu.offset_top = -220
-	_esc_menu.offset_bottom = 220
 	_esc_menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_esc_menu.grow_vertical = Control.GROW_DIRECTION_BOTH
 	add_child(_esc_menu)
-	_esc_menu.add_theme_stylebox_override("panel", Style.panel_box(Color(0.03, 0.04, 0.07, 0.92), 14))
+	_esc_menu.add_theme_stylebox_override("panel", Style.panel_box(Color(0.03, 0.04, 0.07, 0.92), 10))
 	var box := VBoxContainer.new()
-	box.custom_minimum_size = Vector2(190, 0)
-	box.add_theme_constant_override("separation", 8)
+	box.custom_minimum_size = Vector2(200, 0)
+	box.add_theme_constant_override("separation", 6)
 	_esc_menu.add_child(box)
 
 	var head := HBoxContainer.new()
@@ -507,11 +601,10 @@ func _build_esc_menu() -> void:
 
 	for entry in [
 		["RESUME", func(): _toggle_esc_menu(false)],
-		["VOTE: END GAME", func():
+		# Still a poll of everyone in the game — the label just doesn't say so
+		["END GAME", func():
 			Net.emit_event("startEndVote")
 			_toggle_esc_menu(false)],
-		["RETURN TO LOBBY", func(): get_tree().change_scene_to_file("res://UI/main_menu.tscn")],
-		["QUIT GAME", func(): get_tree().quit()],
 	]:
 		var b := Button.new()
 		b.text = entry[0]
@@ -537,7 +630,7 @@ func close_esc_menu() -> void:
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and get_viewport().gui_get_focus_owner() == null:
-		# One menu at a time: Esc kicks god mode out before opening
+		# One menu at a time: Esc lands the build drone before opening
 		var god: Node = get_node_or_null("GodMenu")
 		if god and god.visible:
 			god.toggle()
@@ -603,7 +696,7 @@ func _update_slayer_hud() -> void:
 func _build_conn_pill() -> void:
 	_conn_pill = PanelContainer.new()
 	_conn_pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_conn_pill.offset_left = -110
+	_conn_pill.offset_left = -190
 	_conn_pill.offset_right = -10
 	_conn_pill.offset_top = 8
 	_conn_pill.offset_bottom = 30
@@ -626,7 +719,7 @@ func _update_conn_pill() -> void:
 		return
 	var ok := Net.is_socket_connected()
 	_conn_style.bg_color = Color(0.1, 0.45, 0.2, 0.85) if ok else Color(0.55, 0.1, 0.1, 0.9)
-	(_conn_pill.get_node("Text") as Label).text = "● online" if ok else "● offline"
+	(_conn_pill.get_node("Text") as Label).text = "● server connected" if ok else "● disconnected"
 
 
 func _process(_delta: float) -> void:
@@ -643,11 +736,6 @@ func _refresh(scores: Dictionary) -> void:
 	var slayer := bool(Net.game_settings.get("slayer", true))
 	# Damage feedback: datamosh pulse + music sting when your health drops
 	var my_hp := int(scores.get(sync_node.self_id, 0))
-	if slayer and sync_node.self_id != "":
-		var hfx: Node = get_tree().get_first_node_in_group("screen_fx")
-		if hfx:
-			# Critical health burns dead pixels into the pilot's view
-			hfx.set_health(float(my_hp) / 100.0)
 	if slayer and sync_node.self_id != "" and _last_hp >= 0 and my_hp < _last_hp:
 		var fx: Node = get_tree().get_first_node_in_group("screen_fx")
 		if fx:
@@ -660,13 +748,47 @@ func _refresh(scores: Dictionary) -> void:
 	# The oddball "YOU'RE IT" banner belongs to the old sandbox mode
 	_it_label.visible = holder != "" and holder == sync_node.self_id and not slayer
 
-	# Standings live on the hold-Tab scoreboard, not over the crosshair
+	_rebuild_scoreboard(scores, holder, slayer)
+
+
+## Hold-Tab roster: who's here and how many they've put down. Sorted by kills
+## in Slayer (where `scores` is health), by score in the old sandbox mode.
+func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> void:
+	if _scoreboard_rows == null:
+		return
+	for child in _scoreboard_rows.get_children():
+		child.free()
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 24)
+	var title := Label.new()
+	title.text = "PLAYERS"
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.add_theme_font_size_override("font_size", 16)
+	title.add_theme_color_override("font_color", Style.ACCENT)
+	head.add_child(title)
+	var kcol := Label.new()
+	kcol.text = "KILLS" if slayer else "SCORE"
+	kcol.add_theme_font_size_override("font_size", 16)
+	kcol.add_theme_color_override("font_color", Color(1, 1, 1, 0.45))
+	head.add_child(kcol)
+	_scoreboard_rows.add_child(head)
+
 	var rows: Array = []
 	for id in scores:
-		rows.append([str(id), int(scores[id])])
+		rows.append([str(id), int(_kills.get(str(id), 0)) if slayer else int(scores[id])])
 	rows.sort_custom(func(a, b): return a[1] > b[1])
-	var lines: Array = []
 	for row in rows:
-		var prefix := "[IT] " if (row[0] == holder and not slayer) else ""
-		lines.append("%s%s - %d" % [prefix, sync_node.name_of(row[0]), row[1]])
-	_scoreboard_text.text = "\n".join(lines)
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 24)
+		var who := Label.new()
+		who.text = ("[IT] " if (row[0] == holder and not slayer) else "") + sync_node.name_of(row[0])
+		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		who.add_theme_font_size_override("font_size", 16)
+		line.add_child(who)
+		var n := Label.new()
+		n.text = str(row[1])
+		n.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		n.custom_minimum_size = Vector2(42, 0)
+		n.add_theme_font_size_override("font_size", 16)
+		line.add_child(n)
+		_scoreboard_rows.add_child(line)

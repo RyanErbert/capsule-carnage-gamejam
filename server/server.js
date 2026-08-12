@@ -156,6 +156,44 @@ function inDeadzone(r, c) {
   return zoneList().some(h => Math.abs(r - h[0]) <= 2 && Math.abs(c - h[1]) <= 2);
 }
 
+function zoneFree(r, c, exceptId) {
+  return Object.entries(spawnZones).every(([id, z]) => id === exceptId
+    || Math.abs(r - z[0]) > ZONE_SEPARATION || Math.abs(c - z[1]) > ZONE_SEPARATION);
+}
+
+// A claimed spawn CARVES its block open: ground restored underfoot, every
+// layer above it cleared. Terrain painted before or after can't bury a spawn.
+function clearZoneColumn(r, c) {
+  if (!paintLayers) paintLayers = defaultLayers();
+  const words = gridWords();
+  for (let rr = Math.max(0, r - 2); rr <= Math.min(gridH() - 1, r + 2); rr++) {
+    for (let cc = Math.max(0, c - 2); cc <= Math.min(gridW() - 1, c + 2); cc++) {
+      const i = rr * words + (cc >> 5);
+      const bit = 1 << (31 - (cc & 31));
+      paintLayers[0][i] = (paintLayers[0][i] | bit) >>> 0;
+      for (let li = 1; li < 4; li++) paintLayers[li][i] = (paintLayers[li][i] & ~bit) >>> 0;
+    }
+  }
+  io.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
+}
+
+// Everyone who walks into the map creator gets a spawn without hunting for a
+// free pixel. Only while a map is still being painted — mid-game joiners take
+// the map as it stands.
+function autoClaimZone(id) {
+  if (spawnZones[id] || creativeLayers) return;
+  for (let tries = 0; tries < 240; tries++) {
+    const m = 3;   // keep clear of the map edge
+    const r = m + Math.floor(Math.random() * Math.max(1, gridH() - m * 2));
+    const c = m + Math.floor(Math.random() * Math.max(1, gridW() - m * 2));
+    if (!zoneFree(r, c, id)) continue;
+    spawnZones[id] = [r, c];
+    clearZoneColumn(r, c);
+    io.emit('spawnZones', spawnZones);
+    return;
+  }
+}
+
 // The painted grid is gridW x gridH pixels; each ROW is gridWords() uint32
 // bitmasks laid out flat (row * words + (col >> 5)), bit (31 - col&31) =
 // filled. At 32x32 this is byte-identical to the original one-word rows.
@@ -223,6 +261,41 @@ const SLAYER_START = 100;
 const RESPAWN_MS = 4000;
 const deadUntil = {};   // socket.id -> timestamp while dead
 
+// --- Kill credit ---
+// Every damage event stamps its victim with WHO did it and WHAT with, so the
+// death line can name the weapon and the killer banks the point. A stamp
+// older than HIT_CREDIT_MS has gone cold: the death reads as a plain blast.
+const kills = {};        // socket.id -> confirmed kills
+const lastHit = {};      // victim id -> { by, cause, at }
+const HIT_CREDIT_MS = 8000;
+
+const DEATH_LINES = {
+  rats: '%s was devoured by rats',
+  crows: '%s was murdered by crows',
+  rocket: '%s was exploded by rockets',
+  mine: '%s tripped on a landmine',
+  machinegun: '%s was turned into swiss cheese',
+  turret: '%s was turned by a sentry',
+  drill: '%s got screwed',
+  ghost: '%s headbutted a ghost',
+  blast: '%s exploded'
+};
+const CAUSES = Object.keys(DEATH_LINES);
+
+function creditHit(victimId, byId, cause) {
+  if (!players[victimId]) return;
+  lastHit[victimId] = {
+    by: (byId && byId !== victimId && players[byId]) ? byId : null,
+    cause: CAUSES.includes(cause) ? cause : 'blast',
+    at: Date.now()
+  };
+}
+
+function freshHit(victimId) {
+  const hit = lastHit[victimId];
+  return (hit && Date.now() - hit.at < HIT_CREDIT_MS) ? hit : null;
+}
+
 // --- God-mode drones ---
 // While a player flies their drone the client reports its position in
 // playerMoved ({drone:{x,y,z}}), which makes it a shootable target: 3 bullet
@@ -261,9 +334,16 @@ function checkDeath(id) {
   deadUntil[id] = Date.now() + RESPAWN_MS;
   const pos = { x: players[id].x, y: players[id].y, z: players[id].z };
   io.emit('playerDied', { id, ...pos, respawnMs: RESPAWN_MS });
-  sysMsg(`${players[id].name} exploded.`);
+  // What killed them names the line, and whoever landed it banks the kill.
+  const hit = freshHit(id);
+  sysMsg(DEATH_LINES[hit ? hit.cause : 'blast'].replace('%s', players[id].name));
+  if (hit && hit.by) {
+    kills[hit.by] = (kills[hit.by] || 0) + 1;
+    io.emit('kills', kills);
+  }
+  delete lastHit[id];
   // The death blast damages everyone nearby (chain deaths welcome).
-  explosionDamage(pos, id);
+  explosionDamage(pos, id, 'blast', id);
   // A tiny generator is left at the corpse (~30 energy, varying)
   const minis = activeGenerators.filter(g => g.mini);
   if (minis.length >= MAX_MINI_GENS) {
@@ -291,7 +371,7 @@ function checkDeath(id) {
 
 // Falloff damage + coin spray around a blast. Slayer uses flat damage bands
 // (percentages can never kill); the old sandbox mode keeps its pct-of-score.
-function explosionDamage(pos, excludeId) {
+function explosionDamage(pos, excludeId, cause, byId) {
   const droppedCoins = [];
   for (const [id, player] of Object.entries(players)) {
     if (id === excludeId || isDead(id)) continue;
@@ -320,6 +400,7 @@ function explosionDamage(pos, excludeId) {
 
     if (pointsLost > 0 && scores[id] > 0) {
       scores[id] -= pointsLost;
+      creditHit(id, byId, cause);
       const coinsToSpawn = Math.min(pointsLost, 15); // Cap visuals at 15
       for (let i = 0; i < coinsToSpawn; i++) {
         const coinId = Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -370,25 +451,33 @@ const GEN_HEAL_RANGE = 4.5;
 const GEN_ENERGY = 150;
 const MAX_MINI_GENS = 12;
 
-// One heal generator, on the walkable pixel closest to the middle of the map
-// that isn't inside the home deadzone (the base building owns that ground).
+// Three big cores per map, BURIED: they sit well under the painted surface,
+// scattered away from the spawn zones and from each other, so healing is
+// something you dig for and then haul back rather than something you stand on.
+const BIG_CORES = 3;
+const CORE_DEPTH = 7;      // meters below the painted surface
+
 function autoPlaceGenerator() {
   activeGenerators.length = 0;
   if (creativeLayers) {
-    let best = null;
-    for (let r = 1; r < gridH() - 1; r++) {
-      for (let c = 1; c < gridW() - 1; c++) {
-        const top = pixelTop(r, c);
-        if (top < 0 || inDeadzone(r, c)) continue;
-        const d = Math.hypot(r - gridH() / 2, c - gridW() / 2);
-        if (!best || d < best.d) best = { r, c, top, d };
-      }
+    const picks = [];
+    for (let tries = 0; tries < 800 && picks.length < BIG_CORES; tries++) {
+      // Constraints relax if the map is too cramped to satisfy them
+      const away = tries < 400 ? 34 : 12;
+      const spread = tries < 400 ? 26 : 8;
+      const r = 2 + Math.floor(Math.random() * Math.max(1, gridH() - 4));
+      const c = 2 + Math.floor(Math.random() * Math.max(1, gridW() - 4));
+      const top = pixelTop(r, c);
+      if (top < 0 || inDeadzone(r, c)) continue;
+      const x = -halfX() + c * 4 + 2, z = -halfZ() + r * 4 + 2;
+      if (homeWorlds().some(h => Math.hypot(h.x - x, h.z - z) < away)) continue;
+      if (picks.some(p => Math.hypot(p.x - x, p.z - z) < spread)) continue;
+      picks.push({ x, y: surfaceY(top) - CORE_DEPTH, z });
     }
-    if (best) activeGenerators.push({
-      id: 'gen-auto',
-      x: -halfX() + best.c * 4 + 2, y: surfaceY(best.top) + 0.4, z: -halfZ() + best.r * 4 + 2,
-      holder: null, energy: GEN_ENERGY, mini: false
-    });
+    picks.forEach((p, i) => activeGenerators.push({
+      id: 'gen-core-' + i, x: p.x, y: p.y, z: p.z,
+      holder: null, energy: GEN_ENERGY, mini: false, buried: true
+    }));
   }
   io.emit('currentGenerators', activeGenerators);
 }
@@ -402,16 +491,20 @@ setInterval(() => {
   for (const id of readyIds) {
     const p = players[id];
     if (!p || isDead(id)) continue;
+    // Overlapping rings STACK: park two cores together and heal twice as fast.
+    let gained = 0;
     for (const g of activeGenerators) {
       if (g.energy <= 0) continue;
       const dx = p.x - g.x, dy = p.y - g.y, dz = p.z - g.z;
       if (dx * dx + dy * dy + dz * dz <= GEN_HEAL_RANGE * GEN_HEAL_RANGE) {
-        scores[id] = (scores[id] || 0) + 1;
+        gained += 1;
         g.energy -= 1;
         touched.add(g);
-        changed = true;
-        break;
       }
+    }
+    if (gained > 0) {
+      scores[id] = (scores[id] || 0) + gained;
+      changed = true;
     }
   }
   for (const g of touched) {
@@ -493,6 +586,7 @@ const TAG_COOLDOWN_MS = 4000;
 
 // --- End-game vote state ---
 // endVote = { voters:Set, yes:Set, no:Set, timer } while a vote is running.
+// (The button that starts it is just labelled END GAME — it still polls.)
 let endVote = null;
 const END_VOTE_TIMEOUT_MS = 30000;
 
@@ -517,8 +611,8 @@ function finishEndVote(passed) {
   if (!endVote) return;
   clearTimeout(endVote.timer);
   endVote = null;
-  if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
-  else sysMsg('Vote to end the game failed.');
+  if (passed) { sysMsg('Ending game.'); endGame(); }
+  else sysMsg('The game keeps going.');
 }
 
 // Auto-populate item pedestals so a fresh round has pickups without anyone
@@ -572,6 +666,8 @@ function endGame() {
   if (startTimer) { clearTimeout(startTimer); startTimer = null; }
   for (const id of Object.keys(scores)) scores[id] = startingScore();
   io.emit('scores', scores);
+  for (const id of Object.keys(kills)) delete kills[id];
+  io.emit('kills', kills);
   holderID = null;
   io.emit('holderChanged', holderID);
   readyIds.clear();
@@ -732,7 +828,8 @@ io.on('connection', (socket) => {
   socket.emit('currentSpawns', spawnPoints);
 
   socket.on('editing', (on) => {
-    if (on) editors.add(socket.id); else editors.delete(socket.id);
+    if (on) { editors.add(socket.id); autoClaimZone(socket.id); }
+    else editors.delete(socket.id);
   });
 
   // Lobby START: everyone in the lobby sees the same 5 s countdown, then all
@@ -1047,20 +1144,23 @@ io.on('connection', (socket) => {
   // nobody can plant their base inside someone else's.
   socket.on('setSpawn', (p) => {
     if (p === null || p === undefined) {
+      // Spawns are removable, but a map with none has nowhere to put anyone.
+      if (Object.keys(spawnZones).length <= 1) {
+        socket.emit('systemMessage', { text: 'The map needs at least one spawn.' });
+        return;
+      }
       delete spawnZones[socket.id];
       io.emit('spawnZones', spawnZones);
       return;
     }
     const r = Math.max(0, Math.min(gridH() - 1, Math.floor(Number(p.r) || 0)));
     const c = Math.max(0, Math.min(gridW() - 1, Math.floor(Number(p.c) || 0)));
-    for (const [id, z] of Object.entries(spawnZones)) {
-      if (id === socket.id) continue;
-      if (Math.abs(r - z[0]) <= ZONE_SEPARATION && Math.abs(c - z[1]) <= ZONE_SEPARATION) {
-        socket.emit('systemMessage', { text: 'That overlaps another spawn zone.' });
-        return;
-      }
+    if (!zoneFree(r, c, socket.id)) {
+      socket.emit('systemMessage', { text: 'That overlaps another spawn zone.' });
+      return;
     }
     spawnZones[socket.id] = [r, c];
+    clearZoneColumn(r, c);
     io.emit('spawnZones', spawnZones);
   });
 
@@ -1152,6 +1252,7 @@ io.on('connection', (socket) => {
     socket.emit('currentPlayers', { players, selfId: socket.id });
     socket.emit('holderChanged', holderID);
     socket.emit('scores', scores);
+    socket.emit('kills', kills);
     socket.emit('currentPedestals', pedestals);
     socket.emit('currentTeleporters', activeTeleporters);
     socket.emit('currentMines', activeMines);
@@ -1313,11 +1414,12 @@ io.on('connection', (socket) => {
     io.emit('machinegunFired', { ...data, owner: socket.id });
   });
 
-  socket.on('machinegunHit', ({ targetId, dir }) => {
+  socket.on('machinegunHit', ({ targetId, dir, src }) => {
     if (!players[targetId] || isDead(targetId)) return;
     if (scores[targetId] > 0) {
       const pointsLost = Math.min(scores[targetId], 2);
       scores[targetId] -= pointsLost;
+      creditHit(targetId, socket.id, src === 'turret' ? 'turret' : 'machinegun');
       const droppedCoins = [];
       for (let i = 0; i < pointsLost; i++) {
         const ang = Math.random() * Math.PI * 2;
@@ -1349,7 +1451,21 @@ io.on('connection', (socket) => {
 
   socket.on('triggerExplosion', (pos) => {
     io.emit('explosion', pos);
-    explosionDamage(pos);
+    explosionDamage(pos, null, (pos && pos.cause) || 'rocket', socket.id);
+  });
+
+  // A vehicle ran someone down. The driver's client owns the collision test;
+  // the server does the damage so the flavour and the kill credit line up.
+  socket.on('ramPlayer', (d) => {
+    if (!d || !players[d.t] || isDead(d.t) || d.t === socket.id) return;
+    if (!gameSettings.slayer || !(scores[d.t] > 0)) return;
+    const dmg = Math.min(scores[d.t], Math.max(4, Math.min(35, Math.floor(Number(d.dmg) || 0))));
+    scores[d.t] -= dmg;
+    creditHit(d.t, socket.id, d.kind === 'drill' ? 'drill' : 'ghost');
+    const dir = d.dir || { x: 0, y: 1, z: 0 };
+    io.emit('applyImpulse', { id: d.t, dir, force: 60 });
+    io.emit('scores', scores);
+    checkDeath(d.t);
   });
 
   // Slayer self-destruct (K or /kill): zero out and run the death flow.
@@ -1359,12 +1475,15 @@ io.on('connection', (socket) => {
     checkDeath(socket.id);
   });
 
-  // Self-inflicted health cost (the drill runs on your life)
+  // Self-inflicted health cost: gnawing critters, and the drill running on
+  // your life. `n` is either a bare number (legacy) or { n, cause }.
   socket.on('selfDamage', (n) => {
     if (!gameSettings.slayer || !players[socket.id] || isDead(socket.id)) return;
-    const amt = Math.min(3, Math.max(0, Math.floor(Number(n) || 0)));
+    const raw = (n && typeof n === 'object') ? n.n : n;
+    const amt = Math.min(3, Math.max(0, Math.floor(Number(raw) || 0)));
     if (!amt) return;
     scores[socket.id] = Math.max(0, (scores[socket.id] || 0) - amt);
+    creditHit(socket.id, null, (n && typeof n === 'object') ? n.cause : 'blast');
     io.emit('scores', scores);
     checkDeath(socket.id);
   });
@@ -1428,7 +1547,7 @@ io.on('connection', (socket) => {
       const m = activeMines.splice(idx, 1)[0];
       io.emit('mineTriggered', { id, pos: m });
       io.emit('explosion', { x: m.x, y: m.y, z: m.z, type: 'mine' });
-      explosionDamage({ x: m.x, y: m.y, z: m.z });
+      explosionDamage({ x: m.x, y: m.y, z: m.z }, null, 'mine', null);
     }
   });
 
@@ -1488,7 +1607,7 @@ io.on('connection', (socket) => {
     };
     endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
     const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} wants to end the game. Vote to end game? Type /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
+    sysMsg(`${name} wants to end the game. /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
     checkEndVote();
   });
 
@@ -1508,6 +1627,8 @@ io.on('connection', (socket) => {
     const leftName = players[socket.id] ? players[socket.id].name : null;
     delete players[socket.id];
     delete scores[socket.id];
+    delete kills[socket.id];
+    delete lastHit[socket.id];
     readyIds.delete(socket.id);
     delete lastActivity[socket.id];
     // Park any vehicle this player was driving.

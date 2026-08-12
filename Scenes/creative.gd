@@ -471,20 +471,19 @@ func _make_fog_shells() -> void:
 			add_child(mi)
 
 
-## Spawns scattered across walkable pixels — nothing at main level (that's
-## what blocks you at ground height) AND ground present (not a pit) — one per
-## 3x3 block (web randomSpawn equivalent).
+## Spawn points ARE the markers placed in the map creator — no scatter. Each
+## sits on its own pixel's painted surface (the claim carved that column open,
+## so it's always daylight). Everyone gets one automatically, so this is only
+## empty if the map was made before markers existed.
 func _spawn_points() -> Array:
 	var points: Array = []
-	for r in range(1, PX_H - 1, 3):
-		for c in range(1, PX_W - 1, 3):
-			if _bit_at(_layers[1], r, c):
-				continue  # wall column
-			if not _bit_at(_layers[0], r, c):
-				continue  # pit
-			points.append(Vector3(-_half_x() + c * 4.0 + 2.0, 2.0, -_half_z() + r * 4.0 + 2.0))
+	for h in _home_pixels():
+		var r := int(h[0])
+		var c := int(h[1])
+		points.append(Vector3(-_half_x() + c * 4.0 + 2.0, _surface_y(r, c) + 1.0,
+			-_half_z() + r * 4.0 + 2.0))
 	if points.is_empty():
-		points.append(Vector3(2.0, 27.0, 2.0))  # all filled: spawn on the stack top
+		points.append(Vector3(0.0, _surface_y(PX_H / 2, PX_W / 2) + 1.0, 0.0))
 	return points
 
 
@@ -805,7 +804,7 @@ func _build_editor_ui() -> void:
 	center.add_child(box)
 
 	var title := Label.new()
-	title.text = "PAINT THE MAP"
+	title.text = "MAP CREATOR"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 24)
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
@@ -829,15 +828,15 @@ func _build_editor_ui() -> void:
 	brush_lbl.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	opts.add_child(brush_lbl)
 	var brush_group := ButtonGroup.new()
-	for size in [1, 2, 3, 5]:
+	for shape in [1, 2, 3, 4]:
 		var bb := Button.new()
-		bb.text = "%d" % size
+		bb.text = "%d" % shape
 		bb.toggle_mode = true
 		bb.button_group = brush_group
 		bb.focus_mode = Control.FOCUS_NONE
 		bb.custom_minimum_size = Vector2(34, 28)
-		bb.button_pressed = size == _brush
-		bb.pressed.connect(func(): _brush = size)
+		bb.button_pressed = shape == _brush
+		bb.pressed.connect(func(): _brush = shape)
 		opts.add_child(bb)
 	# SPIRE MODE: paint high and the column beneath fills in with it. Off,
 	# slabs are free to float.
@@ -847,8 +846,17 @@ func _build_editor_ui() -> void:
 	spire.focus_mode = Control.FOCUS_NONE
 	spire.button_pressed = _spire_mode
 	spire.custom_minimum_size = Vector2(110, 28)
-	spire.add_theme_color_override("font_color", Color("#ff5560"))
-	spire.toggled.connect(func(on: bool): _spire_mode = on)
+	# Armed reads as pressed-in and greyed, not alarm-red. A toggled Button
+	# draws its label with font_pressed_color, so every state has to be set.
+	var tint := func(on: bool) -> void:
+		var c := Color(1, 1, 1, 0.32) if on else Color(1, 1, 1, 0.9)
+		for slot in ["font_color", "font_pressed_color", "font_hover_color",
+				"font_hover_pressed_color", "font_focus_color"]:
+			spire.add_theme_color_override(slot, c)
+	spire.toggled.connect(func(on: bool):
+		_spire_mode = on
+		tint.call(on))
+	tint.call(_spire_mode)
 	opts.add_child(spire)
 
 	var canvas_row := HBoxContainer.new()
@@ -910,18 +918,10 @@ func _build_editor_ui() -> void:
 	buttons.add_theme_constant_override("separation", 10)
 	box.add_child(buttons)
 	var gen := Button.new()
-	gen.text = "GENERATE & PLAY"
-	gen.custom_minimum_size = Vector2(0, 40)
+	gen.text = "START GAME"
+	gen.custom_minimum_size = Vector2(220, 40)
 	gen.pressed.connect(func(): Net.emit_event("requestGenerate"))
 	buttons.add_child(gen)
-	var clear := Button.new()
-	clear.text = "CLEAR"
-	clear.pressed.connect(func(): Net.emit_event("requestClear"))
-	buttons.add_child(clear)
-	var back := Button.new()
-	back.text = "BACK TO MENU"
-	back.pressed.connect(func(): get_tree().change_scene_to_file("res://UI/main_menu.tscn"))
-	buttons.add_child(back)
 
 	_status = Label.new()
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -944,6 +944,23 @@ func _set_layer(li: int) -> void:
 
 func change_layer(dir: int) -> void:
 	_set_layer(_active_layer + dir)
+
+
+## Brush footprints, in cells relative to the cursor: a single pixel, a plus,
+## then filled discs 5 and 7 pixels across.
+func brush_offsets() -> Array:
+	if _brush <= 1:
+		return [Vector2i(0, 0)]
+	if _brush == 2:
+		return [Vector2i(0, 0), Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	var rad := 2 if _brush == 3 else 3
+	var limit := (rad + 0.5) * (rad + 0.5)
+	var out: Array = []
+	for dy in range(-rad, rad + 1):
+		for dx in range(-rad, rad + 1):
+			if dx * dx + dy * dy <= limit:
+				out.append(Vector2i(dx, dy))
+	return out
 
 
 ## One canvas cell on the active layer. SPIRE MODE fills the layers beneath
@@ -992,11 +1009,11 @@ class PixelPainter extends Control:
 	func _gui_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton:
 			if event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
-				owner_scene.change_layer(1)
+				owner_scene.change_layer(-1)
 				accept_event()
 				return
 			if event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				owner_scene.change_layer(-1)
+				owner_scene.change_layer(1)
 				accept_event()
 				return
 			if event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
@@ -1022,11 +1039,11 @@ class PixelPainter extends Control:
 			return
 		var w: int = owner_scene.PX_W
 		var h: int = owner_scene.PX_H
-		var reach: int = owner_scene._brush - 1
-		for rr in range(r - reach, r + reach + 1):
-			for cc in range(c - reach, c + reach + 1):
-				if rr >= 0 and rr < h and cc >= 0 and cc < w:
-					owner_scene.paint_cell(rr, cc, _paint_value == 1)
+		for off: Vector2i in owner_scene.brush_offsets():
+			var rr := r + off.y
+			var cc := c + off.x
+			if rr >= 0 and rr < h and cc >= 0 and cc < w:
+				owner_scene.paint_cell(rr, cc, _paint_value == 1)
 		owner_scene._on_painted()
 		queue_redraw()
 

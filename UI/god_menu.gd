@@ -1,8 +1,9 @@
 extends PanelContainer
 
-## God menu (web §6.8, F4 — here on tilde/backtick per Ryan). Toggling it
-## enters/leaves god mode: free-fly, mouse freed for the menu, remotes see
-## you as a 30% ghost, and the server hands the oddball off if you held it.
+## Build drone menu (web §6.8, F4 — here on tilde/backtick per Ryan).
+## Toggling it launches the drone: you fly it, the mouse is freed for the
+## menu, remotes see your body as a 30% ghost, and the server hands the
+## oddball off if you were holding it.
 
 const GIVE_ITEMS := [
 	"grapple", "launch_pad", "boost_pad", "teleporter",
@@ -51,7 +52,7 @@ var _selected: Dictionary = {}
 var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
-# God build mode (web: godmode build tools + the 9^3 grid-point cloud)
+# Drone build mode (web: godmode build tools + the 9^3 grid-point cloud)
 const BUILD_TYPES := ["block", "wall", "ramp", "platform"]
 var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
@@ -183,7 +184,7 @@ func toggle() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		_set_scifi(false)
 	else:
-		# One menu at a time: opening god mode closes the Esc menu
+		# One menu at a time: launching the drone closes the Esc menu
 		var hud := get_parent()
 		if hud and hud.has_method("close_esc_menu"):
 			hud.close_esc_menu()
@@ -207,6 +208,9 @@ func _set_scifi(on: bool) -> void:
 		fx.set_scifi(on)
 
 
+## A real quadcopter: hull with a gimballed camera, four swept arms out to
+## motor pods, and rotor discs that spin (drone.gd turns anything under
+## "Rotors"). Nav lights green up front, red at the tail.
 func _make_drone() -> CharacterBody3D:
 	var drone := CharacterBody3D.new()
 	drone.set_script(load("res://Player/drone.gd"))
@@ -216,19 +220,81 @@ func _make_drone() -> CharacterBody3D:
 	shape.radius = 0.4
 	col.shape = shape
 	drone.add_child(col)
-	var mesh_inst := MeshInstance3D.new()
-	var sphere := SphereMesh.new()
-	sphere.radius = 0.25
-	sphere.height = 0.5
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.15, 0.15, 0.18)
-	mat.emission_enabled = true
-	mat.emission = Color(0.2, 0.9, 0.4)
-	mat.emission_energy_multiplier = 1.5
-	sphere.material = mat
-	mesh_inst.mesh = sphere
-	drone.add_child(mesh_inst)
+
+	var body := Node3D.new()
+	body.name = "Body"
+	drone.add_child(body)
+	var shell := StandardMaterial3D.new()
+	shell.albedo_color = Color(0.13, 0.14, 0.17)
+	shell.metallic = 0.8
+	shell.roughness = 0.35
+	var trim := StandardMaterial3D.new()
+	trim.albedo_color = Color(0.3, 0.32, 0.36)
+	trim.metallic = 0.6
+	trim.roughness = 0.4
+
+	_drone_box(body, Vector3(0.34, 0.12, 0.44), Vector3(0, 0, 0), shell)        # hull
+	_drone_box(body, Vector3(0.22, 0.08, 0.2), Vector3(0, 0.09, -0.04), trim)   # avionics hump
+	_drone_box(body, Vector3(0.14, 0.12, 0.12), Vector3(0, -0.08, -0.2), trim)  # camera gimbal
+	_drone_box(body, Vector3(0.07, 0.07, 0.04), Vector3(0, -0.09, -0.27),
+		_drone_glow(Color(0.35, 0.85, 1.0)))                                     # lens
+	_drone_box(body, Vector3(0.05, 0.05, 0.05), Vector3(0, 0.06, 0.24),
+		_drone_glow(Color(1.0, 0.25, 0.2)))                                      # tail light
+
+	var rotors := Node3D.new()
+	rotors.name = "Rotors"
+	drone.add_child(rotors)
+	var prop_mat := StandardMaterial3D.new()
+	prop_mat.albedo_color = Color(0.5, 0.53, 0.6)
+	prop_mat.metallic = 0.3
+	prop_mat.roughness = 0.6
+	for i in 4:
+		var ax := -1.0 if i % 2 == 0 else 1.0
+		var az := -1.0 if i < 2 else 1.0
+		var at := Vector3(ax * 0.3, 0.02, az * 0.32)
+		# Arm from the hull out to the pod
+		var arm := _drone_box(body, Vector3(0.06, 0.05, 0.42), at * 0.5, shell)
+		arm.rotation.y = atan2(at.x, at.z)   # swing the arm out toward its pod
+		_drone_box(body, Vector3(0.1, 0.1, 0.1), at, trim)                       # motor pod
+		# Front pods get the green nav lights
+		if az < 0.0:
+			_drone_box(body, Vector3(0.04, 0.04, 0.04), at + Vector3(0, -0.07, 0),
+				_drone_glow(Color(0.3, 1.0, 0.4)))
+		# Two crossed blades per rotor — no fake blur disc, they actually spin
+		var pivot := Node3D.new()
+		pivot.position = at + Vector3(0, 0.1, 0)
+		rotors.add_child(pivot)
+		var blade := BoxMesh.new()
+		blade.size = Vector3(0.3, 0.012, 0.035)
+		blade.material = prop_mat
+		for b in 2:
+			var blade_mi := MeshInstance3D.new()
+			blade_mi.mesh = blade
+			blade_mi.rotation.y = b * PI / 2.0
+			pivot.add_child(blade_mi)
+		_drone_box(pivot, Vector3(0.05, 0.03, 0.05), Vector3.ZERO, trim)   # hub
 	return drone
+
+
+static func _drone_box(root: Node3D, size: Vector3, pos: Vector3, mat: StandardMaterial3D) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = size
+	bm.material = mat
+	mi.mesh = bm
+	mi.position = pos
+	root.add_child(mi)
+	return mi
+
+
+static func _drone_glow(c: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = c
+	m.emission_enabled = true
+	m.emission = c
+	m.emission_energy_multiplier = 2.5
+	return m
 
 
 ## Mouse ray that ignores our own bodies — CRUCIALLY including the drone,
@@ -918,7 +984,7 @@ func _build_ui() -> void:
 	add_child(root)
 
 	var title := Label.new()
-	title.text = "GOD MODE"
+	title.text = "BUILD DRONE"
 	title.add_theme_color_override("font_color", Color("#ffd54a"))
 	title.add_theme_font_size_override("font_size", 16)
 	root.add_child(title)
