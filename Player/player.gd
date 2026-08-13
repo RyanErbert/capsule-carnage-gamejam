@@ -878,7 +878,13 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 		var damp := exp(-MB_DRAG * delta)
 		velocity.x *= damp
 		velocity.z *= damp
-	var top := MAX_SPEED * spd * MB_TOP * boost
+	# Boost leans the stage harder, which is already how it makes you faster.
+	# Multiplying the CEILING by it as well stacked 6x onto 3x for an 18x walk
+	# speed, and at the 78 m/s that reaches, the body crosses a 2 m terrain
+	# facet every one and a half frames and moves 1.3 m per step: it cannot roll
+	# on ground at all, it skips off it. Measured on an undulating deck, 22% of
+	# the run was spent airborne at 78 m/s and NONE of it at 38.
+	var top := MAX_SPEED * spd * MB_TOP
 	var h := Vector2(velocity.x, velocity.z)
 	if h.length() > top:
 		h = h.normalized() * top

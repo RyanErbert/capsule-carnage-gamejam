@@ -1,4 +1,4 @@
-# Godot 4+ specific ignores
+﻿# Godot 4+ specific ignores
 .godot/
 .nomedia
 
@@ -19,4 +19,4 @@ server/node_modules/
 
 # Headless physics probes: throwaway scenes that drive the player against test
 # geometry and print numbers. Kept out of the repo, kept on disk between runs.
-_probe/
+
