@@ -109,6 +109,8 @@ var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
 var _pop_cd := 0.0            # rate limit on the ejection report
+var _pop_total := 0           # ...and how many there have been in total
+var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
 var _jump_eaten := false      # the press that let go of a rope must not jump
 
@@ -585,18 +587,48 @@ func _curb_ejection(pre_pos: Vector3, pre_vel: Vector3, delta: float) -> void:
 	if over <= allowed:
 		return
 	global_position -= resid * (1.0 - allowed / over)
+	_pop_total += 1
 	_pop_cd -= delta
 	if _pop_cd > 0.0:
 		return
 	_pop_cd = 0.5
+	# What we are overlapping is the whole question, so name it by its place in
+	# the tree — that says terrain vs builds vs wfc vs props without guessing.
 	var who := ""
 	for i in get_slide_collision_count():
 		var c: Object = get_slide_collision(i).get_collider()
-		if c:
-			who += " %s(%s)" % [c.name, c.get_class()]
-	print("[pop] solver ejected %.2f m (allowed %.2f) at %v  dir(%.2f,%.2f,%.2f)  hit:%s" % [
-		over, allowed, global_position.round(),
-		resid.x / over, resid.y / over, resid.z / over, who])
+		if c is Node:
+			who += " " + str((c as Node).get_path()).replace("/root/", "")
+	_log_pop("[pop] #%d ejected %.2f m (allowed %.2f) at %v dir(%.2f,%.2f,%.2f) |v|%.1f %s hit:%s" % [
+		_pop_total, over, allowed, global_position.round(),
+		resid.x / over, resid.y / over, resid.z / over, velocity.length(),
+		"ground" if grounded else ("face" if touching else "air"), who])
+
+
+## Both to the editor Output and to user://pop.log, so a session can be read
+## back afterwards instead of copied out of a scrolling panel.
+const POP_LOG := "user://pop.log"
+const POP_LOG_MAX := 200
+
+func _log_pop(text: String) -> void:
+	print(text)
+	if _pop_logged >= POP_LOG_MAX:
+		return
+	var f := FileAccess.open(POP_LOG, FileAccess.READ_WRITE) if FileAccess.file_exists(POP_LOG) \
+		else FileAccess.open(POP_LOG, FileAccess.WRITE)
+	if f == null:
+		return
+	f.seek_end()
+	if _pop_logged == 0:
+		f.store_line("")
+		f.store_line("=== %s  monkey=%s  %s ===" % [
+			Time.get_datetime_string_from_system(),
+			Net.game_settings.get("monkey", true), Settings.player_name])
+	_pop_logged += 1
+	f.store_line(text)
+	if _pop_logged == POP_LOG_MAX:
+		f.store_line("[pop] ...capped at %d lines for this session" % POP_LOG_MAX)
+	f.close()
 
 
 ## Terrain is a mesh of flat triangles, so following it exactly means popping
