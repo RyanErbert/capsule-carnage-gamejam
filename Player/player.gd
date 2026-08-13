@@ -117,6 +117,7 @@ var _loop_takeoffs := 0       # ...and how many times we have left the ground in
 var _loop_gain := 0.0
 var _loop_cd := 0.0
 var _stick_cd := 0.0          # rate limit on the ground-snap report
+var _stick_grace := 0.0       # seconds the reel may keep closing a gap for
 var _pop_total := 0           # ...and how many there have been in total
 var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
@@ -726,8 +727,11 @@ func _watch_loop(delta: float, was_grounded: bool) -> void:
 ## it — and take the velocity onto it too, which is the same push-never-pull
 ## rule applied to a contact we went looking for. Anything that deliberately
 ## threw us (a jump, a pad, a blast, a rope) says so with launched().
+const SNAP_RATE := 9.0       # m/s the reel may close a gap at, never in one jump
+
 func _stick(was_touching: bool) -> void:
-	if touching or not was_touching or _no_snap > 0.0 \
+	_stick_grace = maxf(0.0, _stick_grace - get_physics_process_delta_time())
+	if touching or not (was_touching or _stick_grace > 0.0) or _no_snap > 0.0 \
 			or velocity.dot(up_direction) > SNAP_MAX_UP:
 		return
 	var down := -up_direction
@@ -736,8 +740,17 @@ func _stick(was_touching: bool) -> void:
 		return                       # genuinely off the end of something
 	if hit.get_normal().dot(up_direction) < cos(deg_to_rad(GROUND_ANGLE)):
 		return                       # too steep to be worth reeling us onto
-	var drop := hit.get_travel().length()
+	# Close the gap at a rate, never in one jump. Teleporting the whole 0.9 m
+	# in a frame is a 53 m/s drop that never touches the velocity, so nothing
+	# else could see it: you crest a bump, rise half a metre, and get yanked
+	# flat instead of arcing. Reeling takes a few frames and is invisible.
+	var gap := hit.get_travel().length()
+	var drop := minf(gap, SNAP_RATE * get_physics_process_delta_time())
 	global_position += down * drop
+	if drop < gap - 0.001:
+		_stick_grace = 0.2       # still reeling: keep the right to finish next frame
+		return
+	_stick_grace = 0.0
 	var n := hit.get_normal()
 	var into := velocity.dot(n)
 	if into < 0.0:
