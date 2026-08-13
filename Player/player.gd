@@ -26,6 +26,7 @@ const BOOST_MULT := 2.0           # what a full boost slider adds on top of walk
 const GROUND_ANGLE := 58.0   # degrees flat enough to call yourself standing
 const GROUND_SNAP := 0.9     # ground this far under a lost contact still holds you
 const SNAP_MAX_UP := 9.0     # rising faster than this is a throw, never a crest
+const GROUND_LIFT_MAX := 2.5 # m/s of upward velocity one contact frame may add
 const SLOPE_CAP_Y := 0.95    # steeper than 18 degrees and a walk becomes a ride
 const SLOPE_CAP_MULT := 3.0  # ...which may carry this far past run speed, no further
 const TURN_RATE := 4.0       # how fast momentum swings onto a new heading
@@ -583,6 +584,18 @@ func _resolve_contact(restitution := 0.0) -> void:
 		_surf_n = up_direction
 		return
 	grounded = best > cos(deg_to_rad(GROUND_ANGLE))
+	# A ball does not track every seam in the ground. Its contact patch averages
+	# the micro-relief, so rolling over a 13 degree facet at speed makes it
+	# FOLLOW the ground, not leave it. Projecting onto each facet the instant it
+	# arrives does the opposite: at 43 m/s that facet tipped 9.2 m/s of the run
+	# straight up, which is three metres of air off a bump you can barely see,
+	# and then it lands and does it again. So limit how fast contact may turn
+	# the run upward. A real ramp is a gradual turn and passes through
+	# untouched; a seam is a step change and gets absorbed over a few frames.
+	if grounded and _no_snap <= 0.0:
+		var lift := velocity.dot(up_direction) - before.dot(up_direction)
+		if lift > GROUND_LIFT_MAX:
+			velocity -= up_direction * (lift - GROUND_LIFT_MAX)
 	_watch_kick(before, restitution)
 
 
