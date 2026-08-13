@@ -32,6 +32,7 @@ var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var spawn_zones: Dictionary = {}    # socket id -> [r, c] claimed in the editor
 var claim_state: Variant = null     # Xonix land-grab board, if one is running
 var start_vote: Variant = null      # editor poll on cutting the sculpt short
+var end_vote: Variant = null        # in-match poll on ending the round
 var presence: Array = []            # everyone connected: {id, name, color, where}
 var chat_log: Array = []            # the room's conversation, replayed on connect
 const CHAT_LOG_MAX := 80
@@ -162,6 +163,8 @@ func _handle_frame(frame: String) -> void:
 					presence = data if data is Array else []
 				"startVote":
 					start_vote = data
+				"endVote":
+					end_vote = data
 				"creativeGrid":
 					creative_grid = data
 					terrain_edits.clear()

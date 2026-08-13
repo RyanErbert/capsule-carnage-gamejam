@@ -18,10 +18,20 @@ const CHANNEL_MAX_RINGS := 260
 ## WFC structures (Items/wfc.gd): the payload is just a seed, and every client
 ## collapses the identical building from it. Nothing but the seed travels.
 const Wfc := preload("res://Items/wfc.gd")
-const WFC_SIZE := 7            # tiles per side (7 x 6 m = a 42 m footprint)
+const WFC_SIZE := 8            # tiles per side (8 x 6 m = a 48 m footprint)
+## Compounds close enough to be worth linking get a walkway strung between
+## them, at whatever angle the two happen to sit at. Nothing about this goes
+## over the wire: every client has every seed, so every client draws the same
+## spans from the same pairs.
+const SPAN_MAX := 130.0
+const SPAN_MIN := 26.0
 
 var _builds: Dictionary = {}   # id -> StaticBody3D
 var _channels: Dictionary = {}  # id -> StaticBody3D
+var _compounds: Dictionary = {} # id -> {pos, seed, ry, style}
+var _spans: Array = []          # StaticBody3D walkways, rebuilt as a set
+var _relink := 0.0              # debounce: compounds arrive one event at a time
+var _spots_sent: Dictionary = {}
 
 
 func _ready() -> void:
@@ -35,6 +45,9 @@ func _on_net_event(event: String, data: Variant) -> void:
 			for id in _builds:
 				_builds[id].queue_free()
 			_builds.clear()
+			_compounds.clear()
+			_spots_sent.clear()
+			_relink = 0.35
 			for b in data:
 				_add_build(b)
 		"buildPlaced":
@@ -44,6 +57,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if _builds.has(id):
 				_builds[id].queue_free()
 				_builds.erase(id)
+			if _compounds.erase(id):
+				_relink = 0.35
 		"currentChannels":
 			for id in _channels:
 				_channels[id].queue_free()
@@ -80,6 +95,106 @@ func nearest_channel(pos: Vector3, radius := 3.5) -> Dictionary:
 	return best
 
 
+func _process(delta: float) -> void:
+	if _relink <= 0.0:
+		return
+	_relink -= delta
+	if _relink <= 0.0:
+		_rebuild_spans()
+
+
+## String walkways between compounds that stand near each other. Each end is a
+## real rim deck (Wfc.anchors), so a span lands on something you can stand on,
+## and the angle between two compounds is whatever it is — the off-axis runs
+## are the point, they cut across a map that is otherwise all right angles.
+func _rebuild_spans() -> void:
+	for s in _spans:
+		if is_instance_valid(s):
+			s.queue_free()
+	_spans.clear()
+	var ids: Array = _compounds.keys()
+	ids.sort()
+	for i in ids.size():
+		for j in range(i + 1, ids.size()):
+			var a: Dictionary = _compounds[ids[i]]
+			var b: Dictionary = _compounds[ids[j]]
+			var gap: float = Vector2(a["pos"].x - b["pos"].x, a["pos"].z - b["pos"].z).length()
+			if gap > SPAN_MAX or gap < SPAN_MIN:
+				continue
+			var link := _best_link(a, b)
+			if link.is_empty():
+				continue
+			var from: Vector3 = link["from"]
+			var to: Vector3 = link["to"]
+			var run := to - from
+			var span: StaticBody3D = Wfc.build_span(run.length())
+			# Aim the walkway's local +X straight down the run, keeping its deck
+			# as level as a sloped span can be.
+			var bx := run.normalized()
+			var bz := bx.cross(Vector3.UP)
+			bz = Vector3.FORWARD if bz.length() < 0.001 else bz.normalized()
+			span.transform = Transform3D(Basis(bx, bz.cross(bx).normalized(), bz), from)
+			add_child(span)
+			_spans.append(span)
+
+
+## The closest pair of rim decks that actually face each other, so a walkway
+## leaves one compound heading outward instead of clipping back through it.
+func _best_link(a: Dictionary, b: Dictionary) -> Dictionary:
+	var pa: Array = Wfc.anchors(int(a["seed"]), WFC_SIZE, str(a["style"]))
+	var pb: Array = Wfc.anchors(int(b["seed"]), WFC_SIZE, str(b["style"]))
+	if pa.is_empty() or pb.is_empty():
+		return {}
+	var ta := Transform3D(Basis(Vector3.UP, float(a["ry"])), a["pos"])
+	var tb := Transform3D(Basis(Vector3.UP, float(b["ry"])), b["pos"])
+	var best := {}
+	var best_d := INF
+	for ea in pa:
+		var wa: Vector3 = ta * (ea["pos"] as Vector3)
+		var da: Vector3 = ta.basis * (ea["dir"] as Vector3)
+		for eb in pb:
+			var wb: Vector3 = tb * (eb["pos"] as Vector3)
+			var db: Vector3 = tb.basis * (eb["dir"] as Vector3)
+			var run := wb - wa
+			var flat := Vector3(run.x, 0, run.z).normalized()
+			if da.dot(flat) < 0.75 or db.dot(-flat) < 0.75:
+				continue
+			var d := run.length()
+			if d < best_d:
+				best_d = d
+				best = {"from": wa, "to": wb}
+	return best
+
+
+## Items live on the structures now, and only the client knows where the decks
+## are: the collapse runs here, not on the server. First report per compound
+## wins, so it does not matter how many of us are looking at the same seed.
+func _report_spots(id: String, comp: Dictionary) -> void:
+	if _spots_sent.has(id):
+		return
+	_spots_sent[id] = true
+	var t := Transform3D(Basis(Vector3.UP, float(comp["ry"])), comp["pos"])
+	var out: Array = []
+	for p in Wfc.item_spots(int(comp["seed"]), WFC_SIZE, str(comp["style"])):
+		var w: Vector3 = t * (p as Vector3)
+		out.append({"x": w.x, "y": w.y, "z": w.z})
+	if not out.is_empty():
+		Net.emit_event("wfcSpots", {"id": id, "spots": out})
+
+
+## The hand-placed tileset piece occupying a given cell, or {}. The drone asks
+## this about the four cells around its cursor to work out what fits there.
+func part_at(cell_pos: Vector3) -> Dictionary:
+	for id in _builds:
+		var b: StaticBody3D = _builds[id]
+		if b.get_meta("build_type", "") != "wfcpart":
+			continue
+		if b.position.distance_to(cell_pos) > 0.6:
+			continue
+		return {"kind": b.get_meta("part_kind", "deck"), "rot": b.get_meta("part_rot", 0)}
+	return {}
+
+
 ## Web overlap rejection: same cell (<0.1), same type, same rotation.
 func has_build_at(pos: Vector3, type: String, ry: float, rx: float) -> bool:
 	for id in _builds:
@@ -100,11 +215,23 @@ func _add_build(b: Dictionary) -> void:
 	if type == "wfc" or type == "wfcpart":
 		# A whole collapsed compound from its seed, or one module of the same
 		# tileset placed by hand off the drone.
+		var style := str(b.get("style", "surface"))
+		var seed_value := int(b.get("seed", 1))
 		var struct: StaticBody3D = Wfc.build_part(str(b.get("part", "deck"))) \
-			if type == "wfcpart" else Wfc.build(int(b.get("seed", 1)), WFC_SIZE)
+			if type == "wfcpart" else Wfc.build(seed_value, WFC_SIZE, style)
 		struct.position = Vector3(b.get("x", 0.0), b.get("y", 0.0), b.get("z", 0.0))
 		struct.rotation.y = float(b.get("ry", 0.0))
 		add_child(struct)
+		if type == "wfc":
+			_compounds[id] = {"pos": struct.position, "seed": seed_value,
+				"ry": struct.rotation.y, "style": style}
+			_relink = 0.35
+			_report_spots(id, _compounds[id])
+		else:
+			# What this piece is and which way it faces, so the drone can tell
+			# whether the next one would mate with it.
+			struct.set_meta("part_kind", str(b.get("part", "deck")))
+			struct.set_meta("part_rot", int(roundf(struct.rotation.y / (PI * 0.5))) & 3)
 		_builds[id] = struct
 		return
 	var body := StaticBody3D.new()

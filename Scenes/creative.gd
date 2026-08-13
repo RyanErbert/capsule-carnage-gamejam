@@ -158,15 +158,12 @@ func _ready() -> void:
 		_adopt_paint(painting["layers"])
 
 
-## Selectable map shapes (mirrors the server's GRID_OPTIONS).
-const GRID_OPTIONS := [
-	Vector2i(32, 32), Vector2i(48, 48), Vector2i(64, 64), Vector2i(96, 96),
-	Vector2i(64, 32), Vector2i(96, 48), Vector2i(96, 64),
-]
+## Each axis picks its own size (mirrors the server's GRID_SIZES).
+const GRID_SIZES := [24, 32, 40, 48, 56, 64, 80, 96]
 
 
 static func _valid_gs(gs: Vector2i) -> Vector2i:
-	return gs if gs in GRID_OPTIONS else Vector2i(32, 32)
+	return Vector2i(gs.x if gs.x in GRID_SIZES else 32, gs.y if gs.y in GRID_SIZES else 32)
 
 
 ## The size the server currently wants.
@@ -734,7 +731,8 @@ func _zone_respawn() -> Variant:
 	for _i in 16:
 		var rr := clampi(int(mine[0]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_H - 1)
 		var cc := clampi(int(mine[1]) + randi_range(-DEADZONE_PX, DEADZONE_PX), 0, PX_W - 1)
-		if not _bit_at(_layers[GROUND], rr, cc):
+		# Any floor will do — a sunk map's is the basement, not the ground slab
+		if _surface_y(rr, cc) < -14.0:
 			continue  # pit
 		return Vector3(-_half_x() + cc * 4.0 + 2.0, _surface_y(rr, cc) + 1.0, -_half_z() + rr * 4.0 + 2.0)
 	return null
@@ -1204,6 +1202,14 @@ func _set_layer(li: int) -> void:
 		_painter.queue_redraw()
 
 
+func disarm_spawn() -> void:
+	_spawn_mode = false
+	if _spawn_button:
+		_spawn_button.button_pressed = false
+	if _painter:
+		_painter.queue_redraw()
+
+
 func change_layer(dir: int) -> void:
 	_set_layer(_active_layer + dir)
 
@@ -1307,6 +1313,7 @@ class PixelPainter extends Control:
 		if owner_scene._spawn_mode:
 			# The server owns zones: it rejects overlaps and broadcasts the set
 			Net.emit_event("setSpawn", {"r": r, "c": c} if _paint_value == 1 else null)
+			owner_scene.disarm_spawn()   # one click, one spawn
 			return
 		var w: int = owner_scene.PX_W
 		var h: int = owner_scene.PX_H
@@ -1321,12 +1328,27 @@ class PixelPainter extends Control:
 	func _bit(li: int, r: int, c: int) -> bool:
 		return owner_scene._bit_at(owner_scene._layers[li], r, c)
 
-	## Active layer at full color; every other layer ghosted underneath so
-	## you can line slabs up. Missing ground reads as a near-black pit.
+	## Highest solid layer in this column, -1 for a hole clean through.
+	func _top(r: int, c: int) -> int:
+		for li in range(LAYERS - 1, -1, -1):
+			if _bit(li, r, c):
+				return li
+		return -1
+
+	## Three layers, three different languages, so a glance tells you where you
+	## are in the stack:
+	##
+	##   the floor below you   a dim fill, like ground seen through a grating
+	##   the layer you edit    solid colour, the only saturated thing on screen
+	##   the roof above you    an inset outline, drawn INSIDE the cell
+	##
+	## Nothing else is drawn. Stacking every layer as a ghost was the problem —
+	## five translucent washes read as one muddy colour and you cannot tell a
+	## floor under your feet from a slab over your head.
 	##
 	## During the claim phase, territory tints the whole board and live trails
-	## draw over it. Once the land is divided, everything that isn't yours goes
-	## under fog — you can neither see it nor sculpt it.
+	## draw over it. Once the land is divided the fog IS the territory line, so
+	## the wash comes off and the colour goes back to describing terrain.
 	func _draw() -> void:
 		var active: int = owner_scene._active_layer
 		var CELL := cell
@@ -1334,6 +1356,7 @@ class PixelPainter extends Control:
 		var own: PackedInt32Array = owner_scene._claim_own
 		var me: int = owner_scene._my_claim_index()
 		var fogging := phase == "edit"
+		var inset := maxf(1.0, CELL * 0.22)
 		for r in owner_scene.PX_H:
 			for c in owner_scene.PX_W:
 				var rect := Rect2(c * CELL, r * CELL, CELL - 1, CELL - 1)
@@ -1342,17 +1365,17 @@ class PixelPainter extends Control:
 				if fogging and holder != me:
 					draw_rect(rect, FOG_COL)
 					continue
-				var col := BG if _bit(owner_scene.GROUND, r, c) else PIT
-				for li in range(1, LAYERS):
-					if li != active and _bit(li, r, c):
-						col = col.lerp(Color(LAYER_FILL[li]), GHOST_ALPHA)
-				if active <= owner_scene.GROUND:
-					if _bit(active, r, c):
-						col = col.lerp(Color(LAYER_FILL[active]), 0.85)
-				elif _bit(active, r, c):
+				var here := _bit(active, r, c)
+				var below := active > 0 and _bit(active - 1, r, c)
+				var col := BG
+				if here:
 					col = Color(LAYER_FILL[active])
-				# Territory wash: your own ground reads strongest
-				if holder >= 0:
+				elif below:
+					col = BG.lerp(Color(LAYER_FILL[active - 1]), 0.42)
+				elif _top(r, c) < 0:
+					col = PIT              # nothing under you for the whole stack
+				# Territory wash, during the grab only
+				if holder >= 0 and phase == "claim":
 					col = col.lerp(owner_scene._claim_color(holder), 0.5 if holder == me else 0.3)
 				# Home deadzone: off-limits to the brush, in play as well. Only
 				# ever YOUR OWN — a rival's red block would give their spawn
@@ -1361,6 +1384,11 @@ class PixelPainter extends Control:
 				if owner_scene._in_own_deadzone(r, c):
 					col = col.lerp(Color(1.0, 0.25, 0.25), 0.35)
 				draw_rect(rect, col)
+				# Roof: an outline INSIDE the cell, never a fill, so a slab over
+				# your head cannot be mistaken for one under your feet.
+				if active < LAYERS - 1 and _bit(active + 1, r, c):
+					draw_rect(rect.grow(-inset), Color(LAYER_FILL[active + 1]), false,
+						maxf(1.0, CELL * 0.12))
 		if phase == "claim":
 			_draw_claim(CELL, me)
 		# Spawn zones: only ever your own. Where the others chose to land is

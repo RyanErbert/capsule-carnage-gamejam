@@ -17,6 +17,10 @@
 const LAYERS = 5;
 const GROUND = 1;   // index of the walkable default surface
 
+// Which passes run. Picked in the lobby; an empty pick means a bare plain.
+const SCHEMES = ['plateaus', 'canyons', 'spires', 'tunnels', 'cellars', 'craters', 'causeways'];
+const DEFAULT_SCHEMES = ['plateaus', 'canyons', 'spires', 'tunnels', 'cellars'];
+
 function words(w) { return Math.ceil(w / 32); }
 
 function emptyLayers(w, h) {
@@ -90,9 +94,11 @@ function fbm(seed, w, h, cells, octaves) {
 // weighted to spend more of the map up on the higher terraces.
 const BANDS = [0.26, 0.52, 0.76];
 
-function heightAt(e) {
-  for (let i = 0; i < BANDS.length; i++) if (e < BANDS[i]) return GROUND + i;
-  return GROUND + 3;
+// `base` is the floor everything is measured from: the ground layer normally,
+// the basement when the arena is sunk into the world.
+function heightAt(e, base) {
+  for (let i = 0; i < BANDS.length; i++) if (e < BANDS[i]) return base + i;
+  return Math.min(LAYERS - 1, base + 3);
 }
 
 // A wandering corridor: hold a heading and turn slowly. With no `start` it
@@ -124,8 +130,16 @@ function walk(rnd, w, h, len, start) {
 
 // Roll a world. Returns { layers, seed } — layers is exactly what the painter
 // and voxel_terrain already consume.
-function generate(w, h, seed) {
+function generate(w, h, seed, opts) {
   seed = (seed >>> 0) || 1;
+  opts = opts || {};
+  const picked = Array.isArray(opts.schemes) ? opts.schemes : DEFAULT_SCHEMES;
+  const on = k => picked.indexOf(k) !== -1;
+  // Sunk: the whole arena drops a slab, so the floor is the basement and the
+  // rim stands solid to the ceiling — you play in a crater, not on a plain.
+  const sub = !!opts.subterranean;
+  const base = sub ? 0 : GROUND;
+  const rim = sub ? LAYERS - 1 : GROUND;
   const rnd = mulberry32(seed ^ 0x5bf03635);
   const layers = emptyLayers(w, h);
 
@@ -139,17 +153,17 @@ function generate(w, h, seed) {
   const tops = new Int8Array(w * h);
   for (let r = 0; r < h; r++) {
     for (let c = 0; c < w; c++) {
-      let top = heightAt(elev(r, c));
+      let top = on('plateaus') ? heightAt(elev(r, c), base) : base;
       // Ridge lines: the noise field crossing its own midpoint traces long
       // winding curves. Near one, the standing ground drops away — these are
       // the valley floors the canyons will later cut down the middle of.
       const rift = Math.min(Math.abs(canyonA(r, c) - 0.5), Math.abs(canyonB(r, c) - 0.5));
-      if (rift < 0.06) top = GROUND;
+      if (on('canyons') && rift < 0.06) top = base;
       // Spires: rare, small, and they only grow out of ground that's already
       // standing, so they read as pillars rather than random floating teeth.
-      if (top > GROUND && spire(r, c) > 0.875) top = LAYERS - 1;
-      // The map boundary is the seam the bowl blends into: always plain floor.
-      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) top = GROUND;
+      if (on('spires') && top > base && spire(r, c) > 0.875) top = LAYERS - 1;
+      // The map boundary is the seam the bowl blends into.
+      if (r === 0 || c === 0 || r === h - 1 || c === w - 1) top = rim;
       tops[r * w + c] = top;
       for (let li = 0; li <= top; li++) setBit(layers, li, w, r, c);
     }
@@ -160,7 +174,7 @@ function generate(w, h, seed) {
   // WALK. Continuous by construction, and it drops the floor out entirely.
   // The floor of a canyon is the BASEMENT slab, so it's a ravine you can walk
   // out of rather than a hole in the world.
-  const canyons = 1 + Math.floor(Math.sqrt(w * h) / 34);
+  const canyons = on('canyons') ? 1 + Math.floor(Math.sqrt(w * h) / 34) : 0;
   for (let t = 0; t < canyons; t++) {
     for (const [r, c] of walk(rnd, w, h, (w + h) * 2)) {
       for (let dc = 0; dc <= 1; dc++) {
@@ -178,8 +192,8 @@ function generate(w, h, seed) {
   const mesas = [];
   for (let r = 1; r < h - 1; r++)
     for (let c = 1; c < w - 1; c++)
-      if (tops[r * w + c] >= GROUND + 1) mesas.push([r, c]);
-  const tunnels = mesas.length ? 2 + Math.floor(Math.sqrt(w * h) / 26) : 0;
+      if (tops[r * w + c] >= base + 1) mesas.push([r, c]);
+  const tunnels = (on('tunnels') && mesas.length) ? 2 + Math.floor(Math.sqrt(w * h) / 26) : 0;
   for (let t = 0; t < tunnels; t++) {
     let best = null, bestScore = 0;
     for (let attempt = 0; attempt < 12; attempt++) {
@@ -191,14 +205,14 @@ function generate(w, h, seed) {
     for (const [r, c] of (best || [])) {
       for (let dc = 0; dc <= 1; dc++) {
         const cc = Math.min(w - 2, c + dc);
-        if (tops[r * w + cc] >= GROUND + 1) clearBit(layers, GROUND, w, r, cc);
+        if (tops[r * w + cc] >= base + 1) clearBit(layers, base, w, r, cc);
       }
     }
   }
 
   // Pass 4: cellars. Hollow the basement out under standing ground so there's
   // something below grade worth digging down into.
-  const cellars = 2 + Math.floor(Math.sqrt(w * h) / 30);
+  const cellars = on('cellars') && !sub ? 2 + Math.floor(Math.sqrt(w * h) / 30) : 0;
   for (let t = 0; t < cellars; t++) {
     const cr = 3 + Math.floor(rnd() * Math.max(1, h - 6));
     const cc = 3 + Math.floor(rnd() * Math.max(1, w - 6));
@@ -213,19 +227,54 @@ function generate(w, h, seed) {
       }
   }
 
-  // The outer ring stays plain walkable floor whatever the passes above did to
-  // it: it's the seam the boundary bowl blends into.
+  // Pass 5: craters. Round bites taken clean out of whatever is standing, with
+  // a raised lip, so the map has bowls to fight in and around.
+  const craters = on('craters') ? 1 + Math.floor(Math.sqrt(w * h) / 40) : 0;
+  for (let t = 0; t < craters; t++) {
+    const rad = 3 + Math.floor(rnd() * 4);
+    const cr = rad + 2 + Math.floor(rnd() * Math.max(1, h - rad * 2 - 4));
+    const cc = rad + 2 + Math.floor(rnd() * Math.max(1, w - rad * 2 - 4));
+    for (let dr = -rad - 1; dr <= rad + 1; dr++)
+      for (let dc = -rad - 1; dc <= rad + 1; dc++) {
+        const r = cr + dr, c = cc + dc;
+        if (r < 1 || c < 1 || r >= h - 1 || c >= w - 1) continue;
+        const d2 = dr * dr + dc * dc;
+        if (d2 <= rad * rad) {
+          tops[r * w + c] = base;
+          for (let li = base + 1; li < LAYERS; li++) clearBit(layers, li, w, r, c);
+          for (let li = 0; li <= base; li++) setBit(layers, li, w, r, c);
+        } else if (d2 <= (rad + 1) * (rad + 1) && tops[r * w + c] <= base + 1) {
+          tops[r * w + c] = Math.min(LAYERS - 1, base + 1);   // the rim
+          for (let li = 0; li <= tops[r * w + c]; li++) setBit(layers, li, w, r, c);
+        }
+      }
+  }
+
+  // Pass 6: causeways. Narrow raised walks that stitch the high ground back
+  // together — the counterpart to a canyon, and the only way across one.
+  const ways = on('causeways') ? 1 + Math.floor(Math.sqrt(w * h) / 38) : 0;
+  for (let t = 0; t < ways; t++) {
+    const lift = Math.min(LAYERS - 1, base + 1 + Math.floor(rnd() * 2));
+    for (const [r, c] of walk(rnd, w, h, (w + h))) {
+      if (tops[r * w + c] >= lift) continue;
+      tops[r * w + c] = lift;
+      for (let li = 0; li <= lift; li++) setBit(layers, li, w, r, c);
+    }
+  }
+
+  // The outer ring is the seam the boundary bowl blends into: plain floor
+  // normally, and solid to the ceiling when the arena is sunk, so the crater
+  // has a wall instead of a horizon.
   for (let r = 0; r < h; r++) {
     for (let c = 0; c < w; c++) {
       if (r !== 0 && c !== 0 && r !== h - 1 && c !== w - 1) continue;
-      setBit(layers, 0, w, r, c);
-      setBit(layers, GROUND, w, r, c);
-      for (let li = GROUND + 1; li < LAYERS; li++) clearBit(layers, li, w, r, c);
-      tops[r * w + c] = GROUND;
+      for (let li = 0; li <= rim; li++) setBit(layers, li, w, r, c);
+      for (let li = rim + 1; li < LAYERS; li++) clearBit(layers, li, w, r, c);
+      tops[r * w + c] = rim;
     }
   }
 
   return { layers, seed };
 }
 
-module.exports = { generate, LAYERS, GROUND };
+module.exports = { generate, LAYERS, GROUND, SCHEMES, DEFAULT_SCHEMES };

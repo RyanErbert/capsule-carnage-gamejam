@@ -72,6 +72,8 @@ func _ready() -> void:
 	_build_conn_pill()
 	_build_slayer_hud()
 	_build_scrollback()
+	_build_vote_row()
+	_refresh_vote(Net.end_vote)
 	# Newest row sits against the input and the column grows UPWARD, so a long
 	# kill feed runs off the top of the screen instead of over the input box.
 	_chat_log.alignment = BoxContainer.ALIGNMENT_END
@@ -154,6 +156,56 @@ func _close_chat() -> void:
 	var god: Node = get_node_or_null("GodMenu")
 	if not _esc_menu.visible and not (god and god.visible):
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Ending a match is a poll, and typing an answer to it mid-fight is no good.
+## The vote lives at the bottom of the chat column with two buttons on it, so
+## answering costs one click and nothing covers the screen.
+var _vote_row: HBoxContainer
+var _vote_tally: Label
+
+
+func _build_vote_row() -> void:
+	_vote_row = HBoxContainer.new()
+	_vote_row.visible = false
+	_vote_row.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_vote_row.offset_left = -372
+	_vote_row.offset_right = -12
+	_vote_row.offset_top = -152
+	_vote_row.offset_bottom = -120
+	_vote_row.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_vote_row.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_vote_row.add_theme_constant_override("separation", 6)
+	_vote_tally = Label.new()
+	_vote_tally.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vote_tally.add_theme_font_size_override("font_size", 16)
+	_vote_tally.add_theme_color_override("font_color", Style.ACCENT)
+	_vote_row.add_child(_vote_tally)
+	for entry in [["YES", true, Color("#7dedb0")], ["NO", false, Color("#ff7060")]]:
+		var b := Button.new()
+		b.text = str(entry[0])
+		b.focus_mode = Control.FOCUS_NONE
+		b.custom_minimum_size = Vector2(56, 0)
+		b.add_theme_font_size_override("font_size", 16)
+		b.add_theme_color_override("font_color", entry[2])
+		b.pressed.connect(func(): Net.emit_event("castVote", entry[1]))
+		_vote_row.add_child(b)
+	add_child(_vote_row)
+
+
+func _refresh_vote(state: Variant) -> void:
+	if _vote_row == null:
+		return
+	var live := state is Dictionary
+	_vote_row.visible = live
+	# The live rows shuffle up out of the way while it is on screen, and so does
+	# the scrollback, which occupies exactly the same column.
+	_chat_log.offset_bottom = -152 if live else -120
+	if _chat_scroll:
+		_chat_scroll.offset_bottom = -152 if live else -120
+	if live:
+		var d: Dictionary = state
+		_vote_tally.text = "END GAME?  %d/%d" % [int(d.get("yes", 0)), int(d.get("needed", 0))]
 
 
 ## Scrollable history of everything said this session, shown while typing.
@@ -251,6 +303,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 		"systemMessage":
 			if data is Dictionary and str(data.get("text", "")) != "":
 				_add_system_row(str(data.get("text", "")))
+		"endVote":
+			_refresh_vote(data)
 		"kills":
 			if data is Dictionary:
 				_kills = data

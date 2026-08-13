@@ -14,6 +14,7 @@ const TOGGLES := [
 	["infiniteAmmo", "Infinite ammo"],
 	["selfAssign", "Creative (spawn items)"],
 	["pedestals", "Item pedestals"],
+	["monkey", "Monkey ball"],
 ]
 ## key, label, and the base constant + unit the scale multiplies — the readout
 ## next to each slider shows the number the slider actually lands on, so a bad

@@ -299,6 +299,8 @@ func _physics_process(delta: float) -> void:
 
 	if Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)
+	elif bool(Net.game_settings.get("monkey", false)):
+		_monkey_step(delta, wish_dir, typing, grv, jmp, now)
 	else:
 		# --- Horizontal acceleration ---
 		var accel := (SPRINT_ACCEL if sprinting else MOVE_ACCEL) * spd
@@ -341,38 +343,7 @@ func _physics_process(delta: float) -> void:
 			var down_slope := Vector3.DOWN - marble_n * Vector3.DOWN.dot(marble_n)
 			velocity += down_slope * GRAVITY * grv * 0.8 * delta
 
-		# --- Jump: hold to charge, release to fire (web §3.4) ---
-		jump_cooldown = maxf(0.0, jump_cooldown - delta)
-		jump_buffer = maxf(0.0, jump_buffer - delta)
-		var can_jump := (now - last_grounded_time) < COYOTE_TIME
-
-		if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
-			if not charging_jump:
-				charging_jump = true
-				jump_charge = 1.0
-			jump_charge = minf(MAX_CHARGE_MULT, jump_charge + CHARGE_RATE * delta)
-		elif charging_jump:
-			charging_jump = false
-			if can_jump:
-				velocity.y = JUMP_IMPULSE * jump_charge * jmp
-				jump_cooldown = jump_charge
-				jump_cooldown_max = jump_charge
-				last_grounded_time = -1000.0
-				Sfx.jump(global_position)
-				Net.emit_event("jump")  # others hear it via playerJumped
-			else:
-				jump_buffer = JUMP_BUFFER_TIME
-			jump_charge = 1.0
-
-		# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
-		if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
-			velocity.y = JUMP_IMPULSE * jmp
-			jump_cooldown = 1.0
-			jump_cooldown_max = 1.0
-			jump_buffer = 0.0
-			last_grounded_time = -1000.0
-			Sfx.jump(global_position)
-			Net.emit_event("jump")
+		_charge_jump(delta, typing, jmp, now)
 
 	# --- Floor snap: off while ascending so jumps aren't eaten ---
 	floor_snap_length = 0.0 if velocity.y > 0.0 else 0.3
@@ -412,6 +383,87 @@ func _physics_process(delta: float) -> void:
 		_shell.roll(velocity, delta)
 
 	move_and_slide()
+
+
+## Jump: hold to charge, release to fire (web §3.4). Shared by the default
+## movement and by Monkey Ball, which keeps the jump it never had.
+func _charge_jump(delta: float, typing: bool, jmp: float, now: float) -> void:
+	jump_cooldown = maxf(0.0, jump_cooldown - delta)
+	jump_buffer = maxf(0.0, jump_buffer - delta)
+	var can_jump := (now - last_grounded_time) < COYOTE_TIME
+
+	if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
+		if not charging_jump:
+			charging_jump = true
+			jump_charge = 1.0
+		jump_charge = minf(MAX_CHARGE_MULT, jump_charge + CHARGE_RATE * delta)
+	elif charging_jump:
+		charging_jump = false
+		if can_jump:
+			velocity.y = JUMP_IMPULSE * jump_charge * jmp
+			jump_cooldown = jump_charge
+			jump_cooldown_max = jump_charge
+			last_grounded_time = -1000.0
+			Sfx.jump(global_position)
+			Net.emit_event("jump")  # others hear it via playerJumped
+		else:
+			jump_buffer = JUMP_BUFFER_TIME
+		jump_charge = 1.0
+
+	# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
+	if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
+		velocity.y = JUMP_IMPULSE * jmp
+		jump_cooldown = 1.0
+		jump_cooldown_max = 1.0
+		jump_buffer = 0.0
+		last_grounded_time = -1000.0
+		Sfx.jump(global_position)
+		Net.emit_event("jump")
+
+
+# --- Monkey Ball (gameSettings.monkey) ---------------------------------------
+# You never push the ball. The stick TILTS THE WORLD under it and gravity does
+# the rest, which is why the feel is all momentum: slow to wind up, slow to
+# shed, and a slope is free speed instead of something to walk down.
+# Reference: github.com/sndrec/WebMonkeyBall.
+const MB_TILT := 0.401     # 23 degrees: how far the stage leans at full stick
+const MB_ROLL := 0.714     # 5/7 — a solid sphere rolling, not a box sliding
+const MB_DRAG := 0.25      # rolling resistance per second: barely there
+const MB_AIR := 0.16       # how much of the lean survives once you leave the floor
+const MB_MAX := 42.0       # terminal speed, so a long ramp can't fling you to orbit
+
+
+func _monkey_step(delta: float, wish_dir: Vector3, typing: bool,
+		grv: float, jmp: float, now: float) -> void:
+	var g := GRAVITY * grv
+	var grounded := is_on_floor()
+	var n := get_floor_normal() if grounded else Vector3.UP
+	if n.length_squared() < 0.5:
+		n = Vector3.UP
+	var lean := wish_dir.length()
+	var accel := Vector3.ZERO
+	if lean > 0.001:
+		accel = (wish_dir / lean) * (MB_ROLL * g * sin(MB_TILT * lean))
+	if grounded:
+		accel -= n * accel.dot(n)               # the lean rides the floor plane
+		accel += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * (MB_ROLL * g)
+	else:
+		accel *= MB_AIR
+		velocity.y -= g * delta
+	velocity += accel * delta
+
+	if grounded:
+		var damp := exp(-MB_DRAG * delta)
+		velocity.x *= damp
+		velocity.z *= damp
+	var h := Vector2(velocity.x, velocity.z)
+	if h.length() > MB_MAX:
+		h = h.normalized() * MB_MAX
+		velocity.x = h.x
+		velocity.z = h.y
+	# Nothing else may clip this back to run speed: the speed IS the mode.
+	speed_cap = maxf(h.length(), MAX_SPEED)
+	_charge_jump(delta, typing, jmp, now)
 
 
 ## One tick of Source movement: gravity, hop, friction, accelerate.

@@ -69,3 +69,26 @@ func _physics_process(delta: float) -> void:
 
 	rotation.y = yaw
 	rotation.x = -pitch
+	rotation.z = _wobble(delta, vel)
+
+
+## Monkey Ball leans the world under the ball, and you never see the world
+## lean. The camera rolling a few degrees against your sideways acceleration is
+## what puts that back — off entirely in every other movement mode.
+const WOBBLE_MAX := 0.08     # radians
+const WOBBLE_RATE := 5.0
+const WOBBLE_GAIN := 0.011
+
+var _roll := 0.0
+var _prev_vel := Vector3.ZERO
+
+
+func _wobble(delta: float, vel: Vector3) -> float:
+	var accel := (vel - _prev_vel) / maxf(delta, 0.0001)
+	_prev_vel = vel
+	var want := 0.0
+	if bool(Net.game_settings.get("monkey", false)):
+		var right := Vector3(cos(yaw), 0.0, -sin(yaw))
+		want = clampf(-accel.dot(right) * WOBBLE_GAIN, -WOBBLE_MAX, WOBBLE_MAX)
+	_roll = lerpf(_roll, want, minf(1.0, WOBBLE_RATE * delta))
+	return _roll

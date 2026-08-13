@@ -85,6 +85,13 @@ function profileOf(id) {
   return players[id] || profiles[id] || null;
 }
 
+// Only somebody who never introduced themselves — a browser on the spectator
+// dashboard — has no name of their own.
+function nameOf(id) {
+  const p = profileOf(id);
+  return p && p.name ? p.name : 'Spectator';
+}
+
 // Lobby, map editor, or out on the field.
 function whereIs(id) {
   if (readyIds.has(id)) return 'game';
@@ -299,12 +306,16 @@ const gameSettings = {
   speedScale: 0.7,           // movement tuning
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0,
-  gridW: 32,                 // painted map size in pixels (see GRID_OPTIONS)
-  gridH: 32
+  gridW: 32,                 // painted map size in pixels, per axis
+  gridH: 32,
+  gen: mapgen.DEFAULT_SCHEMES.slice(),   // which generator passes run
+  subterranean: false,       // sink the arena into the ground
+  monkey: false              // Super Monkey Ball physics: tilt the world, not the ball
 };
-// Selectable map shapes: square and rectangular. Pixels are 4 m, so 96x48
-// is a 384x192 m arena.
-const GRID_OPTIONS = [[32, 32], [48, 48], [64, 64], [96, 96], [64, 32], [96, 48], [96, 64]];
+// Each axis picks its own size, so any oblong is buildable. Pixels are 4 m, so
+// 96x48 is a 384x192 m arena. Multiples of 4 only: the voxel lattice is
+// PX * 2 + 16 cells and has to stay divisible by the 8-cell chunk.
+const GRID_SIZES = [24, 32, 40, 48, 56, 64, 80, 96];
 
 // --- Slayer: coins ARE health. Players spawn with 100, damage sheds coins,
 // zero triggers a death explosion (clients carve + scorch) and a respawn
@@ -521,7 +532,7 @@ function autoPlaceGenerator() {
       const r = 2 + Math.floor(Math.random() * Math.max(1, gridH() - 4));
       const c = 2 + Math.floor(Math.random() * Math.max(1, gridW() - 4));
       const top = pixelTop(r, c);
-      if (top < GROUND || inDeadzone(r, c)) continue;
+      if (top < 0 || inDeadzone(r, c)) continue;
       const x = -halfX() + c * 4 + 2, z = -halfZ() + r * 4 + 2;
       if (homeWorlds().some(h => Math.hypot(h.x - x, h.z - z) < away)) continue;
       if (picks.some(p => Math.hypot(p.x - x, p.z - z) < spread)) continue;
@@ -652,6 +663,17 @@ function votesNeeded() {
   return endVote ? Math.floor(endVote.voters.size / 2) + 1 : 0;
 }
 
+// The tally, so the HUD can put YES/NO under your thumb instead of making you
+// type /vote in the middle of a firefight.
+function endVoteState() {
+  if (!endVote) return null;
+  return { yes: endVote.yes.size, no: endVote.no.size, needed: votesNeeded() };
+}
+
+function pushEndVote() {
+  io.emit('endVote', endVoteState());
+}
+
 function checkEndVote() {
   if (!endVote) return;
   const needed = votesNeeded();
@@ -665,6 +687,7 @@ function finishEndVote(passed) {
   if (!endVote) return;
   clearTimeout(endVote.timer);
   endVote = null;
+  pushEndVote();
   if (passed) endGame();
 }
 
@@ -681,13 +704,23 @@ const PED_TYPES = ['green', 'red'];
 function autoPopulatePedestals() {
   pedestals.length = 0;
   if (!creativeLayers || !gameSettings.pedestals) { io.emit('currentPedestals', pedestals); return; }
+  // Pickups belong to the structures: they arrive with the first 'wfcSpots'
+  // report. Loose ground scatter is only the fallback for a map with nothing
+  // standing on it.
+  if (wfcExpected > 0) { io.emit('currentPedestals', pedestals); return; }
+  scatterPedestals();
+}
+
+function scatterPedestals() {
+  pedestals.length = 0;
+  if (!creativeLayers || !gameSettings.pedestals) { io.emit('currentPedestals', pedestals); return; }
   // Candidates: any pixel with a floor, clear of the home deadzone, whose
   // 4 neighbours are no taller than it (so nothing to clip into).
   const candidates = [];
   for (let r = 1; r < gridH() - 1; r++) {
     for (let c = 1; c < gridW() - 1; c++) {
       const top = pixelTop(r, c);
-      if (top < GROUND || inDeadzone(r, c)) continue;
+      if (top < 0 || inDeadzone(r, c)) continue;
       if (pixelTop(r - 1, c) > top || pixelTop(r + 1, c) > top) continue;
       if (pixelTop(r, c - 1) > top || pixelTop(r, c + 1) > top) continue;
       candidates.push({ r, c, top });
@@ -861,46 +894,74 @@ function applyEditVote(kind) {
   terrainEdits = [];
   stopClaim();
   io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
+  autoPlaceStructures();    // structures first: they carry the item pedestals
   autoPopulatePedestals();
   autoPlaceGenerator();
-  autoPlaceStructures();
 }
 
 // Scatter a few wave-function-collapsed compounds (Items/wfc.gd) across the
 // finished map, so the structures are part of the world instead of something
 // you have to fly the drone out and place by hand. The payload is one seed —
 // every client collapses the identical building from it.
-const WFC_FOOTPRINT = 42;   // metres per side, mirrors builds.gd WFC_SIZE * CELL
+const WFC_FOOTPRINT = 48;   // metres per side, mirrors builds.gd WFC_SIZE * CELL
+
+// Which compounds carry which item pedestals. The client that first collapses
+// a seed reports where its balconies are (see 'wfcSpots'): the grid only exists
+// in Items/wfc.gd, so the server places items where it is told, not by guess.
+const wfcSpotsSeen = new Set();
+let wfcExpected = 0;
 
 function autoPlaceStructures() {
   for (let i = activeBuilds.length - 1; i >= 0; i--)
     if (activeBuilds[i].type === 'wfc') activeBuilds.splice(i, 1);
+  wfcSpotsSeen.clear();
+  wfcExpected = 0;
   if (!creativeLayers) return;
-  const want = Math.max(1, Math.min(4, Math.round(Math.sqrt(gridW() * gridH()) / 26)));
+  const want = Math.max(2, Math.min(6, Math.round(Math.sqrt(gridW() * gridH()) / 20)));
   const picks = [];
   const half = WFC_FOOTPRINT / 2;
-  for (let tries = 0; tries < 500 && picks.length < want; tries++) {
-    const pad = Math.ceil(half / 4) + 1;    // keep the footprint on the map
+  const pxRadius = Math.ceil(half / 4);
+  for (let tries = 0; tries < 900 && picks.length < want; tries++) {
+    const pad = pxRadius + 1;               // keep the footprint on the map
     const r = pad + Math.floor(Math.random() * Math.max(1, gridH() - pad * 2));
     const c = pad + Math.floor(Math.random() * Math.max(1, gridW() - pad * 2));
-    const top = pixelTop(r, c);
-    if (top < GROUND || inDeadzone(r, c)) continue;
+    if (inDeadzone(r, c)) continue;
+    // Seat it on the LOWEST ground under its whole footprint: picking the
+    // height of the centre pixel alone left half of a compound hanging over a
+    // slope with daylight under it. The foundations do the rest — they are
+    // pillars now, so uneven ground under a structure is the intended look.
+    let low = 99, holes = 0;
+    for (let rr = r - pxRadius; rr <= r + pxRadius; rr++)
+      for (let cc = c - pxRadius; cc <= c + pxRadius; cc++) {
+        const t = pixelTop(rr, cc);
+        if (t < 0) holes++;
+        else if (t < low) low = t;
+      }
+    if (low === 99 || holes > 10) continue;  // too much void to stand on
     const x = -halfX() + c * 4 + 2, z = -halfZ() + r * 4 + 2;
     if (homeWorlds().some(hm => Math.hypot(hm.x - x, hm.z - z) < 30)) continue;
-    if (picks.some(p => Math.hypot(p.x - x, p.z - z) < WFC_FOOTPRINT)) continue;
-    // Sit the ground tier just ABOVE grade: flush with the terrain the decks
-    // read as painted-on floor rather than as a building you can walk into.
-    picks.push({ x, y: surfaceY(top) + 1.5, z });
+    // Close enough to be linked by a walkway, far enough to be its own node
+    if (picks.some(p => Math.hypot(p.x - x, p.z - z) < WFC_FOOTPRINT * 1.05)) continue;
+    picks.push({ x, y: surfaceY(low) - 0.4, z });
   }
-  for (const p of picks) {
+  wfcExpected = picks.length;
+  picks.forEach((p, i) => {
     const build = {
       id: 'wfc-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
       type: 'wfc', seed: (Math.random() * 0xffffffff) >>> 0,
-      x: p.x, y: p.y, z: p.z, ry: (Math.floor(Math.random() * 4) * Math.PI) / 2
+      // Every third one is a silo: roofed corridors and tunnels instead of
+      // open terraces, and it goes in the ground rather than on it.
+      style: i % 3 === 2 ? 'silo' : 'surface',
+      x: p.x, y: i % 3 === 2 ? p.y - 6 : p.y, z: p.z,
+      ry: (Math.floor(Math.random() * 4) * Math.PI) / 2
     };
     activeBuilds.push(build);
     io.emit('buildPlaced', build);
-  }
+  });
+  // If nobody is connected to collapse them, the map still needs pickups.
+  setTimeout(() => {
+    if (wfcExpected && pedestals.length === 0) scatterPedestals();
+  }, 8000);
 }
 
 // =========================================================================
@@ -979,7 +1040,9 @@ function startClaim() {
   claimPending = false;
   const w = gridW(), h = gridH();
   const seed = (Math.random() * 0xffffffff) >>> 0;
-  const world = mapgen.generate(w, h, seed);
+  const world = mapgen.generate(w, h, seed, {
+    schemes: gameSettings.gen, subterranean: gameSettings.subterranean
+  });
   paintLayers = world.layers;
   // A grab means a NEW map: nothing from the last round survives it.
   creativeLayers = null;
@@ -1444,7 +1507,7 @@ io.on('connection', (socket) => {
   // immediately. (START GAME then ends the edit phase, same as before.)
   socket.on('endClaim', () => {
     if (!claim || claim.phase !== 'claim') return;
-    const who = players[socket.id] ? players[socket.id].name : 'Someone';
+    const who = nameOf(socket.id);
     sysMsg(`${who} ended the grab.`);
     endClaim();
   });
@@ -1469,7 +1532,7 @@ io.on('connection', (socket) => {
     if (readyIds.size > 0 && gameSettings.mode !== 'build' && !TUNABLE.includes(u.key)) {
       return;
     }
-    const who = players[socket.id] ? players[socket.id].name : 'Someone';
+    const who = nameOf(socket.id);
     if (u.key === 'mode') {
       if (!MODES.includes(u.value)) return;
       gameSettings.mode = u.value;
@@ -1479,21 +1542,32 @@ io.on('connection', (socket) => {
       return;
     }
     if (u.key === 'gridW' || u.key === 'gridH') {
-      // Both axes travel together: value is [w, h] from the size dropdown
-      const v = Array.isArray(u.value) ? u.value : [Number(u.value), Number(u.value)];
-      const w = Number(v[0]), h = Number(v[1]);
-      if (!GRID_OPTIONS.some(o => o[0] === w && o[1] === h)) return;
-      if (w === gameSettings.gridW && h === gameSettings.gridH) return;
-      if (claim) {
-        return;
-      }
-      gameSettings.gridW = w;
-      gameSettings.gridH = h;
+      const v = Number(Array.isArray(u.value) ? u.value[0] : u.value);
+      if (!GRID_SIZES.includes(v)) return;
+      if (gameSettings[u.key] === v) return;
+      if (claim) return;                 // the size is set for this round
+      gameSettings[u.key] = v;
       // The canvas is meaningless at a different size: start fresh
       paintLayers = null;
       io.emit('paintCleared');
       io.emit('gameSettings', gameSettings);
-      sysMsg(`${who} set the map size to ${w}x${h}`);
+      sysMsg(`${who} set the map to ${gridW()}x${gridH()}`);
+      return;
+    }
+    if (u.key === 'gen') {
+      if (claim) return;
+      const want = Array.isArray(u.value)
+        ? u.value.filter(k => mapgen.SCHEMES.includes(k)) : [];
+      gameSettings.gen = want;
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${who} set generation: ${want.join(' ') || 'flat'}`);
+      return;
+    }
+    if (u.key === 'subterranean') {
+      if (claim) return;
+      gameSettings.subterranean = !!u.value;
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${who} turned subterranean ${gameSettings.subterranean ? 'ON' : 'OFF'}`);
       return;
     }
     const numeric = typeof gameSettings[u.key] === 'number';
@@ -1803,9 +1877,9 @@ io.on('connection', (socket) => {
     creativeLayers = layers;
     terrainEdits = [];
     io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
-    autoPopulatePedestals();  // fresh map -> fresh item pedestals in open areas
+    autoPlaceStructures();    // collapsed compounds to fight over...
+    autoPopulatePedestals();  // ...which is where the item pedestals live
     autoPlaceGenerator();     // buried heal cores
-    autoPlaceStructures();    // and a few collapsed compounds to fight over
   });
 
   socket.on('terrainEdit', (e) => {
@@ -1965,6 +2039,29 @@ io.on('connection', (socket) => {
     const ped = { ...pos, id, currentItem: null, spawnTime: 0 };
     pedestals.push(ped);
     io.emit('pedestalPlaced', ped);
+  });
+
+  // Where a compound's balconies are. Only the client runs the collapse, so
+  // the first report per structure is what the server places items on; every
+  // later client sends the identical list and is ignored.
+  socket.on('wfcSpots', (data) => {
+    if (!data || typeof data.id !== 'string' || !Array.isArray(data.spots)) return;
+    if (!gameSettings.pedestals || wfcSpotsSeen.has(data.id)) return;
+    if (!activeBuilds.some(b => b.id === data.id && b.type === 'wfc')) return;
+    wfcSpotsSeen.add(data.id);
+    const added = [];
+    data.spots.slice(0, 6).forEach((s, i) => {
+      if (typeof s.x !== 'number' || typeof s.y !== 'number' || typeof s.z !== 'number') return;
+      const ped = {
+        id: data.id + '-p' + i, x: s.x, y: s.y, z: s.z,
+        ry: Math.random() * Math.PI * 2,
+        type: PED_TYPES[(pedestals.length + i) % PED_TYPES.length],
+        currentItem: null, spawnTime: 0
+      };
+      pedestals.push(ped);
+      added.push(ped);
+    });
+    for (const ped of added) io.emit('pedestalPlaced', ped);
   });
 
   socket.on('placeTeleporter', (t) => {
@@ -2220,7 +2317,7 @@ io.on('connection', (socket) => {
     const p = profileOf(socket.id);
     const line = {
       id: socket.id,
-      name: p ? p.name : 'Spectator',
+      name: nameOf(socket.id),
       color: (p && p.skinColor) || '#ffffff',
       text: msg
     };
@@ -2253,8 +2350,8 @@ io.on('connection', (socket) => {
       timer: null
     };
     endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
-    const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} voted end (${endVote.yes.size}/${votesNeeded()}).  /vote yes  /vote no`);
+    sysMsg(`${nameOf(socket.id)} voted end`);
+    pushEndVote();
     checkEndVote();
   });
 
@@ -2263,8 +2360,8 @@ io.on('connection', (socket) => {
     const yes = !!val;
     if (yes) { endVote.yes.add(socket.id); endVote.no.delete(socket.id); }
     else { endVote.no.add(socket.id); endVote.yes.delete(socket.id); }
-    const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} voted ${yes ? 'yes' : 'no'} (${endVote.yes.size}/${votesNeeded()})`);
+    sysMsg(`${nameOf(socket.id)} voted ${yes ? 'yes' : 'no'}`);
+    pushEndVote();
     checkEndVote();
   });
 

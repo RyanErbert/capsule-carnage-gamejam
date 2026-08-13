@@ -8,7 +8,7 @@ extends PanelContainer
 const GIVE_ITEMS := [
 	"grapple", "launch_pad", "boost_pad", "teleporter",
 	"machinegun", "rocket", "mines",
-	"block", "wall", "ramp", "platform", "bridge_gun", "terragun",
+	"bridge_gun", "terragun",
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
 const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
@@ -53,13 +53,16 @@ var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
 # Drone build mode (web: godmode build tools + the 9^3 grid-point cloud).
-# Two of these come from the collapse tileset (Items/wfc.gd): "wfc" drops a
-# whole compound, so its ghost is a footprint, and "part" places ONE module at
-# a time — scroll to pick which — on the tileset's own 6 m grid, so pieces
-# placed by hand mate with each other and with the generated compounds.
-const BUILD_TYPES := ["block", "wall", "ramp", "platform", "wfc", "part"]
+# Everything buildable now comes out of the collapse tileset (Items/wfc.gd):
+# "wfc" drops a whole compound, so its ghost is a footprint, and every other
+# button places ONE module on the tileset's own 6 m grid, so pieces laid by
+# hand mate with each other and with the compounds already on the map.
+const BUILD_TYPES := ["wfc"]
 const WfcTiles := preload("res://Items/wfc.gd")
-var _wfc_part := 0    # index into WfcTiles.PART_KINDS
+# Hovering next to a piece that is already there filters the palette down to
+# the modules that actually mate with it: the same socket rule the collapse
+# runs on, turned into a placement aid.
+var _fit_kinds: Array = []      # kinds allowed at the hovered cell, [] = all
 var _build_rot := 0   # in 45-degree steps, 0..7
 var _build_target: Dictionary = {}
 var _build_ghosts: Dictionary = {}
@@ -149,10 +152,14 @@ func _input(event: InputEvent) -> void:
 			elif _tool == "tower":
 				_tower_h = clampf(_tower_h + dir, 3.0, 20.0)
 				_status.text = "H %d" % int(_tower_h)
-			elif _tool == "build:part":
-				# Scroll cycles which module of the tileset is on the cursor
-				_wfc_part = wrapi(_wfc_part + dir, 0, WfcTiles.PART_KINDS.size())
-				_status.text = str(WfcTiles.PART_KINDS[_wfc_part]).to_upper()
+			elif _tool.begins_with("build:part:"):
+				# Scroll cycles the palette, skipping anything that would not mate
+				# with the piece the cursor is up against.
+				var ring: Array = Array(WfcTiles.PART_KINDS)
+				if not _fit_kinds.is_empty():
+					ring = _fit_kinds
+				var at := maxi(0, ring.find(_tool.substr(11)))
+				_set_tool("build:part:" + str(ring[wrapi(at + dir, 0, ring.size())]))
 			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
@@ -404,13 +411,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					"z": _build_target["z"], "ry": _build_target["ry"],
 				})
 				_status.text = "structure placed"
-		elif _tool == "build:part":
+		elif _tool.begins_with("build:part:"):
 			# One module of the collapse tileset, on its own grid.
 			if not _build_target.is_empty():
-				var kind := str(WfcTiles.PART_KINDS[_wfc_part])
 				Net.emit_event("placeBuild", _build_target.merged({
-					"type": "wfcpart", "part": kind}))
-				_status.text = "%s  [Scroll - Part]" % kind.to_upper()
+					"type": "wfcpart", "part": _tool.substr(11)}))
 		elif _tool.begins_with("build:"):
 			if not _build_target.is_empty():
 				Net.emit_event("placeBuild", _build_target.merged({"type": _tool.substr(6)}))
@@ -544,18 +549,8 @@ func _process(delta: float) -> void:
 	var fy := floorf(target.y / 4.0) * 4.0 + 2.0
 	var fz := floorf(target.z / 4.0) * 4.0 + 2.0
 	var type := _tool.substr(6)
-	# Walls hug the cell face they're turned toward — only on the cardinals;
-	# at 45 degrees there's no face to hug, so it centers.
-	if type == "wall" and _build_rot % 2 == 0:
-		match _build_rot / 2:
-			0: fz -= 2.0
-			1: fx -= 2.0
-			2: fz += 2.0
-			3: fx += 2.0
-	elif type == "platform":
-		fy -= 1.5
 	var ry := _build_rot * ROT_STEP
-	if type == "part":
+	if type.begins_with("part:"):
 		# The tileset has its own grid — 6 m cells, 3 m floors, quarter turns.
 		# Snapping parts to the 4 m block grid would leave them unable to mate
 		# with each other or with the compounds already on the map.
@@ -563,7 +558,10 @@ func _process(delta: float) -> void:
 		fz = floorf(target.z / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
 		fy = roundf(target.y / WfcTiles.LEVEL) * WfcTiles.LEVEL
 		ry = float(_build_rot / 2) * PI * 0.5
-		type = "part:" + str(WfcTiles.PART_KINDS[_wfc_part])
+		var armed := _refresh_fit(Vector3(fx, fy, fz), _build_rot / 2, type.substr(5))
+		if armed != type.substr(5):
+			_set_tool("build:part:" + armed)
+			type = "part:" + armed
 	_build_target = {"x": fx, "y": fy, "z": fz, "ry": ry, "rx": 0.0}
 
 	if not _build_ghosts.has(type):
@@ -819,6 +817,42 @@ func _update_delete_highlight() -> void:
 	_delete_marker.global_position = target["pos"]
 
 
+## Look at the four tileset cells around the hovered one. If any of them holds
+## a piece already, the palette narrows to the modules that mate with it, the
+## ones that don't grey out, and an armed piece that no longer fits is swapped
+## for one that does. Returns the kind that ends up armed.
+func _refresh_fit(cell: Vector3, rot: int, want: String) -> String:
+	var builds: Node = get_tree().get_first_node_in_group("world_builds")
+	var near: Array = []
+	if builds and builds.has_method("part_at"):
+		for d in 4:
+			var off := WfcTiles.DIRS[d]
+			var found: Dictionary = builds.part_at(
+				cell + Vector3(off.x, 0, off.y) * WfcTiles.CELL)
+			if not found.is_empty():
+				# We are on the far side of them: our direction, flipped.
+				near.append({"kind": found["kind"], "rot": found["rot"], "d": (d + 2) % 4})
+	var allowed: Array = []
+	for kind in WfcTiles.PART_KINDS:
+		var ok := true
+		for n in near:
+			if not WfcTiles.parts_fit(str(n["kind"]), str(kind), int(n["d"]),
+					int(n["rot"]), rot):
+				ok = false
+				break
+		if ok:
+			allowed.append(kind)
+	_fit_kinds = [] if near.is_empty() or allowed.size() == WfcTiles.PART_KINDS.size() \
+		else allowed
+	for kind in WfcTiles.PART_KINDS:
+		var b: Button = _tool_buttons.get("build:part:" + str(kind))
+		if b:
+			b.modulate.a = 1.0 if _fit_kinds.is_empty() or kind in _fit_kinds else 0.3
+	if _fit_kinds.is_empty() or want in _fit_kinds:
+		return want
+	return str(_fit_kinds[0]) if not _fit_kinds.is_empty() else want
+
+
 func _make_build_ghost(type: String) -> Node3D:
 	if _ghost_mat == null:
 		_ghost_mat = StandardMaterial3D.new()
@@ -838,23 +872,13 @@ func _make_build_ghost(type: String) -> Node3D:
 				child.queue_free()
 		_player.get_parent().add_child(part)
 		return part
+	# The collapsed structure is a whole compound, so its ghost is a FOOTPRINT —
+	# a slab you line up with the ground, not a block.
 	var g := MeshInstance3D.new()
-	match type:
-		"ramp":
-			g.mesh = preload("res://Items/builds.gd").wedge_mesh(4.0, 4.0, 4.0)
-		"wall":
-			var wb := BoxMesh.new(); wb.size = Vector3(4, 4, 1); g.mesh = wb
-		"platform":
-			var pb := BoxMesh.new(); pb.size = Vector3(4, 1, 4); g.mesh = pb
-		"wfc":
-			# The collapsed structure is a whole compound, so the ghost is its
-			# FOOTPRINT — a slab you line up with the ground, not a block.
-			var fb := BoxMesh.new()
-			var side: float = preload("res://Items/builds.gd").WFC_SIZE * WfcTiles.CELL
-			fb.size = Vector3(side, 0.4, side)
-			g.mesh = fb
-		_:
-			var bb := BoxMesh.new(); bb.size = Vector3(4, 4, 4); g.mesh = bb
+	var fb := BoxMesh.new()
+	var side: float = preload("res://Items/builds.gd").WFC_SIZE * WfcTiles.CELL
+	fb.size = Vector3(side, 0.4, side)
+	g.mesh = fb
 	g.material_override = _ghost_mat
 	_player.get_parent().add_child(g)
 	return g
@@ -993,9 +1017,8 @@ func _set_tool(tool_name: String) -> void:
 	for t in _tool_buttons:
 		_tool_buttons[t].button_pressed = t == tool_name
 	if _status:
-		if tool_name == "build:part":
-			_status.text = "%s  [Scroll - Part]  [R - Rotate]" % \
-				str(WfcTiles.PART_KINDS[_wfc_part]).to_upper()
+		if tool_name.begins_with("build:part:"):
+			_status.text = tool_name.substr(11).to_upper()
 		else:
 			_status.text = tool_name.trim_prefix("prop:").trim_prefix("vehicle:") \
 				.trim_prefix("build:").trim_suffix(".glb").to_upper()
@@ -1076,7 +1099,7 @@ func _build_ui() -> void:
 		var color := Color("#44ff44")
 		if item in ["machinegun", "rocket", "mines"]:
 			color = Color("#ff4444")
-		elif item in ["block", "wall", "ramp", "platform", "bridge_gun", "terragun"]:
+		elif item in ["bridge_gun", "terragun"]:
 			color = Color("#ffff44")
 		var b := _mk_button(item.replace("_", " "), color)
 		b.pressed.connect(func(): Net.emit_event("godmodeGive", item))
@@ -1103,6 +1126,23 @@ func _build_ui() -> void:
 		bb.pressed.connect(_on_tool_pressed.bind(tool_id))
 		build_row.add_child(bb)
 		_tool_buttons[tool_id] = bb
+
+	var parts_grid := GridContainer.new()
+	parts_grid.columns = 3
+	parts_grid.add_theme_constant_override("h_separation", 6)
+	parts_grid.add_theme_constant_override("v_separation", 6)
+	root.add_child(parts_grid)
+	for kind in WfcTiles.PART_KINDS:
+		var tool_id: String = "build:part:" + str(kind)
+		var pb := _mk_button(str(kind), Color("#7fb2ff"))
+		pb.toggle_mode = true
+		pb.expand_icon = true
+		pb.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		pb.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
+		pb.custom_minimum_size = Vector2(64, 64)
+		pb.pressed.connect(_on_tool_pressed.bind(tool_id))
+		parts_grid.add_child(pb)
+		_tool_buttons[tool_id] = pb
 
 	var terrain_label := Label.new()
 	terrain_label.text = "TERRAIN"
@@ -1191,6 +1231,28 @@ func _render_prop_icons() -> void:
 	fill.rotation_degrees = Vector3(-15, -140, 0)
 	fill.light_energy = 0.5
 	vp.add_child(fill)
+	# Tileset parts first: nine near-identical slabs of clay are impossible to
+	# tell apart by name, and a name is all a button has otherwise.
+	for kind in WfcTiles.PART_KINDS:
+		if not _tool_buttons.has("build:part:" + str(kind)) or not is_inside_tree():
+			continue
+		var part: Node3D = WfcTiles.build_part(str(kind))
+		vp.add_child(part)
+		var pbox: AABB = preload("res://Vehicles/vehicle.gd")._model_aabb(part)
+		var pc := pbox.get_center()
+		cam.global_position = pc + Vector3(0.75, 0.6, 1.0).normalized() \
+			* maxf(pbox.size.length() * 0.5, 0.01) * 2.2
+		cam.look_at(pc)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		if not is_inside_tree():
+			return
+		var pimg: Image = vp.get_texture().get_image()
+		part.queue_free()
+		var pbtn: Button = _tool_buttons["build:part:" + str(kind)]
+		pbtn.icon = ImageTexture.create_from_image(pimg)
+		pbtn.add_theme_constant_override("icon_max_width", 44)
+
 	var props_script := preload("res://Items/props.gd")
 	for model in PROPS:
 		if not _tool_buttons.has("prop:" + str(model)) or not is_inside_tree():

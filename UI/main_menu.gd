@@ -14,11 +14,11 @@ const LEVELS := {
 }
 const MODES := ["slayer", "sandbox", "build"]
 const MODE_NAMES := ["Slayer", "Sandbox", "Build"]
-# Map shapes, mirroring the server's GRID_OPTIONS (pixels are 4 m)
-const GRID_OPTIONS := [
-	Vector2i(32, 32), Vector2i(48, 48), Vector2i(64, 64), Vector2i(96, 96),
-	Vector2i(64, 32), Vector2i(96, 48), Vector2i(96, 64),
-]
+# Per-axis map size, mirroring the server's GRID_SIZES (pixels are 4 m)
+const GRID_SIZES := [24, 32, 40, 48, 56, 64, 80, 96]
+# Generator passes, mirroring server/mapgen.js SCHEMES
+const SCHEMES := ["plateaus", "canyons", "spires", "tunnels", "cellars",
+	"craters", "causeways"]
 const Style := preload("res://UI/ui_style.gd")
 const SettingsPanel := preload("res://UI/settings_panel.gd")
 
@@ -27,8 +27,12 @@ var _name_edit: LineEdit
 var _roster: Label
 var _join_btn: Button
 var _gamemode_opt: OptionButton
-var _size_opt: OptionButton
+var _w_opt: OptionButton
+var _h_opt: OptionButton
+var _scheme_boxes: Dictionary = {}   # scheme -> CheckBox
+var _sub_box: CheckBox
 var _settings_box: PanelContainer
+var _map_box: PanelContainer
 var _presence: Array = []       # everyone connected: {id, name, color, where}
 var _map: BirdseyeMap
 var _preview_model: Node3D
@@ -87,9 +91,15 @@ func _apply_game_settings(gs: Variant) -> void:
 		return
 	if _gamemode_opt:
 		_gamemode_opt.select(maxi(0, MODES.find(str(gs.get("mode", "slayer")))))
-	if _size_opt:
-		var shape := Vector2i(int(gs.get("gridW", 32)), int(gs.get("gridH", 32)))
-		_size_opt.select(maxi(0, GRID_OPTIONS.find(shape)))
+	if _w_opt:
+		_w_opt.select(maxi(0, GRID_SIZES.find(int(gs.get("gridW", 32)))))
+	if _h_opt:
+		_h_opt.select(maxi(0, GRID_SIZES.find(int(gs.get("gridH", 32)))))
+	var gen: Array = gs.get("gen", []) if gs.get("gen") is Array else []
+	for key in _scheme_boxes:
+		(_scheme_boxes[key] as CheckBox).set_pressed_no_signal(key in gen)
+	if _sub_box:
+		_sub_box.set_pressed_no_signal(bool(gs.get("subterranean", false)))
 
 
 func _refresh_status() -> void:
@@ -231,18 +241,9 @@ func _build_ui() -> void:
 		_refresh_status()
 		_send_profile())
 	fields.add_child(_name_edit)
-	var color_btn := ColorPickerButton.new()
-	color_btn.color = Settings.color
-	color_btn.edit_alpha = false
-	color_btn.custom_minimum_size = Vector2(0, 28)
-	color_btn.color_changed.connect(func(c: Color):
-		Settings.color = c
-		_send_profile()
-		_build_model_preview())
-	fields.add_child(color_btn)
 	var model_opt := OptionButton.new()
-	model_opt.add_item("Bear (marble)")
-	model_opt.add_item("Cube (web classic)")
+	model_opt.add_item("Bear")
+	model_opt.add_item("Cube")
 	model_opt.select(1 if Settings.model == "cube" else 0)
 	model_opt.item_selected.connect(func(i: int):
 		Settings.model = "cube" if i == 1 else "bear"
@@ -271,25 +272,25 @@ func _build_ui() -> void:
 	gear.custom_minimum_size = Vector2(34, 0)
 	mode_row.add_child(gear)
 
-	# One column: gamemode and level on top, map size underneath them
+	# The level, with its own gear for how the map itself is rolled
+	var level_row := HBoxContainer.new()
+	level_row.add_theme_constant_override("separation", 6)
+	settings_col.add_child(level_row)
 	var level_opt := OptionButton.new()
 	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	level_opt.add_item("Canyon Sandbox")
 	level_opt.add_item("Testworld")
 	level_opt.select(1 if Settings.level == "testworld" else 0)
 	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")
-	settings_col.add_child(level_opt)
-	# Painted-map size (server-wide, like the mode). Bigger = slower generate.
-	_size_opt = OptionButton.new()
-	_size_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	for s: Vector2i in GRID_OPTIONS:
-		_size_opt.add_item("%d x %d" % [s.x, s.y])
-	_size_opt.select(maxi(0, GRID_OPTIONS.find(Vector2i(
-		int(Net.game_settings.get("gridW", 32)), int(Net.game_settings.get("gridH", 32))))))
-	_size_opt.item_selected.connect(func(i: int):
-		Net.emit_event("updateGameSetting",
-			{"key": "gridW", "value": [GRID_OPTIONS[i].x, GRID_OPTIONS[i].y]}))
-	settings_col.add_child(_size_opt)
+	level_row.add_child(level_opt)
+	var map_gear := Button.new()
+	map_gear.text = "⚙"
+	map_gear.focus_mode = Control.FOCUS_NONE
+	map_gear.custom_minimum_size = Vector2(34, 0)
+	level_row.add_child(map_gear)
+	_map_box = _build_map_settings()
+	settings_col.add_child(_map_box)
+	map_gear.pressed.connect(func(): _map_box.visible = not _map_box.visible)
 
 	_settings_box = PanelContainer.new()
 	_settings_box.visible = false
@@ -355,13 +356,121 @@ func _build_ui() -> void:
 	root.add_child(build)
 
 
+# --- Map settings (behind the gear beside the level) --------------------------
+
+## Size per axis, which generator passes run, and whether the whole arena is
+## sunk into the ground. All server-wide, like the gamemode.
+func _build_map_settings() -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.visible = false
+	panel.add_theme_stylebox_override("panel", Style.panel_box(Color(0, 0, 0, 0.3), 8))
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	panel.add_child(box)
+
+	var size_row := HBoxContainer.new()
+	size_row.add_theme_constant_override("separation", 6)
+	box.add_child(size_row)
+	_w_opt = _size_dropdown("gridW", int(Net.game_settings.get("gridW", 32)))
+	size_row.add_child(_w_opt)
+	var by := Label.new()
+	by.text = "x"
+	by.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
+	size_row.add_child(by)
+	_h_opt = _size_dropdown("gridH", int(Net.game_settings.get("gridH", 32)))
+	size_row.add_child(_h_opt)
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	box.add_child(grid)
+	var live: Array = Net.game_settings.get("gen", SCHEMES) if Net.game_settings.get("gen") is Array else SCHEMES
+	for scheme in SCHEMES:
+		var cb := CheckBox.new()
+		cb.text = scheme
+		cb.focus_mode = Control.FOCUS_NONE
+		cb.set_pressed_no_signal(scheme in live)
+		cb.toggled.connect(func(_on: bool): _send_schemes())
+		grid.add_child(cb)
+		_scheme_boxes[scheme] = cb
+
+	_sub_box = CheckBox.new()
+	_sub_box.text = "subterranean"
+	_sub_box.focus_mode = Control.FOCUS_NONE
+	_sub_box.set_pressed_no_signal(bool(Net.game_settings.get("subterranean", false)))
+	_sub_box.toggled.connect(func(on: bool):
+		Net.emit_event("updateGameSetting", {"key": "subterranean", "value": on}))
+	box.add_child(_sub_box)
+	return panel
+
+
+func _size_dropdown(key: String, value: int) -> OptionButton:
+	var opt := OptionButton.new()
+	opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for s in GRID_SIZES:
+		opt.add_item(str(s))
+	opt.select(maxi(0, GRID_SIZES.find(value)))
+	opt.item_selected.connect(func(i: int):
+		Net.emit_event("updateGameSetting", {"key": key, "value": GRID_SIZES[i]}))
+	return opt
+
+
+func _send_schemes() -> void:
+	var want: Array = []
+	for scheme in SCHEMES:
+		if (_scheme_boxes[scheme] as CheckBox).button_pressed:
+			want.append(scheme)
+	Net.emit_event("updateGameSetting", {"key": "gen", "value": want})
+
+
 # --- Character preview -------------------------------------------------------
 
 var _preview_root: Node3D
 
-## A little turntable of the model you'll actually play as, lit in its own
-## world so nothing else in the menu affects it.
-func _make_model_viewport() -> SubViewportContainer:
+## A little turntable of the marble you'll actually play as, lit in its own
+## world so nothing else in the menu affects it. A palette sits over its top
+## left corner: that, or the ball itself, opens the colour picker.
+func _make_model_viewport() -> Control:
+	var wrap := Control.new()
+	wrap.custom_minimum_size = Vector2(120, 120)
+	var vc := _make_turntable()
+	vc.set_anchors_preset(Control.PRESET_FULL_RECT)
+	wrap.add_child(vc)
+	vc.gui_input.connect(func(e: InputEvent):
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			_open_color_picker())
+	var palette := PaletteIcon.new()
+	palette.custom_minimum_size = Vector2(26, 26)
+	palette.size = Vector2(26, 26)
+	palette.position = Vector2(2, 2)
+	palette.tooltip_text = ""
+	palette.gui_input.connect(func(e: InputEvent):
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			_open_color_picker())
+	wrap.add_child(palette)
+	return wrap
+
+
+var _color_popup: PopupPanel
+
+func _open_color_picker() -> void:
+	if _color_popup == null:
+		_color_popup = PopupPanel.new()
+		var picker := ColorPicker.new()
+		picker.color = Settings.color
+		picker.edit_alpha = false
+		picker.color_changed.connect(func(c: Color):
+			Settings.color = c
+			_send_profile()
+			if _preview_shell:
+				_preview_shell.set_color(c)
+			if _preview_model and _preview_model.has_method("set_color"):
+				_preview_model.set_color(c))
+		_color_popup.add_child(picker)
+		add_child(_color_popup)
+	_color_popup.popup_centered()
+
+
+func _make_turntable() -> SubViewportContainer:
 	var vc := SubViewportContainer.new()
 	vc.custom_minimum_size = Vector2(120, 120)
 	vc.stretch = true
@@ -389,6 +498,8 @@ func _make_model_viewport() -> SubViewportContainer:
 	return vc
 
 
+var _preview_shell: Node3D
+
 func _build_model_preview() -> void:
 	if _preview_root == null:
 		return
@@ -402,14 +513,32 @@ func _build_model_preview() -> void:
 		model.set_color.call_deferred(Settings.color)
 	else:
 		model = preload("res://Player/PL_bear.glb").instantiate()
-	_preview_model.add_child(model)
-	# Fit whatever the model's native scale is into the viewport
-	var box: AABB = preload("res://Vehicles/vehicle.gd")._model_aabb(model)
-	if box.size.y > 0.001:
-		var s := 1.3 / box.size.y
-		model.scale = Vector3.ONE * s
-		var c := box.get_center() * s
-		model.position = Vector3(-c.x, 0.45 - c.y, -c.z)
+	# You play as a character riding inside a glass marble, so that's what the
+	# menu shows. Scaled up to fill the viewport, and tipped so the two-tone
+	# seam is visible while it turns.
+	_preview_shell = load("res://Player/marble_shell.gd").new()
+	_preview_shell.set_color(Settings.color)
+	_preview_shell.hold(model, 0.8)
+	_preview_shell.scale = Vector3.ONE * 1.7
+	_preview_shell.position = Vector3(0, 0.45, 0)
+	_preview_shell.rotation = Vector3(0.32, 0, 0.16)
+	_preview_model.add_child(_preview_shell)
+
+
+## A painter's palette, drawn rather than imported: a rounded board with a
+## thumb hole and four dabs of colour. Click it (or the ball) to recolour.
+class PaletteIcon extends Control:
+	const DABS := [Color("#ff5a4a"), Color("#ffd54a"), Color("#7dedb0"), Color("#7fb2ff")]
+
+	func _draw() -> void:
+		var r: float = size.x * 0.5
+		var mid := Vector2(r, r)
+		draw_circle(mid, r, Color("#3a2b1e"))
+		draw_circle(mid, r - 1.5, Color("#c8a06a"))
+		draw_circle(mid + Vector2(r * 0.34, r * 0.42), r * 0.19, Color("#3a2b1e"))
+		for i in DABS.size():
+			var a: float = PI * (0.82 + i * 0.42)
+			draw_circle(mid + Vector2(cos(a), sin(a)) * r * 0.55, r * 0.17, DABS[i])
 
 
 # --- Live overhead map -------------------------------------------------------
