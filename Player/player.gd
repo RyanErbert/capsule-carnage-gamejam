@@ -109,6 +109,7 @@ var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
 var _pop_cd := 0.0            # rate limit on the ejection report
+var _bounce_cd := 0.0         # so one hard face cannot kick you over and over
 var _pop_total := 0           # ...and how many there have been in total
 var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
@@ -360,6 +361,7 @@ func _physics_process(delta: float) -> void:
 	# (dragging the generator slows you via real rope tension — generators.gd)
 	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
 	_no_snap = maxf(0.0, _no_snap - delta)
+	_bounce_cd = maxf(0.0, _bounce_cd - delta)
 
 	# Riding a channel replaces every other movement mode while it lasts: down
 	# is the trough's wall, not the world's floor.
@@ -748,8 +750,10 @@ const MB_ROLL := 0.714     # 5/7 — a solid sphere rolling, not a box sliding
 const MB_DRAG := 0.25      # rolling resistance per second: barely there
 const MB_AIR := 0.16       # how much of the lean survives once you leave the floor
 const MB_TOP := 6.0        # terminal speed as a multiple of the walk cap
-const MB_BOUNCE := 0.42    # how much of the impact a wall too steep to hold gives back
-const MB_BOUNCE_MIN := 9.0 # ...and how hard you have to hit it before it does
+const MB_BOUNCE := 0.42     # how much of the impact a face too steep to hold gives back
+const MB_BOUNCE_MIN := 9.0  # ...how hard you have to hit it before it does
+const MB_BOUNCE_HOLD := 0.3 # ...how far from upright it has to be to count at all
+const MB_BOUNCE_GAP := 0.3  # ...and how long before another one can fire
 
 
 func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
@@ -796,16 +800,26 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 ## the world: what matters is how sharply this face turns away from the one you
 ## were already riding, and how hard you arrived.
 func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> float:
-	if not was_touching or not bool(Net.game_settings.get("monkey", true)):
+	if not was_touching or _bounce_cd > 0.0 or not bool(Net.game_settings.get("monkey", true)):
 		return 0.0
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
 		var n := c.get_normal()
+		# You cannot bounce off something you could roll on. What throws you
+		# back is a face too steep to hold AT ALL, and that is measured against
+		# gravity — not against whatever you happened to be riding a frame ago.
+		# Judging it by the change in angle meant rolling off flat ground onto a
+		# 45 degree ramp read as an impact (cos 45 is 0.707, the old cutoff was
+		# 0.72) and fired a 0.42 restitution kick straight up the ramp face:
+		# 24 m/s of run became 18.7 m/s of lift, every single time you tried it.
+		if n.dot(up_direction) > MB_BOUNCE_HOLD:
+			continue
 		if n.dot(pre_n) > 0.72:
-			continue                       # the same surface, near enough
+			continue                       # already sliding along this one
 		var hit_speed := -pre_vel.dot(n)   # how much of the run went into the face
 		if hit_speed < MB_BOUNCE_MIN:
 			continue
+		_bounce_cd = MB_BOUNCE_GAP
 		launched(0.12)
 		Sfx.boost(c.get_position(), 0.35)
 		_sparks(c.get_position(), n)
