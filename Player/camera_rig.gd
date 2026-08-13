@@ -87,7 +87,7 @@ func _wobble(delta: float, vel: Vector3) -> float:
 	var accel := (vel - _prev_vel) / maxf(delta, 0.0001)
 	_prev_vel = vel
 	var want := 0.0
-	if bool(Net.game_settings.get("monkey", false)):
+	if bool(Net.game_settings.get("monkey", true)):
 		var right := Vector3(cos(yaw), 0.0, -sin(yaw))
 		want = clampf(-accel.dot(right) * WOBBLE_GAIN, -WOBBLE_MAX, WOBBLE_MAX)
 	_roll = lerpf(_roll, want, minf(1.0, WOBBLE_RATE * delta))

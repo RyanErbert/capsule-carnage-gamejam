@@ -13,11 +13,21 @@ const GRAVITY := 20.0             # web world gravity (not the project default 9
 const BOOST_MULT := 2.0           # what a full boost slider adds on top of walking
 
 # --- Ground handling (shared by every movement mode) ---
+# A hillside gets steeper by degrees and the handling has to follow it by
+# degrees, or the ground drops out from under you at one particular angle:
+#   up to FLOOR_ANGLE   you stand on it and steer it
+#   up to RIDE_MIN_Y    you no longer stand, but you still roll on the face
+#   past that           it is a wall: it stops you, and in monkey ball it bounces
 const FLOOR_ANGLE := 58.0    # degrees still counted as ground, not wall
+const RIDE_MIN_Y := 0.28     # 74 degrees: past this a face is a wall, not a ride
 const GROUND_SNAP := 0.9     # ground this far under a lost floor still holds you
 const SNAP_MAX_UP := 7.0     # rising faster than this is a jump, never a crest
 const SLOPE_PULL := 1.0      # gravity in the plane of the slope, in full
-const LAUNCH_MAX := 20.0     # ceiling on the throw a ramp's angle can give you
+const LAUNCH_MAX := 20.0     # ceiling on the throw a lip can give you
+const CLIMB_RISE := 30.0     # how fast the measured climb rate tracks the ramp
+const CLIMB_FADE := 18.0     # ...and how slowly it forgets, in m/s per second
+const SLOPE_CAP_Y := 0.95    # steeper than 18 degrees and a walk becomes a ride
+const SLOPE_CAP_MULT := 3.0  # ...which may carry this far past run speed, no further
 const TURN_RATE := 4.0       # how fast momentum swings onto a new heading
 const MB_TURN_RATE := 1.6    # ...and the same in monkey ball, where drift is the point
 
@@ -89,7 +99,7 @@ var dead_timer := 0.0
 var _no_snap := 0.0           # seconds left where the ground may not grab us back
 var riding := false           # inside a channel: its wall is our floor (§4.4)
 var _builds: Node
-var _floor_n := Vector3.UP    # the ground we were on last frame, for launches
+var _climb := 0.0             # how fast the ground itself is lifting us, m/s
 
 
 func respawn_point() -> Vector3:
@@ -121,7 +131,11 @@ func _ready() -> void:
 	floor_max_angle = deg_to_rad(FLOOR_ANGLE)
 	floor_snap_length = GROUND_SNAP
 	floor_block_on_wall = false
-	floor_constant_speed = false
+	# Without this, Godot re-slides the velocity onto the surface on every
+	# grounded frame, and a body working its way up a ramp bleeds speed to the
+	# geometry rather than to gravity. With it on, the only thing that slows a
+	# climb is the in-plane gravity the movement code applies itself.
+	floor_constant_speed = true
 	safe_margin = 0.02
 	spawn_position = global_position
 	if devInfoLabel:
@@ -344,7 +358,7 @@ func _physics_process(delta: float) -> void:
 		_channel_step(delta, wish_dir, typing, ride, acc, boost, grv, jmp, now)
 	elif Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)
-	elif bool(Net.game_settings.get("monkey", false)):
+	elif bool(Net.game_settings.get("monkey", true)):
 		_monkey_step(delta, wish_dir, typing, spd, acc, trn, boost, grv, jmp, now)
 	else:
 		# --- Steering: swing the momentum you already have onto the new
@@ -373,16 +387,18 @@ func _physics_process(delta: float) -> void:
 		# cap rides up so the momentum CARRIES at the bottom instead of being
 		# clipped back to run speed.
 		var marble_n := get_wall_normal() if not is_on_floor() and is_on_wall() else Vector3.ZERO
-		var marbling := marble_n.y > 0.15 and marble_n.y < 0.95
+		var marbling := marble_n.y > RIDE_MIN_Y and marble_n.y < 0.95
 
 		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
 		var cap_target := MAX_SPEED * spd * boost
 		speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
 		var h_vel := Vector2(velocity.x, velocity.z)
-		# Anything sloped is a ride, not a walk: the cap opens up to whatever
-		# you carry so a trough gives the speed back at the bottom.
-		if marbling or _on_slope():
-			speed_cap = maxf(speed_cap, h_vel.length())
+		# A real slope is a ride, not a walk: the cap opens up to whatever you
+		# carry, so a trough gives the speed back at the bottom. It opens only
+		# so far, though — a long descent used to ratchet this with no ceiling
+		# and hand back speeds nothing else in the game could match.
+		if marbling or _on_slope(SLOPE_CAP_Y):
+			speed_cap = maxf(speed_cap, minf(h_vel.length(), cap_target * SLOPE_CAP_MULT))
 		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
 			h_vel = h_vel.normalized() * speed_cap
 			velocity.x = h_vel.x
@@ -437,12 +453,28 @@ func _physics_process(delta: float) -> void:
 		_shell.roll(velocity, delta)
 
 	var was_floor := is_on_floor()
-	if was_floor:
-		_floor_n = get_floor_normal()
+	var pre_pos := global_position
 	var pre_vel := velocity
+	var pre_n := get_floor_normal() if was_floor else up_direction
 	move_and_slide()
+	_mount_steep(was_floor, pre_vel, pre_n)
+	# How fast the ground is actually lifting us. A ramp raises you by MOVING
+	# you, never by giving you upward velocity — move_and_slide deletes that on
+	# every grounded frame — so this measurement is the only honest record of
+	# what the slope gave, and the only number that can hand it back at the lip
+	# without inventing energy out of the geometry.
+	#
+	# It rises with the ramp and fades slowly. An average that tracked both ways
+	# got dragged to nothing by the two or three frames where you are already
+	# past the lip but the snap has not let go yet — precisely when it is read.
+	var lift := (global_position - pre_pos).dot(up_direction) / maxf(delta, 0.0001)
+	var target := lift if was_floor else 0.0
+	if target >= _climb:
+		_climb = lerpf(_climb, target, minf(1.0, CLIMB_RISE * delta))
+	else:
+		_climb = maxf(target, _climb - CLIMB_FADE * delta)
 	_settle_ground(was_floor)
-	if bool(Net.game_settings.get("monkey", false)):
+	if bool(Net.game_settings.get("monkey", true)):
 		_monkey_bounce(pre_vel)
 
 
@@ -495,8 +527,8 @@ func launched(secs := 0.3) -> void:
 	_no_snap = maxf(_no_snap, secs)
 
 
-func _on_slope() -> bool:
-	return is_on_floor() and get_floor_normal().y < 0.985
+func _on_slope(min_y := 0.985) -> bool:
+	return is_on_floor() and get_floor_normal().y < min_y
 
 
 ## Swing the momentum you already carry onto the heading you are asking for.
@@ -529,31 +561,72 @@ func _ride_slope(delta: float, grv: float) -> void:
 	velocity += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * GRAVITY * grv * SLOPE_PULL * delta
 
 
-## move_and_slide flattens velocity onto the floor plane on every grounded
-## frame, so a body running up a ramp arrives at the top carrying no upward
-## momentum at all — which is why the old code could never launch anyone. Off
-## the lip, rebuild it: a run at |h| up a slope of angle t leaves at |h|·tan t.
-func _ramp_launch() -> void:
-	var n := _floor_n
-	var h := velocity - up_direction * velocity.dot(up_direction)
-	if n.dot(up_direction) > 0.985 or h.length() < 1.5:
-		return                       # flat ground, or too slow to be a launch
-	var slope := h - n * h.dot(n)
-	if slope.length() < 0.001:
+## The moment a grounded body meets anything past floor_max_angle, Godot cancels
+## the WHOLE component of the velocity pointing into it — right for a walker
+## meeting a wall, and a dead stop for a ball rolling up a hillside that has
+## merely got steeper than FLOOR_ANGLE. It cost 22 m/s in a single frame on a
+## curve that only steepens by a degree per metre.
+##
+## So mount it instead. Anything still shallow enough to ride takes the speed
+## onto its face and we go up it as a body in contact, with gravity doing what
+## gravity does. Nothing special happens at 58 degrees, or at any other angle:
+## the hillside just keeps steepening until it is a wall.
+func _mount_steep(was_floor: bool, pre_vel: Vector3, pre_n: Vector3) -> void:
+	# Only a body Godot considers grounded gets its velocity cancelled like
+	# this. In the air an ordinary slide is already the right answer, and the
+	# rebuild below would turn a fall into a climb.
+	if not was_floor or _no_snap > 0.0:
 		return
-	slope = slope.normalized()
-	var rise := slope.dot(up_direction)
-	var flat := (slope - up_direction * rise).length()
-	if rise < 0.03 or flat < 0.05:
-		return                       # running along the contour, or off a cliff
-	velocity += up_direction * minf(h.length() * rise / flat, LAUNCH_MAX)
+	var speed := pre_vel.length()
+	# A quarter of the speed gone inside one frame is 1300 m/s2. No force in the
+	# game does that; only the wall cancel does.
+	if speed < 2.0 or velocity.length() > speed * 0.75:
+		return
+	# The face that stopped us is the one Godot called a wall. It does not turn
+	# up among the slide collisions — those report the floor we were riding —
+	# so ask for it by name.
+	var faces: Array[Vector3] = []
+	if is_on_wall():
+		faces.append(get_wall_normal())
+	for i in get_slide_collision_count():
+		faces.append(get_slide_collision(i).get_normal())
+	# The velocity we were handed points the wrong way: every grounded frame
+	# flattens it onto the horizontal. Only its LENGTH survives that, so put it
+	# back up the slope we were actually riding before turning it onto the new
+	# face. Then a hillside that steepens smoothly costs nothing, while running
+	# flat out into a sudden kink still sheds what the kink takes.
+	var real := pre_vel - pre_n * pre_vel.dot(pre_n)
+	real = real.normalized() * speed if real.length() > 0.001 else pre_vel
+	for n in faces:
+		var up_dot := n.dot(up_direction)
+		if up_dot >= cos(deg_to_rad(FLOOR_ANGLE)) or up_dot <= RIDE_MIN_Y:
+			continue                 # a floor we can hold, or a wall we cannot
+		var along := real - n * real.dot(n)
+		if along.length() < 0.5:
+			continue
+		velocity = along
+		floor_snap_length = 0.0
+		launched(0.1)                # the snap must not reel us straight back down
+		return
+
+
+## Off the lip, hand back exactly the climb the ramp was measured to have. It
+## used to be reconstructed as |h|·tan t from the last floor normal, which is
+## the same number only if |velocity| is the horizontal speed — it is the speed
+## ALONG the surface, so that overpaid by 1/cos t, and at the steep end of
+## FLOOR_ANGLE it overpaid by nearly double. Measuring the lift cannot do that.
+func _ramp_launch() -> void:
+	if _climb < 1.5:
+		return                       # flat ground, or too slow to be a launch
+	velocity += up_direction * minf(_climb, LAUNCH_MAX)
+	_climb = 0.0
 	launched(0.2)
 
 
 ## Crossing the crest of a ramp must not throw you; leaving the lip of a
-## half-pipe must. The difference is whether there is still ground under you:
-## inside GROUND_SNAP we glue back down and shed the kick the slope gave us,
-## past it we are genuinely airborne and the speed we built carries us up.
+## half-pipe must; and rolling into a face too steep to stand on must do
+## neither. Only open air past the lip is a launch — treating a steep face as
+## one is what made a gradual cliffside throw you into the sky on every pass.
 func _settle_ground(was_floor: bool) -> void:
 	if is_on_floor() or not was_floor or _no_snap > 0.0 \
 			or velocity.dot(up_direction) > SNAP_MAX_UP:
@@ -568,16 +641,14 @@ func _settle_ground(was_floor: bool) -> void:
 	if h.length() > 1.0:
 		ahead = ahead.translated(h.normalized() * clampf(h.length() * 0.05, 0.35, 1.2))
 	var probe := KinematicCollision3D.new()
-	if not test_move(ahead, down * GROUND_SNAP, probe) \
-			or probe.get_normal().dot(up_direction) < floor_dot:
-		_ramp_launch()
+	if not test_move(ahead, down * GROUND_SNAP, probe):
+		_ramp_launch()   # nothing ahead: the ramp ran out and the climb carries
 		return
+	if probe.get_normal().dot(up_direction) < floor_dot:
+		return           # a steeper face is a hill to keep climbing, not a lip
 	var hit := KinematicCollision3D.new()
-	if not test_move(global_transform, down * GROUND_SNAP, hit):
-		_ramp_launch()
-		return
-	if hit.get_normal().dot(up_direction) < floor_dot:
-		_ramp_launch()   # what is down there is a wall, and walls do not catch you
+	if not test_move(global_transform, down * GROUND_SNAP, hit) \
+			or hit.get_normal().dot(up_direction) < floor_dot:
 		return
 	global_position += down * hit.get_travel().length()
 	var n := hit.get_normal()
@@ -655,6 +726,16 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 	var n := get_floor_normal() if grounded else Vector3.UP
 	if n.length_squared() < 0.5:
 		n = Vector3.UP
+	# A hill too steep to stand on is still a hill to roll on. Without this the
+	# floor drops out from under you at one exact angle and the ball goes into
+	# freefall against a face it is plainly still touching, which is what made
+	# climbing a gradual cliffside feel like hitting a cliff.
+	var facing := false
+	if not grounded and is_on_wall():
+		var wn := get_wall_normal()
+		if wn.y > RIDE_MIN_Y and wn.y < 0.95:
+			n = wn
+			facing = true
 	_steer(delta, wish_dir, MB_TURN_RATE * trn)
 	var lean := wish_dir.length()
 	var accel := Vector3.ZERO
@@ -666,12 +747,15 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 	if grounded:
 		accel -= n * accel.dot(n)               # the lean rides the floor plane
 		accel += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * (MB_ROLL * g)
+	elif facing:
+		accel -= n * accel.dot(n)   # still gripping, so the lean keeps its full say
+		velocity.y -= g * delta     # ...and the slide down the face is gravity's
 	else:
 		accel *= MB_AIR
 		velocity.y -= g * delta
 	velocity += accel * delta
 
-	if grounded:
+	if grounded or facing:
 		var damp := exp(-MB_DRAG * delta)
 		velocity.x *= damp
 		velocity.z *= damp
@@ -688,14 +772,15 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 
 ## Roll into a face the ball has no chance of holding — a kerb, the side of a
 ## ramp, a wall you met at an angle — and it kicks back at you with sparks,
-## instead of the silent full stop a slide gives you.
+## instead of the silent full stop a slide gives you. Anything shallower than
+## RIDE_MIN_Y is a face you can still roll on, so it gets ridden, not bounced.
 func _monkey_bounce(pre_vel: Vector3) -> void:
-	var floor_n := get_floor_normal() if is_on_floor() else Vector3.UP
+	var floor_n := get_floor_normal() if is_on_floor() else up_direction
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
 		var n := c.get_normal()
-		if n.dot(floor_n) > 0.72:
-			continue                       # same surface we are riding: no impact
+		if n.dot(floor_n) > 0.72 or n.dot(up_direction) > RIDE_MIN_Y:
+			continue                       # riding it, one way or the other
 		var hit_speed := -pre_vel.dot(n)   # how much of the run went into the face
 		if hit_speed < MB_BOUNCE_MIN:
 			continue

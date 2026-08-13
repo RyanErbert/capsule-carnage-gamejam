@@ -313,7 +313,7 @@ const gameSettings = {
   gridH: 32,
   gen: mapgen.DEFAULT_SCHEMES.slice(),   // which generator passes run
   subterranean: false,       // sink the arena into the ground
-  monkey: false              // Super Monkey Ball physics: tilt the world, not the ball
+  monkey: true               // Super Monkey Ball physics: tilt the world, not the ball
 };
 // Each axis picks its own size, so any oblong is buildable. Pixels are 4 m, so
 // 96x48 is a 384x192 m arena. Multiples of 4 only: the voxel lattice is
