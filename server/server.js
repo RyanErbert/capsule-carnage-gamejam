@@ -303,7 +303,10 @@ const gameSettings = {
   infiniteAmmo: true,        // default ON per Ryan
   selfAssign: true,          // creative: players may spawn items for themselves
   pedestals: true,           // auto item pedestals when a map generates
-  speedScale: 0.7,           // movement tuning
+  speedScale: 0.7,           // movement tuning: top speed
+  accelScale: 1.0,           // ...how hard you push toward it
+  turnScale: 1.0,            // ...how fast momentum swings to a new heading
+  boostScale: 1.0,           // ...and what holding shift is worth
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0,
   gridW: 32,                 // painted map size in pixels, per axis
@@ -1528,7 +1531,8 @@ io.on('connection', (socket) => {
     // Settings are part of the gamemode: picked in the lobby, frozen once a
     // game is live. Build mode exists precisely to change them mid-game.
     // EXCEPT the physics tuning sliders — those stay live in every mode.
-    const TUNABLE = ['speedScale', 'jumpScale', 'gravityScale'];
+    const TUNABLE = ['speedScale', 'accelScale', 'turnScale', 'boostScale',
+      'jumpScale', 'gravityScale'];
     if (readyIds.size > 0 && gameSettings.mode !== 'build' && !TUNABLE.includes(u.key)) {
       return;
     }

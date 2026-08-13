@@ -5,13 +5,21 @@ extends CharacterBody3D
 
 # --- Movement (web §1.1 / §3.2) ---
 const MOVE_ACCEL := 60.0          # walking force (mass 1 → accel)
-const SPRINT_ACCEL := 180.0
 const MAX_SPEED := 9.0            # walk speed cap
-const SPRINT_SPEED := 27.0        # sprint speed cap (1.5x the web's 18)
-const SPEED_CAP_LERP_RATE := 2.5  # soft cap approach rate per second
+const SPEED_CAP_LERP_RATE := 5.0  # soft cap approach rate per second
 const LINEAR_DAMPING := 0.1       # cannon body damping equivalent
 const FLOOR_FRICTION := 6.0       # approximates cannon ground contact friction 0.7
 const GRAVITY := 20.0             # web world gravity (not the project default 9.8)
+const BOOST_MULT := 2.0           # what a full boost slider adds on top of walking
+
+# --- Ground handling (shared by every movement mode) ---
+const FLOOR_ANGLE := 58.0    # degrees still counted as ground, not wall
+const GROUND_SNAP := 0.9     # ground this far under a lost floor still holds you
+const SNAP_MAX_UP := 7.0     # rising faster than this is a jump, never a crest
+const SLOPE_PULL := 1.0      # gravity in the plane of the slope, in full
+const LAUNCH_MAX := 20.0     # ceiling on the throw a ramp's angle can give you
+const TURN_RATE := 4.0       # how fast momentum swings onto a new heading
+const MB_TURN_RATE := 1.6    # ...and the same in monkey ball, where drift is the point
 
 # --- Jump charge system (web §3.4) ---
 const JUMP_IMPULSE := 9.6         # 1.2x the web's 8
@@ -78,6 +86,10 @@ var piloting := false         # flying a machine-animal bot: body stays, idles
 var dragging_generator := false  # rope-tied to a generator: heavy slowdown
 var dead := false             # Slayer: exploded, waiting out the countdown
 var dead_timer := 0.0
+var _no_snap := 0.0           # seconds left where the ground may not grab us back
+var riding := false           # inside a channel: its wall is our floor (§4.4)
+var _builds: Node
+var _floor_n := Vector3.UP    # the ground we were on last frame, for launches
 
 
 func respawn_point() -> Vector3:
@@ -103,6 +115,14 @@ var _shell: Node3D    # the glass marble, when we're not playing the cube
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Ground the engine will actually hold you to. The defaults call anything
+	# past 45 degrees a wall, which is what had a rolling ball popping into the
+	# air every time it crossed a seam between two terrain triangles.
+	floor_max_angle = deg_to_rad(FLOOR_ANGLE)
+	floor_snap_length = GROUND_SNAP
+	floor_block_on_wall = false
+	floor_constant_speed = false
+	safe_margin = 0.02
 	spawn_position = global_position
 	if devInfoLabel:
 		devInfoLabel.visible = false
@@ -124,6 +144,13 @@ func _ready() -> void:
 		_capsule_logic.add_child(_shell)
 
 
+## Anything that takes the body out of your hands puts the world's floor back
+## under it: a channel's wall is only "down" while you are actually riding.
+func _stand_up() -> void:
+	riding = false
+	up_direction = Vector3.UP
+
+
 ## Multiplayer sync calls this when the oddball holder changes (web: white
 ## outline hull on the it-player, including yourself).
 func set_it(is_it: bool) -> void:
@@ -138,6 +165,7 @@ func enter_vehicle(v: Node3D) -> void:
 	velocity = Vector3.ZERO
 	air_time = 0.0
 	charging_jump = false
+	_stand_up()
 	if _items:
 		_items.is_grappling = false
 	if capsuleCollider:
@@ -184,6 +212,7 @@ func die_slayer(respawn_secs: float) -> void:
 		return
 	dead = true
 	dead_timer = respawn_secs
+	_stand_up()
 	velocity = Vector3.ZERO
 	air_time = 0.0
 	charging_jump = false
@@ -220,6 +249,7 @@ func set_godmode(on: bool) -> void:
 	velocity = Vector3.ZERO
 	air_time = 0.0
 	charging_jump = false
+	_stand_up()
 	if _items:
 		_items.is_grappling = false
 
@@ -231,6 +261,7 @@ func set_piloting(on: bool) -> void:
 	velocity = Vector3.ZERO
 	air_time = 0.0
 	charging_jump = false
+	_stand_up()
 	if _items:
 		_items.is_grappling = false
 
@@ -292,18 +323,37 @@ func _physics_process(delta: float) -> void:
 	var grappling: bool = _items != null and _items.is_grappling
 
 	# Global tuning sliders (Esc menu, server-synced)
-	var spd := clampf(float(Net.game_settings.get("speedScale", 0.33)), 0.05, 3.0)
+	var spd := clampf(float(Net.game_settings.get("speedScale", 0.7)), 0.05, 3.0)
+	var acc := clampf(float(Net.game_settings.get("accelScale", 1.0)), 0.05, 3.0)
+	var trn := clampf(float(Net.game_settings.get("turnScale", 1.0)), 0.05, 3.0)
+	var bst := clampf(float(Net.game_settings.get("boostScale", 1.0)), 0.05, 3.0)
 	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 3.0)
 	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 3.0)
 	# (dragging the generator slows you via real rope tension — generators.gd)
+	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
+	_no_snap = maxf(0.0, _no_snap - delta)
 
-	if Settings.movement == "source":
+	# Riding a channel replaces every other movement mode while it lasts: down
+	# is the trough's wall, not the world's floor.
+	var ride: Dictionary = _ride_frame() if _no_snap <= 0.0 else {}
+	riding = not ride.is_empty()
+	if ride.is_empty() and not up_direction.is_equal_approx(Vector3.UP):
+		up_direction = Vector3.UP
+
+	if not ride.is_empty():
+		_channel_step(delta, wish_dir, typing, ride, acc, boost, grv, jmp, now)
+	elif Settings.movement == "source":
 		_source_step(delta, wish_dir, typing)
 	elif bool(Net.game_settings.get("monkey", false)):
-		_monkey_step(delta, wish_dir, typing, grv, jmp, now)
+		_monkey_step(delta, wish_dir, typing, spd, acc, trn, boost, grv, jmp, now)
 	else:
+		# --- Steering: swing the momentum you already have onto the new
+		# heading instead of waiting for the accel to cancel it. This is what
+		# the turn slider buys, and it is why a ball can corner at speed. ---
+		_steer(delta, wish_dir, TURN_RATE * trn)
+
 		# --- Horizontal acceleration ---
-		var accel := (SPRINT_ACCEL if sprinting else MOVE_ACCEL) * spd
+		var accel := MOVE_ACCEL * acc * boost
 		velocity.x += wish_dir.x * accel * delta
 		velocity.z += wish_dir.z * accel * delta
 
@@ -326,10 +376,12 @@ func _physics_process(delta: float) -> void:
 		var marbling := marble_n.y > 0.15 and marble_n.y < 0.95
 
 		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
-		var cap_target := (SPRINT_SPEED if sprinting else MAX_SPEED) * spd
+		var cap_target := MAX_SPEED * spd * boost
 		speed_cap = lerpf(speed_cap, cap_target, minf(1.0, SPEED_CAP_LERP_RATE * delta))
 		var h_vel := Vector2(velocity.x, velocity.z)
-		if marbling:
+		# Anything sloped is a ride, not a walk: the cap opens up to whatever
+		# you carry so a trough gives the speed back at the bottom.
+		if marbling or _on_slope():
 			speed_cap = maxf(speed_cap, h_vel.length())
 		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
 			h_vel = h_vel.normalized() * speed_cap
@@ -342,11 +394,13 @@ func _physics_process(delta: float) -> void:
 		if marbling:
 			var down_slope := Vector3.DOWN - marble_n * Vector3.DOWN.dot(marble_n)
 			velocity += down_slope * GRAVITY * grv * 0.8 * delta
+		_ride_slope(delta, grv)
 
 		_charge_jump(delta, typing, jmp, now)
 
 	# --- Floor snap: off while ascending so jumps aren't eaten ---
-	floor_snap_length = 0.0 if velocity.y > 0.0 else 0.3
+	floor_snap_length = 0.0 if velocity.dot(up_direction) > 0.0 or _no_snap > 0.0 \
+		else GROUND_SNAP
 
 	# --- Fall respawn (web §1.10: >10 s falling → random spawn) ---
 	if not is_on_floor() and velocity.y < 0.0:
@@ -382,7 +436,164 @@ func _physics_process(delta: float) -> void:
 	elif _shell and is_on_floor():
 		_shell.roll(velocity, delta)
 
+	var was_floor := is_on_floor()
+	if was_floor:
+		_floor_n = get_floor_normal()
+	var pre_vel := velocity
 	move_and_slide()
+	_settle_ground(was_floor)
+	if bool(Net.game_settings.get("monkey", false)):
+		_monkey_bounce(pre_vel)
+
+
+# --- Channel riding (Items/builds.gd §4.4) ----------------------------------
+# Inside a trough the world's floor stops mattering: the wall you are on IS the
+# floor, which is what lets a channel loop, bank and climb. Holding boost turns
+# one into fast travel.
+const CH_HOLD := 0.95      # how hard the trough pins you to itself, x gravity
+const CH_ACCEL := 26.0     # push along the run
+const CH_SIDE := 26.0      # ...and across it, to climb the wall on purpose
+const CH_CENTER := 22.0    # the groove easing you back to the middle
+const CH_DRAG := 0.12
+const CH_MAX := 75.0
+
+
+func _ride_frame() -> Dictionary:
+	if _builds == null or not is_instance_valid(_builds):
+		_builds = get_tree().get_first_node_in_group("world_builds")
+	return _builds.ride_frame(global_position) if _builds else {}
+
+
+func _channel_step(delta: float, wish_dir: Vector3, typing: bool, ride: Dictionary,
+		acc: float, boost: float, grv: float, jmp: float, now: float) -> void:
+	var t: Vector3 = ride["t"]
+	var r: Vector3 = ride["r"]
+	var out: Vector3 = global_position - (ride["axis"] as Vector3)
+	out -= t * out.dot(t)
+	out = out.normalized() if out.length() > 0.001 else -(ride["u"] as Vector3)
+	up_direction = -out
+
+	var g := GRAVITY * grv
+	velocity += out * (g * CH_HOLD) * delta               # down is the wall
+	velocity += t * (Vector3.DOWN.dot(t) * g) * delta      # ...but the run still falls
+	velocity -= r * (out.dot(r) * CH_CENTER) * delta       # and the groove holds you
+	velocity += t * (wish_dir.dot(t) * CH_ACCEL * acc * boost) * delta
+	velocity += r * (wish_dir.dot(r) * CH_SIDE * acc) * delta
+
+	velocity *= exp(-CH_DRAG * delta)
+	if velocity.length() > CH_MAX:
+		velocity = velocity.normalized() * CH_MAX
+	speed_cap = maxf(speed_cap, Vector2(velocity.x, velocity.z).length())
+	_charge_jump(delta, typing, jmp, now)
+
+
+# --- Ground handling, shared by every movement mode ------------------------
+
+## Something threw us — a jump, a pad, a blast. Hands off for a moment: the
+## ground snap must not reel us straight back in.
+func launched(secs := 0.3) -> void:
+	_no_snap = maxf(_no_snap, secs)
+
+
+func _on_slope() -> bool:
+	return is_on_floor() and get_floor_normal().y < 0.985
+
+
+## Swing the momentum you already carry onto the heading you are asking for.
+## Without this a ball at speed can only turn as fast as the accel can cancel
+## what it had, which reads as stiff no matter how strong the accel is.
+func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
+	if wish_dir.length_squared() < 0.0001:
+		return
+	var h := Vector3(velocity.x, 0.0, velocity.z)
+	var speed := h.length()
+	if speed < 0.6:
+		return
+	var swung := h.lerp(wish_dir.normalized() * speed, minf(1.0, rate * delta))
+	if swung.length() < 0.001:
+		return
+	# The lerp cuts the corner and loses length; give most of it back, so
+	# cornering costs a little speed instead of scrubbing it all off.
+	swung = swung.normalized() * lerpf(swung.length(), speed, 0.8)
+	velocity.x = swung.x
+	velocity.z = swung.z
+
+
+## Gravity in the plane of the ground you are standing on. A trough takes speed
+## off you on the way up and hands it back on the way down, which is the whole
+## reason a fully-carved half-pipe can throw you over the lip.
+func _ride_slope(delta: float, grv: float) -> void:
+	if not _on_slope():
+		return
+	var n := get_floor_normal()
+	velocity += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * GRAVITY * grv * SLOPE_PULL * delta
+
+
+## move_and_slide flattens velocity onto the floor plane on every grounded
+## frame, so a body running up a ramp arrives at the top carrying no upward
+## momentum at all — which is why the old code could never launch anyone. Off
+## the lip, rebuild it: a run at |h| up a slope of angle t leaves at |h|·tan t.
+func _ramp_launch() -> void:
+	var n := _floor_n
+	var h := velocity - up_direction * velocity.dot(up_direction)
+	if n.dot(up_direction) > 0.985 or h.length() < 1.5:
+		return                       # flat ground, or too slow to be a launch
+	var slope := h - n * h.dot(n)
+	if slope.length() < 0.001:
+		return
+	slope = slope.normalized()
+	var rise := slope.dot(up_direction)
+	var flat := (slope - up_direction * rise).length()
+	if rise < 0.03 or flat < 0.05:
+		return                       # running along the contour, or off a cliff
+	velocity += up_direction * minf(h.length() * rise / flat, LAUNCH_MAX)
+	launched(0.2)
+
+
+## Crossing the crest of a ramp must not throw you; leaving the lip of a
+## half-pipe must. The difference is whether there is still ground under you:
+## inside GROUND_SNAP we glue back down and shed the kick the slope gave us,
+## past it we are genuinely airborne and the speed we built carries us up.
+func _settle_ground(was_floor: bool) -> void:
+	if is_on_floor() or not was_floor or _no_snap > 0.0 \
+			or velocity.dot(up_direction) > SNAP_MAX_UP:
+		return
+	var down := -up_direction
+	var floor_dot := cos(deg_to_rad(FLOOR_ANGLE))
+	# Probe where we are ABOUT to be, not where we are. A crest still has deck
+	# in front of it and a lip has nothing, and that is the whole difference
+	# between being reeled back down and being thrown.
+	var h := velocity - up_direction * velocity.dot(up_direction)
+	var ahead := global_transform
+	if h.length() > 1.0:
+		ahead = ahead.translated(h.normalized() * clampf(h.length() * 0.05, 0.35, 1.2))
+	var probe := KinematicCollision3D.new()
+	if not test_move(ahead, down * GROUND_SNAP, probe) \
+			or probe.get_normal().dot(up_direction) < floor_dot:
+		_ramp_launch()
+		return
+	var hit := KinematicCollision3D.new()
+	if not test_move(global_transform, down * GROUND_SNAP, hit):
+		_ramp_launch()
+		return
+	if hit.get_normal().dot(up_direction) < floor_dot:
+		_ramp_launch()   # what is down there is a wall, and walls do not catch you
+		return
+	global_position += down * hit.get_travel().length()
+	var n := hit.get_normal()
+	var speed := velocity.length()
+	var along := velocity - n * velocity.dot(n)
+	velocity = along.normalized() * speed if along.length() > 0.001 else Vector3.ZERO
+	apply_floor_snap()
+
+
+## Leave the ground. Standing on the world it is a plain vertical set, the way
+## the web game did it; inside a channel it fires off whatever wall you are on.
+func _jump_impulse(speed: float) -> void:
+	if up_direction.is_equal_approx(Vector3.UP):
+		velocity.y = speed
+	else:
+		velocity += up_direction * speed
 
 
 ## Jump: hold to charge, release to fire (web §3.4). Shared by the default
@@ -400,10 +611,11 @@ func _charge_jump(delta: float, typing: bool, jmp: float, now: float) -> void:
 	elif charging_jump:
 		charging_jump = false
 		if can_jump:
-			velocity.y = JUMP_IMPULSE * jump_charge * jmp
+			_jump_impulse(JUMP_IMPULSE * jump_charge * jmp)
 			jump_cooldown = jump_charge
 			jump_cooldown_max = jump_charge
 			last_grounded_time = -1000.0
+			launched()
 			Sfx.jump(global_position)
 			Net.emit_event("jump")  # others hear it via playerJumped
 		else:
@@ -412,11 +624,12 @@ func _charge_jump(delta: float, typing: bool, jmp: float, now: float) -> void:
 
 	# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
 	if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
-		velocity.y = JUMP_IMPULSE * jmp
+		_jump_impulse(JUMP_IMPULSE * jmp)
 		jump_cooldown = 1.0
 		jump_cooldown_max = 1.0
 		jump_buffer = 0.0
 		last_grounded_time = -1000.0
+		launched()
 		Sfx.jump(global_position)
 		Net.emit_event("jump")
 
@@ -430,20 +643,26 @@ const MB_TILT := 0.401     # 23 degrees: how far the stage leans at full stick
 const MB_ROLL := 0.714     # 5/7 — a solid sphere rolling, not a box sliding
 const MB_DRAG := 0.25      # rolling resistance per second: barely there
 const MB_AIR := 0.16       # how much of the lean survives once you leave the floor
-const MB_MAX := 42.0       # terminal speed, so a long ramp can't fling you to orbit
+const MB_TOP := 6.0        # terminal speed as a multiple of the walk cap
+const MB_BOUNCE := 0.42    # how much of the impact a wall too steep to hold gives back
+const MB_BOUNCE_MIN := 9.0 # ...and how hard you have to hit it before it does
 
 
-func _monkey_step(delta: float, wish_dir: Vector3, typing: bool,
-		grv: float, jmp: float, now: float) -> void:
+func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
+		acc: float, trn: float, boost: float, grv: float, jmp: float, now: float) -> void:
 	var g := GRAVITY * grv
 	var grounded := is_on_floor()
 	var n := get_floor_normal() if grounded else Vector3.UP
 	if n.length_squared() < 0.5:
 		n = Vector3.UP
+	_steer(delta, wish_dir, MB_TURN_RATE * trn)
 	var lean := wish_dir.length()
 	var accel := Vector3.ZERO
 	if lean > 0.001:
-		accel = (wish_dir / lean) * (MB_ROLL * g * sin(MB_TILT * lean))
+		# Holding boost leans the stage harder — the only way to lean it is the
+		# stick, so that is where a speed boost has to live.
+		var tilt := minf(1.4, MB_TILT * lean * boost)
+		accel = (wish_dir / lean) * (MB_ROLL * g * sin(tilt) * acc)
 	if grounded:
 		accel -= n * accel.dot(n)               # the lean rides the floor plane
 		accel += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * (MB_ROLL * g)
@@ -456,14 +675,64 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool,
 		var damp := exp(-MB_DRAG * delta)
 		velocity.x *= damp
 		velocity.z *= damp
+	var top := MAX_SPEED * spd * MB_TOP * boost
 	var h := Vector2(velocity.x, velocity.z)
-	if h.length() > MB_MAX:
-		h = h.normalized() * MB_MAX
+	if h.length() > top:
+		h = h.normalized() * top
 		velocity.x = h.x
 		velocity.z = h.y
 	# Nothing else may clip this back to run speed: the speed IS the mode.
 	speed_cap = maxf(h.length(), MAX_SPEED)
 	_charge_jump(delta, typing, jmp, now)
+
+
+## Roll into a face the ball has no chance of holding — a kerb, the side of a
+## ramp, a wall you met at an angle — and it kicks back at you with sparks,
+## instead of the silent full stop a slide gives you.
+func _monkey_bounce(pre_vel: Vector3) -> void:
+	var floor_n := get_floor_normal() if is_on_floor() else Vector3.UP
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		var n := c.get_normal()
+		if n.dot(floor_n) > 0.72:
+			continue                       # same surface we are riding: no impact
+		var hit_speed := -pre_vel.dot(n)   # how much of the run went into the face
+		if hit_speed < MB_BOUNCE_MIN:
+			continue
+		velocity += n * (hit_speed * MB_BOUNCE)
+		launched(0.12)
+		Sfx.boost(c.get_position(), 0.35)
+		_sparks(c.get_position(), n)
+		return
+
+
+func _sparks(at: Vector3, n: Vector3) -> void:
+	var p := CPUParticles3D.new()
+	p.top_level = true
+	p.emitting = false
+	p.one_shot = true
+	p.amount = 14
+	p.lifetime = 0.45
+	p.explosiveness = 1.0
+	p.direction = n
+	p.spread = 42.0
+	p.initial_velocity_min = 5.0
+	p.initial_velocity_max = 13.0
+	p.gravity = Vector3(0, -22, 0)
+	p.scale_amount_min = 0.05
+	p.scale_amount_max = 0.12
+	p.color = Color(1.0, 0.86, 0.45)
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	var box := BoxMesh.new()
+	box.size = Vector3(0.06, 0.06, 0.34)
+	box.material = mat
+	p.mesh = box
+	add_child(p)
+	p.global_position = at
+	p.emitting = true
+	get_tree().create_timer(1.0).timeout.connect(p.queue_free)
 
 
 ## One tick of Source movement: gravity, hop, friction, accelerate.

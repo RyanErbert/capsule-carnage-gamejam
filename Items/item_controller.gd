@@ -9,8 +9,15 @@ signal inventory_changed(items: Array)
 const MAX_INVENTORY := 3
 # Ammo granted on pedestal pickup (web game.js:4050). Missing = 0 = single use.
 const PICKUP_AMMO := {"machinegun": 100, "rocket": 3, "bridge_gun": 3, "wall": 3, "ramp": 3,
-	"platform": 3, "terragun": 100}
+	"platform": 3, "terragun": 100, "mines": 3}
 const GRAPPLE_SPEED := 40.0
+# The hook is thrown, not teleported: it flies under gravity like a rocket and
+# only bites when it actually reaches something.
+const HOOK_SPEED := 72.0
+const HOOK_GRAVITY := -9.0
+const HOOK_LIFE := 1.6
+const HOOK_RETURN := 90.0
+const ROPE_W := 0.055
 const PLACE_RANGE := 10.0   # pads/mines must be placed within 10 u (web)
 const AIM_RANGE := 200.0
 # Weapons (web §5.1–5.3)
@@ -27,7 +34,12 @@ var pending_teleporter: Variant = null  # first click position, or null
 
 @onready var player: CharacterBody3D = get_parent()
 
-var _grapple_line: MeshInstance3D
+var _rope: MeshInstance3D
+var _hook: Node3D
+var _hook_pos := Vector3.ZERO
+var _hook_vel := Vector3.ZERO
+var _hook_state := ""      # "" idle | "fly" | "set" | "back"
+var _hook_life := 0.0
 var _sync: Node
 var _mg_firing := false
 var _mg_timer := 0.0
@@ -53,14 +65,19 @@ func _ready() -> void:
 	if weapon != "none" and weapon != "":
 		inventory.append({"type": weapon, "ammo": int(Settings.STARTING_AMMO.get(weapon, 0))})
 		inventory_changed.emit.call_deferred(inventory)
-	_grapple_line = MeshInstance3D.new()
-	_grapple_line.top_level = true
-	_grapple_line.mesh = ImmediateMesh.new()
+	_rope = MeshInstance3D.new()
+	_rope.top_level = true
+	_rope.mesh = ImmediateMesh.new()
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.2, 1.0, 0.3)
-	_grapple_line.material_override = mat
-	add_child(_grapple_line)
+	mat.albedo_color = Color(0.72, 0.64, 0.44)
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_rope.material_override = mat
+	add_child(_rope)
+	_hook = _make_hook()
+	_hook.top_level = true
+	_hook.visible = false
+	add_child(_hook)
 	# The gun rides on the body, at chest height, swinging with the aim ray
 	_rig = load("res://Items/weapon_rig.gd").new()
 	_rig.position = Vector3(0, 0.15, 0)
@@ -82,7 +99,7 @@ func _on_net_event(event: String, data: Variant) -> void:
 			inventory_changed.emit(inventory)
 	elif event == "gameEnded" or event == "kicked":
 		inventory.clear()
-		is_grappling = false
+		_drop_hook()
 		pending_teleporter = null
 		inventory_changed.emit(inventory)
 
@@ -145,17 +162,17 @@ func use_item() -> void:
 	var target: Variant = _aim_point()
 	match item:
 		"grapple":
-			if target == null:
+			if _hook_state != "":
 				return
-			grapple_target = target
-			is_grappling = true
-			Sfx.boost(player.global_position, 0.8)
+			_fire_hook()
 			_use_ammo()
 		"launch_pad", "boost_pad", "mines":
 			if target == null or player.global_position.distance_to(target) > PLACE_RANGE:
 				return
 			if item == "mines":
 				Net.emit_event("placeMine", {"x": target.x, "y": target.y, "z": target.z})
+				_use_ammo()   # a mine is a round, not the whole box
+				return
 			else:
 				var cam := get_viewport().get_camera_3d()
 				var dir := -cam.global_transform.basis.z
@@ -323,10 +340,148 @@ func _process(delta: float) -> void:
 				_mg_timer = MG_INTERVAL
 				_fire_machinegun_shot()
 
-	var im: ImmediateMesh = _grapple_line.mesh
+	_hook_step(delta)
+	_draw_rope()
+
+
+# --- Grapple: a thrown hook on a rope ---------------------------------------
+
+func _fire_hook() -> void:
+	var dir := _aim_direction()
+	_hook_pos = player.global_position + Vector3(0, 0.4, 0) + dir * 1.2
+	_hook_vel = dir * HOOK_SPEED
+	_hook_state = "fly"
+	_hook_life = HOOK_LIFE
+	_hook.visible = true
+	_hook.global_position = _hook_pos
+	Sfx.boost(player.global_position, 0.5)
+
+
+func _drop_hook() -> void:
+	_hook_state = ""
+	is_grappling = false
+	if _hook and is_instance_valid(_hook):
+		_hook.visible = false
+
+
+func _hook_step(delta: float) -> void:
+	if _hook_state == "" or player == null:
+		return
+	var chest := player.global_position + Vector3(0, 0.4, 0)
+	match _hook_state:
+		"fly":
+			_hook_life -= delta
+			_hook_vel.y += HOOK_GRAVITY * delta
+			var step := _hook_vel * delta
+			var q := PhysicsRayQueryParameters3D.create(_hook_pos, _hook_pos + step)
+			q.exclude = [player.get_rid()]
+			var hit := player.get_world_3d().direct_space_state.intersect_ray(q)
+			if hit:
+				# It bit: only now does the rope start pulling (player.gd §4.8)
+				_hook_pos = hit["position"] + hit["normal"] * 0.08
+				grapple_target = _hook_pos
+				is_grappling = true
+				_hook_state = "set"
+				Sfx.jump(_hook_pos)
+			else:
+				_hook_pos += step
+				if _hook_life <= 0.0 or _hook_pos.distance_to(chest) > AIM_RANGE:
+					_hook_state = "back"
+		"set":
+			# The player lets go by jumping or arriving — reel it in after them
+			if not is_grappling:
+				_hook_state = "back"
+		"back":
+			var home := chest - _hook_pos
+			if home.length() < 1.2:
+				_drop_hook()
+				return
+			_hook_pos += home.normalized() * minf(HOOK_RETURN * delta, home.length())
+	if not _hook.visible:
+		return
+	_hook.global_position = _hook_pos
+	var look := _hook_vel if _hook_state == "fly" else (_hook_pos - chest)
+	if look.length() > 0.01 and absf(look.normalized().dot(Vector3.UP)) < 0.999:
+		_hook.look_at_from_position(_hook_pos, _hook_pos + look)
+
+
+## The rope as a ribbon of camera-facing quads, sagging while the hook is still
+## in the air and snapping straight the moment it takes the load.
+func _draw_rope() -> void:
+	var im: ImmediateMesh = _rope.mesh
 	im.clear_surfaces()
-	if is_grappling:
-		im.surface_begin(Mesh.PRIMITIVE_LINES)
-		im.surface_add_vertex(player.global_position)
-		im.surface_add_vertex(grapple_target)
-		im.surface_end()
+	if _hook_state == "" or player == null:
+		return
+	var cam := get_viewport().get_camera_3d()
+	var eye := cam.global_position if cam else player.global_position
+	var from := player.global_position + Vector3(0, 0.35, 0)
+	var sag := 0.0 if is_grappling else from.distance_to(_hook_pos) * 0.05
+	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	var prev := from
+	for i in range(1, 9):
+		var t := float(i) / 8.0
+		var p := from.lerp(_hook_pos, t) + Vector3.DOWN * sin(t * PI) * sag
+		var run := p - prev
+		if run.length() > 0.0001:
+			var side := run.normalized().cross((prev + p) * 0.5 - eye)
+			side = Vector3.RIGHT * ROPE_W if side.length() < 1e-5 else side.normalized() * ROPE_W
+			im.surface_add_vertex(prev - side)
+			im.surface_add_vertex(p - side)
+			im.surface_add_vertex(prev + side)
+			im.surface_add_vertex(p - side)
+			im.surface_add_vertex(p + side)
+			im.surface_add_vertex(prev + side)
+		prev = p
+	im.surface_end()
+
+
+## Three flukes swept back off a shank, pointing down its own -Z so aiming it
+## is just a look_at.
+static func _make_hook() -> Node3D:
+	var root := Node3D.new()
+	var steel := StandardMaterial3D.new()
+	steel.albedo_color = Color(0.52, 0.55, 0.6)
+	steel.metallic = 0.85
+	steel.roughness = 0.32
+	var shank := MeshInstance3D.new()
+	var rod := CylinderMesh.new()
+	rod.top_radius = 0.05
+	rod.bottom_radius = 0.05
+	rod.height = 0.4
+	shank.mesh = rod
+	shank.material_override = steel
+	shank.rotation.x = PI / 2.0
+	root.add_child(shank)
+	var tip := MeshInstance3D.new()
+	var point := CylinderMesh.new()
+	point.top_radius = 0.0
+	point.bottom_radius = 0.09
+	point.height = 0.22
+	tip.mesh = point
+	tip.material_override = steel
+	tip.rotation.x = -PI / 2.0
+	tip.position.z = -0.3
+	root.add_child(tip)
+	for i in 3:
+		var arm := Node3D.new()
+		arm.rotation.z = float(i) * TAU / 3.0
+		root.add_child(arm)
+		var claw := MeshInstance3D.new()
+		var bar := BoxMesh.new()
+		bar.size = Vector3(0.045, 0.045, 0.26)
+		claw.mesh = bar
+		claw.material_override = steel
+		claw.position = Vector3(0, 0.08, 0.06)
+		claw.rotation.x = -0.5
+		arm.add_child(claw)
+	var eye := MeshInstance3D.new()
+	var loop := TorusMesh.new()
+	loop.inner_radius = 0.05
+	loop.outer_radius = 0.09
+	loop.rings = 8
+	eye.mesh = loop
+	eye.material_override = steel
+	eye.position.z = 0.23
+	eye.rotation.x = PI / 2.0
+	root.add_child(eye)
+	return root

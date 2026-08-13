@@ -21,6 +21,9 @@ const TOGGLES := [
 ## feel can be read off the menu instead of guessed at.
 const SLIDERS := [
 	["speedScale", "Speed", Player.MAX_SPEED, "m/s"],
+	["accelScale", "Accel", Player.MOVE_ACCEL, "m/s2"],
+	["turnScale", "Turn", Player.TURN_RATE, "/s"],
+	["boostScale", "Boost", Player.BOOST_MULT, "x"],
 	["jumpScale", "Jump", Player.JUMP_IMPULSE, "m/s"],
 	["gravityScale", "Gravity", Player.GRAVITY, "m/s2"],
 ]

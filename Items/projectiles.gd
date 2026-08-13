@@ -31,6 +31,7 @@ var _mines: Dictionary = {}   # id -> {pos, node}
 var _coins: Dictionary = {}   # id -> {pos, vel, collect_timer, node}
 var _terrain_node: Node3D
 var _triggered_mines: Dictionary = {}
+var _blink := 0.0
 
 
 func _ready() -> void:
@@ -157,25 +158,74 @@ func _spawn_rocket(data: Dictionary) -> void:
 	_rockets.append({"pos": pos, "vel": vel, "life": ROCKET_LIFE, "owner": str(data.get("owner", "")), "node": node})
 
 
+## A limpet, not a coaster: an armoured dome on a skirt, three trigger prongs
+## reaching out of it, and an eye that blinks so you can spot one in time.
 func _add_mine(m: Dictionary) -> void:
 	var id := str(m.get("id", ""))
 	if id == "" or _mines.has(id):
 		return
-	var node := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.4
-	cyl.bottom_radius = 0.4
-	cyl.height = 0.1
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color("#ff2222")
-	mat.emission_enabled = true
-	mat.emission = Color("#440000")
-	mat.emission_energy_multiplier = 2.0
-	cyl.material = mat
-	node.mesh = cyl
+	var node := Node3D.new()
+	var shell := StandardMaterial3D.new()
+	shell.albedo_color = Color(0.15, 0.16, 0.18)
+	shell.metallic = 0.8
+	shell.roughness = 0.4
+	var hot := StandardMaterial3D.new()
+	hot.albedo_color = Color(1.0, 0.25, 0.2)
+	hot.emission_enabled = true
+	hot.emission = Color(1.0, 0.1, 0.05)
+	hot.emission_energy_multiplier = 3.0
+	hot.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	var skirt := MeshInstance3D.new()
+	var ring := CylinderMesh.new()
+	ring.top_radius = 0.34
+	ring.bottom_radius = 0.42
+	ring.height = 0.12
+	ring.radial_segments = 8
+	skirt.mesh = ring
+	skirt.material_override = shell
+	skirt.position.y = 0.06
+	node.add_child(skirt)
+
+	var dome := MeshInstance3D.new()
+	var half := SphereMesh.new()
+	half.radius = 0.31
+	half.height = 0.36
+	half.is_hemisphere = true
+	half.radial_segments = 10
+	half.rings = 5
+	dome.mesh = half
+	dome.material_override = shell
+	dome.position.y = 0.12
+	node.add_child(dome)
+
+	for i in 3:
+		var a := float(i) * TAU / 3.0
+		var prong := MeshInstance3D.new()
+		var rod := CylinderMesh.new()
+		rod.top_radius = 0.025
+		rod.bottom_radius = 0.035
+		rod.height = 0.3
+		prong.mesh = rod
+		prong.material_override = shell
+		prong.position = Vector3(sin(a) * 0.2, 0.3, cos(a) * 0.2)
+		prong.rotation = Vector3(0.42, a, 0)
+		node.add_child(prong)
+
+	var eye := MeshInstance3D.new()
+	var bulb := SphereMesh.new()
+	bulb.radius = 0.075
+	bulb.height = 0.15
+	bulb.radial_segments = 8
+	bulb.rings = 4
+	eye.mesh = bulb
+	eye.material_override = hot
+	eye.position.y = 0.44
+	node.add_child(eye)
+
 	node.position = _vec3(m)
 	add_child(node)
-	_mines[id] = {"pos": _vec3(m), "node": node}
+	_mines[id] = {"pos": _vec3(m), "node": node, "eye": eye}
 
 
 ## Coins are real rigid bodies (web: cannon Cylinder mass 1) — they bounce,
@@ -399,7 +449,10 @@ func _physics_process(delta: float) -> void:
 
 	# Mines: trigger within 1.2 — web has no owner immunity or arming delay.
 	# Whoever steps on it owns the crater (deduped: one trigger per mine).
+	_blink += delta
+	var lit := fmod(_blink, 1.1) < 0.16
 	for id in _mines:
+		_mines[id]["eye"].visible = lit
 		if _triggered_mines.has(id):
 			continue
 		if player.global_position.distance_to(_mines[id]["pos"]) < ROCKET_FUSE:

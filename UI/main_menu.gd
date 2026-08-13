@@ -66,6 +66,7 @@ func _send_profile() -> void:
 		Settings.player_name = _name_edit.text.strip_edges().left(16)
 	Net.emit_event("profile", {
 		"name": Settings.player_name, "skinColor": Settings.color_hex()})
+	Settings.save_profile()
 
 
 func _on_net_event(event: String, data: Variant) -> void:
@@ -247,6 +248,7 @@ func _build_ui() -> void:
 	model_opt.select(1 if Settings.model == "cube" else 0)
 	model_opt.item_selected.connect(func(i: int):
 		Settings.model = "cube" if i == 1 else "bear"
+		Settings.save_profile()
 		_build_model_preview())
 	fields.add_child(model_opt)
 	row.add_child(_make_model_viewport())
