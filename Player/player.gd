@@ -110,6 +110,7 @@ var grounded := false         # ...and it is flat enough to stand on and jump fr
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
 var _pop_cd := 0.0            # rate limit on the ejection report
 var _bounce_cd := 0.0         # so one hard face cannot kick you over and over
+var _kick_cd := 0.0           # rate limit on the upward-velocity report
 var _pop_total := 0           # ...and how many there have been in total
 var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
@@ -150,6 +151,7 @@ func _ready() -> void:
 	wall_min_slide_angle = 0.0
 	safe_margin = 0.02
 	spawn_position = global_position
+	_log_session()
 	if devInfoLabel:
 		devInfoLabel.visible = false
 	use_cube = Settings.model == "cube"
@@ -362,6 +364,7 @@ func _physics_process(delta: float) -> void:
 	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
 	_no_snap = maxf(0.0, _no_snap - delta)
 	_bounce_cd = maxf(0.0, _bounce_cd - delta)
+	_kick_cd = maxf(0.0, _kick_cd - delta)
 
 	# Riding a channel replaces every other movement mode while it lasts: down
 	# is the trough's wall, not the world's floor.
@@ -553,6 +556,7 @@ func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
 ## `restitution` is how much the surface hands BACK on top of that — 0 for
 ## ordinary contact, more for a face hit too hard to hold (monkey ball).
 func _resolve_contact(restitution := 0.0) -> void:
+	var before := velocity
 	touching = false
 	var best := -2.0
 	for i in get_slide_collision_count():
@@ -570,6 +574,7 @@ func _resolve_contact(restitution := 0.0) -> void:
 		_surf_n = up_direction
 		return
 	grounded = best > cos(deg_to_rad(GROUND_ANGLE))
+	_watch_kick(before, restitution)
 
 
 ## A body that is already overlapping geometry gets shoved back out, and that
@@ -621,16 +626,43 @@ func _log_pop(text: String) -> void:
 	if f == null:
 		return
 	f.seek_end()
-	if _pop_logged == 0:
-		f.store_line("")
-		f.store_line("=== %s  monkey=%s  %s ===" % [
-			Time.get_datetime_string_from_system(),
-			Net.game_settings.get("monkey", true), Settings.player_name])
 	_pop_logged += 1
 	f.store_line(text)
 	if _pop_logged == POP_LOG_MAX:
-		f.store_line("[pop] ...capped at %d lines for this session" % POP_LOG_MAX)
+		f.store_line("[log] ...capped at %d lines for this session" % POP_LOG_MAX)
 	f.close()
+
+
+## Written the moment a body spawns, whether or not anything goes wrong, so a
+## silent log means "played and nothing fired" rather than "never ran".
+func _log_session() -> void:
+	var stamp := FileAccess.get_modified_time("res://Player/player.gd")
+	_log_pop("=== %s  monkey=%s  %s  player.gd built %s ===" % [
+		Time.get_datetime_string_from_system(), Net.game_settings.get("monkey", true),
+		Settings.player_name, Time.get_datetime_string_from_unix_time(int(stamp))])
+
+
+## Where the upward velocity actually comes from. A landing is not this: it ends
+## at rest against the floor, not climbing. This is the frame where you were not
+## going up and suddenly are, which is what reads as being thrown.
+const KICK_MIN := 5.0
+
+func _watch_kick(before: Vector3, restitution: float) -> void:
+	if before.dot(up_direction) > 0.5 or velocity.dot(up_direction) < KICK_MIN:
+		return
+	if _kick_cd > 0.0:
+		return
+	_kick_cd = 0.35
+	var faces := ""
+	for i in get_slide_collision_count():
+		var n := get_slide_collision(i).get_normal()
+		faces += " n(%.2f,%.2f,%.2f)@%.0fdeg" % [
+			n.x, n.y, n.z, rad_to_deg(acos(clampf(n.dot(up_direction), -1.0, 1.0)))]
+	_log_pop("[kick] +%.1f up (was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s  %d faces:%s" % [
+		velocity.dot(up_direction), before.dot(up_direction), before.length(),
+		velocity.length(), restitution, global_position.round(),
+		"ground" if grounded else ("face" if touching else "air"),
+		get_slide_collision_count(), faces])
 
 
 ## Terrain is a mesh of flat triangles, so following it exactly means popping
