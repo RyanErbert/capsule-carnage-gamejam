@@ -10,9 +10,9 @@ const MAX_INVENTORY := 3
 # Ammo granted on pedestal pickup (web game.js:4050). Missing = 0 = single use.
 const PICKUP_AMMO := {"machinegun": 100, "rocket": 3, "bridge_gun": 3, "wall": 3, "ramp": 3,
 	"platform": 3, "terragun": 100, "mines": 3}
-const GRAPPLE_SPEED := 40.0
 # The hook is thrown, not teleported: it flies under gravity like a rocket and
-# only bites when it actually reaches something.
+# only bites when it actually reaches something. Once it bites the rope is an
+# anchor to swing from, not a rail to ride — see Player/player.gd _grapple_swing.
 const HOOK_SPEED := 72.0
 const HOOK_GRAVITY := -9.0
 const HOOK_LIFE := 1.6
@@ -163,6 +163,8 @@ func use_item() -> void:
 	match item:
 		"grapple":
 			if _hook_state != "":
+				is_grappling = false     # click again to let go; the hook reels back
+				_hook_state = "back"
 				return
 			_fire_hook()
 			_use_ammo()

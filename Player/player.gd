@@ -12,23 +12,29 @@ const FLOOR_FRICTION := 6.0       # approximates cannon ground contact friction 
 const GRAVITY := 20.0             # web world gravity (not the project default 9.8)
 const BOOST_MULT := 2.0           # what a full boost slider adds on top of walking
 
-# --- Ground handling (shared by every movement mode) ---
-# A hillside gets steeper by degrees and the handling has to follow it by
-# degrees, or the ground drops out from under you at one particular angle:
-#   up to FLOOR_ANGLE   you stand on it and steer it
-#   up to RIDE_MIN_Y    you no longer stand, but you still roll on the face
-#   past that           it is a wall: it stops you, and in monkey ball it bounces
-const FLOOR_ANGLE := 58.0    # degrees still counted as ground, not wall
-const RIDE_MIN_Y := 0.28     # 74 degrees: past this a face is a wall, not a ride
-const GROUND_SNAP := 0.9     # ground this far under a lost floor still holds you
-const SNAP_MAX_UP := 7.0     # rising faster than this is a jump, never a crest
-const SLOPE_PULL := 1.0      # gravity in the plane of the slope, in full
-const LAUNCH_MAX := 20.0     # ceiling on the throw a lip can give you
-const CLIMB_RISE := 30.0     # how fast the measured climb rate tracks the ramp
-const CLIMB_FADE := 18.0     # ...and how slowly it forgets, in m/s per second
+# --- Contact, which is all there is instead of floor and wall ---------------
+# There is no wall. The body runs in MOTION_MODE_FLOATING, where Godot has no
+# floor, no wall and no ceiling: it never flattens the velocity, never snaps,
+# and never cancels a run into a slope. Contact is ours, and it is one rule at
+# every angle — A SURFACE CAN PUSH, IT CAN NEVER PULL. Holding you up on the
+# flat, accelerating you downhill, throwing you off a lip and stopping you dead
+# against something vertical are all that one line plus ordinary gravity, so
+# nothing whatsoever happens at 45 degrees, or 58, or any other number.
+#
+# GROUND_ANGLE survives only as a LABEL, for the handful of things that really
+# do need one: jumping, idle friction, the rolling animation.
+const GROUND_ANGLE := 58.0   # degrees flat enough to call yourself standing
+const GROUND_SNAP := 0.9     # ground this far under a lost contact still holds you
+const SNAP_MAX_UP := 9.0     # rising faster than this is a throw, never a crest
 const SLOPE_CAP_Y := 0.95    # steeper than 18 degrees and a walk becomes a ride
 const SLOPE_CAP_MULT := 3.0  # ...which may carry this far past run speed, no further
 const TURN_RATE := 4.0       # how fast momentum swings onto a new heading
+
+# --- Grapple: the hook is an anchor, not a destination ---
+const GRAPPLE_PULL := 26.0   # how hard the rope hauls you along its own line
+const GRAPPLE_REEL := 2.0    # ...and how fast it shortens while you hold on
+const GRAPPLE_TAUT := 45.0   # the snap back when a swing tries to stretch it
+const GRAPPLE_MIN := 1.6     # arrived: any closer and it lets go on its own
 const MB_TURN_RATE := 1.6    # ...and the same in monkey ball, where drift is the point
 
 # --- Jump charge system (web §3.4) ---
@@ -99,7 +105,11 @@ var dead_timer := 0.0
 var _no_snap := 0.0           # seconds left where the ground may not grab us back
 var riding := false           # inside a channel: its wall is our floor (§4.4)
 var _builds: Node
-var _climb := 0.0             # how fast the ground itself is lifting us, m/s
+var touching := false         # in contact with a surface, at any angle at all
+var grounded := false         # ...and it is flat enough to stand on and jump from
+var _surf_n := Vector3.UP     # the most supporting surface we are touching
+var _rope_len := 0.0          # what the grapple was paid out to when it bit
+var _jump_eaten := false      # the press that let go of a rope must not jump
 
 
 func respawn_point() -> Vector3:
@@ -125,17 +135,15 @@ var _shell: Node3D    # the glass marble, when we're not playing the cube
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	# Ground the engine will actually hold you to. The defaults call anything
-	# past 45 degrees a wall, which is what had a rolling ball popping into the
-	# air every time it crossed a seam between two terrain triangles.
-	floor_max_angle = deg_to_rad(FLOOR_ANGLE)
-	floor_snap_length = GROUND_SNAP
-	floor_block_on_wall = false
-	# Without this, Godot re-slides the velocity onto the surface on every
-	# grounded frame, and a body working its way up a ramp bleeds speed to the
-	# geometry rather than to gravity. With it on, the only thing that slows a
-	# climb is the in-plane gravity the movement code applies itself.
-	floor_constant_speed = true
+	# No floor, no wall, no ceiling — see the contact block at the top. Godot's
+	# grounded mode DELETES the vertical velocity of anything it decides is
+	# standing on a floor (measured: a body on a 70 degree face slid 0.15 m in a
+	# whole second and ended at vy 0.00), which is what forces a threshold angle
+	# to exist at all. Floating mode has no such opinion, so neither do we.
+	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
+	# Floating mode still refuses to slide along anything it meets closer to
+	# head-on than this, and stops dead instead. A marble always slides.
+	wall_min_slide_angle = 0.0
 	safe_margin = 0.02
 	spawn_position = global_position
 	if devInfoLabel:
@@ -162,6 +170,7 @@ func _ready() -> void:
 ## under it: a channel's wall is only "down" while you are actually riding.
 func _stand_up() -> void:
 	riding = false
+	_rope_len = 0.0
 	up_direction = Vector3.UP
 
 
@@ -283,12 +292,14 @@ func set_piloting(on: bool) -> void:
 ## While the god-mode DRONE is out, the body just stands here — under
 ## gravity, physical, and fully vulnerable. No input reaches it.
 func _god_idle(delta: float) -> void:
-	if not is_on_floor():
-		velocity.y -= GRAVITY * delta
+	velocity.y -= GRAVITY * delta
 	var damp := exp(-FLOOR_FRICTION * delta)
 	velocity.x *= damp
 	velocity.z *= damp
+	var was_touching := touching
 	move_and_slide()
+	_resolve_contact()
+	_stick(was_touching)
 
 
 func _physics_process(delta: float) -> void:
@@ -308,7 +319,7 @@ func _physics_process(delta: float) -> void:
 		return
 
 	var now := Time.get_ticks_msec() / 1000.0
-	if is_on_floor():
+	if grounded:
 		last_grounded_time = now
 
 	# --- Input (camera-relative, like the web's camera.getWorldDirection) ---
@@ -377,17 +388,10 @@ func _physics_process(delta: float) -> void:
 		velocity.z *= damp
 
 		# --- Ground friction when idle (approximates contact friction 0.7) ---
-		if is_on_floor() and input_mag == 0.0:
+		if grounded and input_mag == 0.0:
 			var floor_damp := exp(-FLOOR_FRICTION * delta)
 			velocity.x *= floor_damp
 			velocity.z *= floor_damp
-
-		# --- Marble slide: a slope too steep to walk plays like a marble run.
-		# Gravity's in-plane component accelerates you downslope, and the soft
-		# cap rides up so the momentum CARRIES at the bottom instead of being
-		# clipped back to run speed.
-		var marble_n := get_wall_normal() if not is_on_floor() and is_on_wall() else Vector3.ZERO
-		var marbling := marble_n.y > RIDE_MIN_Y and marble_n.y < 0.95
 
 		# --- Soft speed cap (web §3.2 — keep the lerp; explosions/pads push past it) ---
 		var cap_target := MAX_SPEED * spd * boost
@@ -397,29 +401,22 @@ func _physics_process(delta: float) -> void:
 		# carry, so a trough gives the speed back at the bottom. It opens only
 		# so far, though — a long descent used to ratchet this with no ceiling
 		# and hand back speeds nothing else in the game could match.
-		if marbling or _on_slope(SLOPE_CAP_Y):
+		if touching and _surf_n.y < SLOPE_CAP_Y:
 			speed_cap = maxf(speed_cap, minf(h_vel.length(), cap_target * SLOPE_CAP_MULT))
 		if h_vel.length() > speed_cap and not grappling:  # web: grapple bypasses the cap
 			h_vel = h_vel.normalized() * speed_cap
 			velocity.x = h_vel.x
 			velocity.z = h_vel.y
 
-		# --- Gravity ---
-		if not is_on_floor():
-			velocity.y -= GRAVITY * grv * delta
-		if marbling:
-			var down_slope := Vector3.DOWN - marble_n * Vector3.DOWN.dot(marble_n)
-			velocity += down_slope * GRAVITY * grv * 0.8 * delta
-		_ride_slope(delta, grv)
+		# --- Gravity, whole and unconditional. The contact takes back exactly
+		# the part of it the ground is holding up, and what survives is the run
+		# downhill — at every angle, with no case for any of them.
+		velocity.y -= GRAVITY * grv * delta
 
 		_charge_jump(delta, typing, jmp, now)
 
-	# --- Floor snap: off while ascending so jumps aren't eaten ---
-	floor_snap_length = 0.0 if velocity.dot(up_direction) > 0.0 or _no_snap > 0.0 \
-		else GROUND_SNAP
-
 	# --- Fall respawn (web §1.10: >10 s falling → random spawn) ---
-	if not is_on_floor() and velocity.y < 0.0:
+	if not touching and velocity.y < 0.0:
 		air_time += delta
 		if air_time > FALL_RESPAWN_AIRTIME:
 			global_position = respawn_point()
@@ -428,14 +425,17 @@ func _physics_process(delta: float) -> void:
 	else:
 		air_time = 0.0
 
-	# --- Grapple (web §4.8): velocity set directly to dir*40, all axes; ---
-	# release when close (<2), on jump press, or with a buffered jump.
+	# --- Grapple (web §4.8, rewritten): a rope, not a rail ---
 	if grappling:
-		var to_target: Vector3 = _items.grapple_target - global_position
-		if to_target.length() < 2.0 or (not typing and Input.is_action_pressed("jump")) or jump_buffer > 0.0:
+		if not typing and Input.is_action_pressed("jump"):
 			_items.is_grappling = false
+			_jump_eaten = true       # this press let go; it does not also jump
+			jump_buffer = 0.0
+			charging_jump = false
 		else:
-			velocity = to_target.normalized() * _items.GRAPPLE_SPEED
+			_grapple_swing(delta)
+	elif _rope_len > 0.0:
+		_rope_len = 0.0
 
 	# --- Roundcube ball morph while sprinting (web updateSprintMorph) ---
 	if use_cube and _cube_visual:
@@ -446,36 +446,21 @@ func _physics_process(delta: float) -> void:
 		# Roll with movement like the web's cannon body did: rolling without
 		# slipping, ω = v/r around the axis perpendicular to travel.
 		var h_roll := Vector3(velocity.x, 0.0, velocity.z)
-		if h_roll.length() > 0.3 and is_on_floor():
+		if h_roll.length() > 0.3 and grounded:
 			var axis := Vector3.UP.cross(h_roll.normalized()).normalized()
 			_cube_visual.global_rotate(axis, (h_roll.length() / 0.5) * delta)
-	elif _shell and is_on_floor():
+	elif _shell and touching:
 		_shell.roll(velocity, delta)
 
-	var was_floor := is_on_floor()
-	var pre_pos := global_position
+	var was_touching := touching
 	var pre_vel := velocity
-	var pre_n := get_floor_normal() if was_floor else up_direction
+	var pre_n := _surf_n
 	move_and_slide()
-	_mount_steep(was_floor, pre_vel, pre_n)
-	# How fast the ground is actually lifting us. A ramp raises you by MOVING
-	# you, never by giving you upward velocity — move_and_slide deletes that on
-	# every grounded frame — so this measurement is the only honest record of
-	# what the slope gave, and the only number that can hand it back at the lip
-	# without inventing energy out of the geometry.
-	#
-	# It rises with the ramp and fades slowly. An average that tracked both ways
-	# got dragged to nothing by the two or three frames where you are already
-	# past the lip but the snap has not let go yet — precisely when it is read.
-	var lift := (global_position - pre_pos).dot(up_direction) / maxf(delta, 0.0001)
-	var target := lift if was_floor else 0.0
-	if target >= _climb:
-		_climb = lerpf(_climb, target, minf(1.0, CLIMB_RISE * delta))
-	else:
-		_climb = maxf(target, _climb - CLIMB_FADE * delta)
-	_settle_ground(was_floor)
-	if bool(Net.game_settings.get("monkey", true)):
-		_monkey_bounce(pre_vel)
+	# Floating mode slides the MOTION but leaves the velocity alone, so the
+	# whole of contact is this call. Hitting a face too steep to hold gives some
+	# of the impact back instead of just eating it.
+	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n))
+	_stick(was_touching)
 
 
 # --- Channel riding (Items/builds.gd §4.4) ----------------------------------
@@ -527,10 +512,6 @@ func launched(secs := 0.3) -> void:
 	_no_snap = maxf(_no_snap, secs)
 
 
-func _on_slope(min_y := 0.985) -> bool:
-	return is_on_floor() and get_floor_normal().y < min_y
-
-
 ## Swing the momentum you already carry onto the heading you are asking for.
 ## Without this a ball at speed can only turn as fast as the accel can cancel
 ## what it had, which reads as stiff no matter how strong the accel is.
@@ -551,111 +532,88 @@ func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
 	velocity.z = swung.z
 
 
-## Gravity in the plane of the ground you are standing on. A trough takes speed
-## off you on the way up and hands it back on the way down, which is the whole
-## reason a fully-carved half-pipe can throw you over the lip.
-func _ride_slope(delta: float, grv: float) -> void:
-	if not _on_slope():
-		return
-	var n := get_floor_normal()
-	velocity += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * GRAVITY * grv * SLOPE_PULL * delta
-
-
-## The moment a grounded body meets anything past floor_max_angle, Godot cancels
-## the WHOLE component of the velocity pointing into it — right for a walker
-## meeting a wall, and a dead stop for a ball rolling up a hillside that has
-## merely got steeper than FLOOR_ANGLE. It cost 22 m/s in a single frame on a
-## curve that only steepens by a degree per metre.
+## Everything the ground does to you, in one rule at every angle: a surface can
+## push, it can never pull. Whatever part of the velocity is driving into a face
+## is the part that face cancels — and what is left over is the slide.
 ##
-## So mount it instead. Anything still shallow enough to ride takes the speed
-## onto its face and we go up it as a body in contact, with gravity doing what
-## gravity does. Nothing special happens at 58 degrees, or at any other angle:
-## the hillside just keeps steepening until it is a wall.
-func _mount_steep(was_floor: bool, pre_vel: Vector3, pre_n: Vector3) -> void:
-	# Only a body Godot considers grounded gets its velocity cancelled like
-	# this. In the air an ordinary slide is already the right answer, and the
-	# rebuild below would turn a fall into a climb.
-	if not was_floor or _no_snap > 0.0:
-		return
-	var speed := pre_vel.length()
-	# A quarter of the speed gone inside one frame is 1300 m/s2. No force in the
-	# game does that; only the wall cancel does.
-	if speed < 2.0 or velocity.length() > speed * 0.75:
-		return
-	# The face that stopped us is the one Godot called a wall. It does not turn
-	# up among the slide collisions — those report the floor we were riding —
-	# so ask for it by name.
-	var faces: Array[Vector3] = []
-	if is_on_wall():
-		faces.append(get_wall_normal())
+## That single line replaces floor_max_angle, the wall cancel, the velocity
+## flattening, constant floor speed, the ramp launch and the mount. Gravity is
+## applied whole and unconditionally by every movement mode; on the flat this
+## takes all of it, on a slope it takes the normal part and leaves g·sin(angle)
+## running downhill, and at a lip there is nothing to take so you simply carry
+## on. Nobody has to know what angle anything is.
+##
+## `restitution` is how much the surface hands BACK on top of that — 0 for
+## ordinary contact, more for a face hit too hard to hold (monkey ball).
+func _resolve_contact(restitution := 0.0) -> void:
+	touching = false
+	var best := -2.0
 	for i in get_slide_collision_count():
-		faces.append(get_slide_collision(i).get_normal())
-	# The velocity we were handed points the wrong way: every grounded frame
-	# flattens it onto the horizontal. Only its LENGTH survives that, so put it
-	# back up the slope we were actually riding before turning it onto the new
-	# face. Then a hillside that steepens smoothly costs nothing, while running
-	# flat out into a sudden kink still sheds what the kink takes.
-	var real := pre_vel - pre_n * pre_vel.dot(pre_n)
-	real = real.normalized() * speed if real.length() > 0.001 else pre_vel
-	for n in faces:
-		var up_dot := n.dot(up_direction)
-		if up_dot >= cos(deg_to_rad(FLOOR_ANGLE)) or up_dot <= RIDE_MIN_Y:
-			continue                 # a floor we can hold, or a wall we cannot
-		var along := real - n * real.dot(n)
-		if along.length() < 0.5:
-			continue
-		velocity = along
-		floor_snap_length = 0.0
-		launched(0.1)                # the snap must not reel us straight back down
+		var n := get_slide_collision(i).get_normal()
+		var into := velocity.dot(n)
+		if into < 0.0:
+			velocity -= n * (into * (1.0 + restitution))
+		touching = true
+		var d := n.dot(up_direction)
+		if d > best:
+			best = d
+			_surf_n = n
+	if not touching:
+		grounded = false
+		_surf_n = up_direction
 		return
+	grounded = best > cos(deg_to_rad(GROUND_ANGLE))
 
 
-## Off the lip, hand back exactly the climb the ramp was measured to have. It
-## used to be reconstructed as |h|·tan t from the last floor normal, which is
-## the same number only if |velocity| is the horizontal speed — it is the speed
-## ALONG the surface, so that overpaid by 1/cos t, and at the steep end of
-## FLOOR_ANGLE it overpaid by nearly double. Measuring the lift cannot do that.
-func _ramp_launch() -> void:
-	if _climb < 1.5:
-		return                       # flat ground, or too slow to be a launch
-	velocity += up_direction * minf(_climb, LAUNCH_MAX)
-	_climb = 0.0
-	launched(0.2)
-
-
-## Crossing the crest of a ramp must not throw you; leaving the lip of a
-## half-pipe must; and rolling into a face too steep to stand on must do
-## neither. Only open air past the lip is a launch — treating a steep face as
-## one is what made a gradual cliffside throw you into the sky on every pass.
-func _settle_ground(was_floor: bool) -> void:
-	if is_on_floor() or not was_floor or _no_snap > 0.0 \
+## Terrain is a mesh of flat triangles, so following it exactly means popping
+## into the air at every seam. If there is surface within reach underneath, take
+## it — and take the velocity onto it too, which is the same push-never-pull
+## rule applied to a contact we went looking for. Anything that deliberately
+## threw us (a jump, a pad, a blast, a rope) says so with launched().
+func _stick(was_touching: bool) -> void:
+	if touching or not was_touching or _no_snap > 0.0 \
 			or velocity.dot(up_direction) > SNAP_MAX_UP:
 		return
 	var down := -up_direction
-	var floor_dot := cos(deg_to_rad(FLOOR_ANGLE))
-	# Probe where we are ABOUT to be, not where we are. A crest still has deck
-	# in front of it and a lip has nothing, and that is the whole difference
-	# between being reeled back down and being thrown.
-	var h := velocity - up_direction * velocity.dot(up_direction)
-	var ahead := global_transform
-	if h.length() > 1.0:
-		ahead = ahead.translated(h.normalized() * clampf(h.length() * 0.05, 0.35, 1.2))
-	var probe := KinematicCollision3D.new()
-	if not test_move(ahead, down * GROUND_SNAP, probe):
-		_ramp_launch()   # nothing ahead: the ramp ran out and the climb carries
-		return
-	if probe.get_normal().dot(up_direction) < floor_dot:
-		return           # a steeper face is a hill to keep climbing, not a lip
 	var hit := KinematicCollision3D.new()
-	if not test_move(global_transform, down * GROUND_SNAP, hit) \
-			or hit.get_normal().dot(up_direction) < floor_dot:
-		return
+	if not test_move(global_transform, down * GROUND_SNAP, hit):
+		return                       # genuinely off the end of something
+	if hit.get_normal().dot(up_direction) < cos(deg_to_rad(GROUND_ANGLE)):
+		return                       # too steep to be worth reeling us onto
 	global_position += down * hit.get_travel().length()
 	var n := hit.get_normal()
-	var speed := velocity.length()
-	var along := velocity - n * velocity.dot(n)
-	velocity = along.normalized() * speed if along.length() > 0.001 else Vector3.ZERO
-	apply_floor_snap()
+	var into := velocity.dot(n)
+	if into < 0.0:
+		velocity -= n * into
+	touching = true
+	grounded = true
+	_surf_n = n
+
+
+## A hook that has bitten is an anchor, not a destination. Gravity and the
+## momentum you arrived with keep running; the rope only adds a pull along its
+## own line, and it refuses to stretch. So a hook thrown past a corner swings
+## you around it, and letting go at the bottom of the arc keeps every bit of
+## the speed the swing built.
+func _grapple_swing(delta: float) -> void:
+	var to: Vector3 = _items.grapple_target - global_position
+	var dist := to.length()
+	# Arrived, either by swinging in or by reeling the rope all the way home.
+	if dist < GRAPPLE_MIN or (_rope_len > 0.0 and _rope_len <= GRAPPLE_MIN):
+		_items.is_grappling = false
+		return
+	if _rope_len <= 0.0:
+		_rope_len = dist
+	var dir := to / dist
+	velocity += dir * GRAPPLE_PULL * delta
+	_rope_len = maxf(GRAPPLE_MIN, minf(_rope_len, dist) - GRAPPLE_REEL * delta)
+	if dist > _rope_len:
+		var out := -velocity.dot(dir)
+		if out > 0.0:
+			velocity += dir * out          # a rope pulls; it never pushes
+		velocity += dir * (dist - _rope_len) * GRAPPLE_TAUT * delta
+	launched(0.1)                          # the ground may not glue a swing down
+	speed_cap = maxf(speed_cap, Vector2(velocity.x, velocity.z).length())
 
 
 ## Leave the ground. Standing on the world it is a plain vertical set, the way
@@ -672,6 +630,15 @@ func _jump_impulse(speed: float) -> void:
 func _charge_jump(delta: float, typing: bool, jmp: float, now: float) -> void:
 	jump_cooldown = maxf(0.0, jump_cooldown - delta)
 	jump_buffer = maxf(0.0, jump_buffer - delta)
+	# A press spent letting go of the grapple is spent: it may not charge a jump
+	# on the way out, and it may not sit in the buffer waiting to fire on landing.
+	if _jump_eaten:
+		if not Input.is_action_pressed("jump"):
+			_jump_eaten = false
+		charging_jump = false
+		jump_charge = 1.0
+		jump_buffer = 0.0
+		return
 	var can_jump := (now - last_grounded_time) < COYOTE_TIME
 
 	if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
@@ -694,7 +661,7 @@ func _charge_jump(delta: float, typing: bool, jmp: float, now: float) -> void:
 		jump_charge = 1.0
 
 	# Buffered jump fires flat on landing (web: velocity.y = 8, 1 s cooldown)
-	if jump_buffer > 0.0 and is_on_floor() and jump_cooldown <= 0.0:
+	if jump_buffer > 0.0 and grounded and jump_cooldown <= 0.0:
 		_jump_impulse(JUMP_IMPULSE * jmp)
 		jump_cooldown = 1.0
 		jump_cooldown_max = 1.0
@@ -722,20 +689,6 @@ const MB_BOUNCE_MIN := 9.0 # ...and how hard you have to hit it before it does
 func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 		acc: float, trn: float, boost: float, grv: float, jmp: float, now: float) -> void:
 	var g := GRAVITY * grv
-	var grounded := is_on_floor()
-	var n := get_floor_normal() if grounded else Vector3.UP
-	if n.length_squared() < 0.5:
-		n = Vector3.UP
-	# A hill too steep to stand on is still a hill to roll on. Without this the
-	# floor drops out from under you at one exact angle and the ball goes into
-	# freefall against a face it is plainly still touching, which is what made
-	# climbing a gradual cliffside feel like hitting a cliff.
-	var facing := false
-	if not grounded and is_on_wall():
-		var wn := get_wall_normal()
-		if wn.y > RIDE_MIN_Y and wn.y < 0.95:
-			n = wn
-			facing = true
 	_steer(delta, wish_dir, MB_TURN_RATE * trn)
 	var lean := wish_dir.length()
 	var accel := Vector3.ZERO
@@ -744,18 +697,18 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 		# stick, so that is where a speed boost has to live.
 		var tilt := minf(1.4, MB_TILT * lean * boost)
 		accel = (wish_dir / lean) * (MB_ROLL * g * sin(tilt) * acc)
-	if grounded:
-		accel -= n * accel.dot(n)               # the lean rides the floor plane
-		accel += (Vector3.DOWN - n * Vector3.DOWN.dot(n)) * (MB_ROLL * g)
-	elif facing:
-		accel -= n * accel.dot(n)   # still gripping, so the lean keeps its full say
-		velocity.y -= g * delta     # ...and the slide down the face is gravity's
+	if touching:
+		accel -= _surf_n * accel.dot(_surf_n)   # the lean rides whatever face it is
 	else:
 		accel *= MB_AIR
-		velocity.y -= g * delta
 	velocity += accel * delta
+	# Gravity entire, at every angle. A ball in contact is rolling, not sliding,
+	# so it answers to 5/7 of it — the rest is going into the spin. The contact
+	# takes back whatever the surface is holding up and leaves the run downhill,
+	# which is why there is no slope case here at all.
+	velocity.y -= g * (MB_ROLL if touching else 1.0) * delta
 
-	if grounded or facing:
+	if touching:
 		var damp := exp(-MB_DRAG * delta)
 		velocity.x *= damp
 		velocity.z *= damp
@@ -771,24 +724,27 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 
 
 ## Roll into a face the ball has no chance of holding — a kerb, the side of a
-## ramp, a wall you met at an angle — and it kicks back at you with sparks,
-## instead of the silent full stop a slide gives you. Anything shallower than
-## RIDE_MIN_Y is a face you can still roll on, so it gets ridden, not bounced.
-func _monkey_bounce(pre_vel: Vector3) -> void:
-	var floor_n := get_floor_normal() if is_on_floor() else up_direction
+## ramp, a wall met at an angle — and it kicks back at you with sparks instead
+## of just eating the speed. This decides how much the contact hands back; the
+## contact itself does the giving. It is about the IMPACT, not about angles in
+## the world: what matters is how sharply this face turns away from the one you
+## were already riding, and how hard you arrived.
+func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> float:
+	if not was_touching or not bool(Net.game_settings.get("monkey", true)):
+		return 0.0
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
 		var n := c.get_normal()
-		if n.dot(floor_n) > 0.72 or n.dot(up_direction) > RIDE_MIN_Y:
-			continue                       # riding it, one way or the other
+		if n.dot(pre_n) > 0.72:
+			continue                       # the same surface, near enough
 		var hit_speed := -pre_vel.dot(n)   # how much of the run went into the face
 		if hit_speed < MB_BOUNCE_MIN:
 			continue
-		velocity += n * (hit_speed * MB_BOUNCE)
 		launched(0.12)
 		Sfx.boost(c.get_position(), 0.35)
 		_sparks(c.get_position(), n)
-		return
+		return MB_BOUNCE
+	return 0.0
 
 
 func _sparks(at: Vector3, n: Vector3) -> void:
@@ -826,22 +782,23 @@ func _sparks(at: Vector3, n: Vector3) -> void:
 func _source_step(delta: float, wish_dir: Vector3, typing: bool) -> void:
 	charging_jump = false
 	jump_cooldown = maxf(0.0, jump_cooldown - delta)
-	if not is_on_floor():
-		velocity.y -= SRC_GRAVITY * delta
-	elif not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
-		velocity.y = SRC_JUMP
-		jump_cooldown = 0.1  # debounce so one landing = one hop
-		jump_cooldown_max = 0.1
-		Sfx.jump(global_position)
-		Net.emit_event("jump")
-	else:
-		_source_friction(delta)
+	velocity.y -= SRC_GRAVITY * delta
+	if grounded:
+		if not typing and Input.is_action_pressed("jump") and jump_cooldown <= 0.0:
+			velocity.y = SRC_JUMP
+			jump_cooldown = 0.1  # debounce so one landing = one hop
+			jump_cooldown_max = 0.1
+			launched()
+			Sfx.jump(global_position)
+			Net.emit_event("jump")
+		else:
+			_source_friction(delta)
 
 	var maxspeed := SRC_RUNSPEED if sprinting else SRC_WALKSPEED
 	var wish_speed := wish_dir.length() * maxspeed
 	if wish_speed > 0.001:
 		var dirn := wish_dir.normalized()
-		if is_on_floor():
+		if grounded:
 			_source_accelerate(dirn, wish_speed, wish_speed, SRC_ACCEL, delta)
 		else:
 			_source_accelerate(dirn, wish_speed, SRC_AIRCAP, SRC_AIRACCEL, delta)
