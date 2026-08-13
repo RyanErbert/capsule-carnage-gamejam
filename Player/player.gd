@@ -108,6 +108,7 @@ var _builds: Node
 var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
+var _pop_cd := 0.0            # rate limit on the ejection report
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
 var _jump_eaten := false      # the press that let go of a rope must not jump
 
@@ -453,6 +454,7 @@ func _physics_process(delta: float) -> void:
 		_shell.roll(velocity, delta)
 
 	var was_touching := touching
+	var pre_pos := global_position
 	var pre_vel := velocity
 	var pre_n := _surf_n
 	move_and_slide()
@@ -460,6 +462,7 @@ func _physics_process(delta: float) -> void:
 	# whole of contact is this call. Hitting a face too steep to hold gives some
 	# of the impact back instead of just eating it.
 	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n))
+	_curb_ejection(pre_pos, pre_vel, delta)
 	_stick(was_touching)
 
 
@@ -563,6 +566,37 @@ func _resolve_contact(restitution := 0.0) -> void:
 		_surf_n = up_direction
 		return
 	grounded = best > cos(deg_to_rad(GROUND_ANGLE))
+
+
+## A body that is already overlapping geometry gets shoved back out, and that
+## shove is not something the player earned — it is the one thing that can move
+## you further in a frame than your own velocity allows. Sliding cannot: the
+## most a collision can take off your intended motion is the motion itself, so
+## |displacement - velocity*dt| <= |velocity|*dt on every honest frame. Past
+## that is depenetration, and it is what reads as being teleported up a few
+## units, dropped, and teleported again. Let it out at a trickle instead: deep
+## overlaps still escape, over several frames rather than in one jump.
+const EJECT_SLACK := 0.05    # metres per frame of numerical give
+
+func _curb_ejection(pre_pos: Vector3, pre_vel: Vector3, delta: float) -> void:
+	var resid := (global_position - pre_pos) - pre_vel * delta
+	var over := resid.length()
+	var allowed := pre_vel.length() * delta + EJECT_SLACK
+	if over <= allowed:
+		return
+	global_position -= resid * (1.0 - allowed / over)
+	_pop_cd -= delta
+	if _pop_cd > 0.0:
+		return
+	_pop_cd = 0.5
+	var who := ""
+	for i in get_slide_collision_count():
+		var c: Object = get_slide_collision(i).get_collider()
+		if c:
+			who += " %s(%s)" % [c.name, c.get_class()]
+	print("[pop] solver ejected %.2f m (allowed %.2f) at %v  dir(%.2f,%.2f,%.2f)  hit:%s" % [
+		over, allowed, global_position.round(),
+		resid.x / over, resid.y / over, resid.z / over, who])
 
 
 ## Terrain is a mesh of flat triangles, so following it exactly means popping
