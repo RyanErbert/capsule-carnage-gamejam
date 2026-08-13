@@ -12,6 +12,13 @@ const HIT_RADIUS := 1.5        # bullet hit sphere
 const ROCKET_FUSE := 1.2       # rocket proximity + mine trigger distance
 const COIN_COLLECT_DIST := 1.5
 const COIN_GRAVITY := -20.0
+# The web game's ground WAS the plane y=0, so a shot passing below it had
+# obviously hit the world. This one has a basement at [-16,-8] and a ground
+# layer at [-8,0], so the whole subterranean half of the map is under y=0 and
+# that test detonated a rocket on the frame it was fired. Real geometry is what
+# stops a shot now; this is only the floor of the world, for anything that
+# misses everything and keeps going.
+const WORLD_FLOOR := -34.0
 
 # Weapon terrain damage (Creative level — no-ops when there's no voxel field)
 const ROCKET_CRATER := 5.0
@@ -366,7 +373,7 @@ func _physics_process(delta: float) -> void:
 		var vel: Vector3 = b["vel"]
 		b["pos"] += vel * delta
 		b["node"].position = b["pos"]
-		var hit: bool = b["pos"].y < 0.0
+		var hit: bool = b["pos"].y < WORLD_FLOOR
 		if not hit:
 			var rh := _ray_hit(b["pos"], vel.normalized(), vel.length() * delta + 0.1)
 			if rh:
@@ -426,7 +433,7 @@ func _physics_process(delta: float) -> void:
 		# look_at errors out when the direction is parallel to the up vector
 		if rvel.length() > 0.01 and absf(rvel.normalized().dot(Vector3.UP)) < 0.999:
 			rnode.look_at(r["pos"] + rvel)
-		var boom: bool = r["pos"].y < 0.0 \
+		var boom: bool = r["pos"].y < WORLD_FLOOR \
 			or not _ray_hit(r["pos"], rvel.normalized(), rvel.length() * delta + 0.5).is_empty() \
 			or not _ray_hit(r["pos"], Vector3.DOWN, 0.5).is_empty()
 		if not boom:
