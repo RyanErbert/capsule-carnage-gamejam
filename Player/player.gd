@@ -111,6 +111,11 @@ var _surf_n := Vector3.UP     # the most supporting surface we are touching
 var _pop_cd := 0.0            # rate limit on the ejection report
 var _bounce_cd := 0.0         # so one hard face cannot kick you over and over
 var _kick_cd := 0.0           # rate limit on the upward-velocity report
+var _loop_age := 0.0          # how long the current bouncing-on-the-spot window is
+var _loop_takeoffs := 0       # ...and how many times we have left the ground in it
+var _loop_gain := 0.0
+var _loop_cd := 0.0
+var _stick_cd := 0.0          # rate limit on the ground-snap report
 var _pop_total := 0           # ...and how many there have been in total
 var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
@@ -365,6 +370,8 @@ func _physics_process(delta: float) -> void:
 	_no_snap = maxf(0.0, _no_snap - delta)
 	_bounce_cd = maxf(0.0, _bounce_cd - delta)
 	_kick_cd = maxf(0.0, _kick_cd - delta)
+	_loop_cd = maxf(0.0, _loop_cd - delta)
+	_stick_cd = maxf(0.0, _stick_cd - delta)
 
 	# Riding a channel replaces every other movement mode while it lasts: down
 	# is the trough's wall, not the world's floor.
@@ -461,6 +468,7 @@ func _physics_process(delta: float) -> void:
 		_shell.roll(velocity, delta)
 
 	var was_touching := touching
+	var was_grounded := grounded
 	var pre_pos := global_position
 	var pre_vel := velocity
 	var pre_n := _surf_n
@@ -471,6 +479,7 @@ func _physics_process(delta: float) -> void:
 	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n))
 	_curb_ejection(pre_pos, pre_vel, delta)
 	_stick(was_touching)
+	_watch_loop(delta, was_grounded)
 
 
 # --- Channel riding (Items/builds.gd §4.4) ----------------------------------
@@ -645,7 +654,7 @@ func _log_session() -> void:
 ## Where the upward velocity actually comes from. A landing is not this: it ends
 ## at rest against the floor, not climbing. This is the frame where you were not
 ## going up and suddenly are, which is what reads as being thrown.
-const KICK_MIN := 5.0
+const KICK_MIN := 2.5
 
 func _watch_kick(before: Vector3, restitution: float) -> void:
 	if before.dot(up_direction) > 0.5 or velocity.dot(up_direction) < KICK_MIN:
@@ -653,16 +662,50 @@ func _watch_kick(before: Vector3, restitution: float) -> void:
 	if _kick_cd > 0.0:
 		return
 	_kick_cd = 0.35
-	var faces := ""
-	for i in get_slide_collision_count():
-		var n := get_slide_collision(i).get_normal()
-		faces += " n(%.2f,%.2f,%.2f)@%.0fdeg" % [
-			n.x, n.y, n.z, rad_to_deg(acos(clampf(n.dot(up_direction), -1.0, 1.0)))]
-	_log_pop("[kick] +%.1f up (was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s  %d faces:%s" % [
+	_log_pop("[kick] +%.1f up (was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s%s" % [
 		velocity.dot(up_direction), before.dot(up_direction), before.length(),
 		velocity.length(), restitution, global_position.round(),
-		"ground" if grounded else ("face" if touching else "air"),
-		get_slide_collision_count(), faces])
+		"ground" if grounded else ("face" if touching else "air"), _contact_report()])
+
+
+## Every face we are touching, its angle from upright, and the node it belongs
+## to — which is the difference between "a ramp" and "something overlapping me".
+func _contact_report() -> String:
+	var out := "  %d faces:" % get_slide_collision_count()
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		var n := c.get_normal()
+		var who: Object = c.get_collider()
+		out += " [%.0fdeg n(%.2f,%.2f,%.2f) %s]" % [
+			rad_to_deg(acos(clampf(n.dot(up_direction), -1.0, 1.0))), n.x, n.y, n.z,
+			str((who as Node).get_path()).replace("/root/", "") if who is Node else "?"]
+	return out
+
+
+## Bouncing on the spot. Standing still and leaving the ground over and over is
+## not something the movement code can do on its own, so when it happens, say
+## everything about where we are and what is under us.
+const LOOP_WINDOW := 3.0     # seconds the takeoffs have to fall within
+const LOOP_TAKEOFFS := 3     # ...and how many of them counts as a loop
+const LOOP_STILL := 2.5      # horizontal speed below which we are "not moving"
+
+func _watch_loop(delta: float, was_grounded: bool) -> void:
+	_loop_age += delta
+	if _loop_age > LOOP_WINDOW:
+		_loop_age = 0.0
+		_loop_takeoffs = 0
+		_loop_gain = 0.0
+	if Vector2(velocity.x, velocity.z).length() > LOOP_STILL:
+		_loop_takeoffs = 0        # actually going somewhere: not a loop
+		return
+	if was_grounded and not grounded:
+		_loop_takeoffs += 1
+		_loop_gain = maxf(_loop_gain, velocity.dot(up_direction))
+	if _loop_takeoffs < LOOP_TAKEOFFS or _loop_cd > 0.0:
+		return
+	_loop_cd = 3.0
+	_log_pop("[loop] left the ground %d times in %.1fs while standing still, best +%.1f up, at %v%s" % [
+		_loop_takeoffs, _loop_age, _loop_gain, global_position.round(), _contact_report()])
 
 
 ## Terrain is a mesh of flat triangles, so following it exactly means popping
@@ -680,7 +723,8 @@ func _stick(was_touching: bool) -> void:
 		return                       # genuinely off the end of something
 	if hit.get_normal().dot(up_direction) < cos(deg_to_rad(GROUND_ANGLE)):
 		return                       # too steep to be worth reeling us onto
-	global_position += down * hit.get_travel().length()
+	var drop := hit.get_travel().length()
+	global_position += down * drop
 	var n := hit.get_normal()
 	var into := velocity.dot(n)
 	if into < 0.0:
@@ -688,6 +732,13 @@ func _stick(was_touching: bool) -> void:
 	touching = true
 	grounded = true
 	_surf_n = n
+	# This moves the body without touching its velocity, so it shows up as
+	# neither a pop nor a kick. On a crest it can reel you down most of a metre
+	# in one frame, which on its own would read as being dropped.
+	if drop > 0.25 and _stick_cd <= 0.0:
+		_stick_cd = 0.4
+		_log_pop("[stick] reeled down %.2f m in one frame at %v  |v|%.1f%s" % [
+			drop, global_position.round(), velocity.length(), _contact_report()])
 
 
 ## A hook that has bitten is an anchor, not a destination. Gravity and the
