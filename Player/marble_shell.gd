@@ -23,13 +23,15 @@ const OFFWHITE := Color(0.93, 0.92, 0.87)
 const GLASS_A := 0.34        # how much of the model inside shows through
 const MILK_A := 0.62         # the pale half is frostier, so the seam reads
 
-# Polished, see-through, and lit on both faces — you look through the near side
-# of the ball at the far side of it, so backface culling would hollow it. The
-# object-space height of the fragment picks which half of the glass it is, and
-# because the mesh spins under the shader the seam spins with it.
+# Front faces ONLY. Drawing the inside of the glass as well puts the far half
+# of the shell behind the near half, and the two equator seams line up into
+# what looks like a solid plate lying across the middle of the ball.
+#
+# The object-space height of the fragment picks which half of the glass it is,
+# so the seam spins with the mesh.
 const GLASS_SHADER := "
 shader_type spatial;
-render_mode cull_disabled, blend_mix, specular_schlick_ggx;
+render_mode blend_mix, specular_schlick_ggx;
 uniform vec4 tint : source_color = vec4(1.0);
 uniform vec4 milk : source_color = vec4(1.0);
 uniform float tint_alpha = 0.34;

@@ -665,8 +665,7 @@ function finishEndVote(passed) {
   if (!endVote) return;
   clearTimeout(endVote.timer);
   endVote = null;
-  if (passed) { sysMsg('Ending game.'); endGame(); }
-  else sysMsg('The game keeps going.');
+  if (passed) endGame();
 }
 
 // Auto-populate item pedestals so a fresh round has pickups without anyone
@@ -804,12 +803,9 @@ function openStartVote(id) {
   if (editors.size <= 1) { applyEditVote('generate'); return; }
   startVote = { yes: new Set([id]), no: new Set(), timer: null };
   startVote.timer = setTimeout(() => {
-    sysMsg('Start vote expired.');
     clearStartVote();
   }, START_VOTE_MS);
-  const who = players[id] ? players[id].name : (profiles[id] ? profiles[id].name : 'Someone');
-  sysMsg(`${who} wants to start the game.`);
-  pushStartVote();
+  pushStartVote();   // the bar says START? 1/2 on its own
   checkStartVote();
 }
 
@@ -825,7 +821,6 @@ function checkStartVote() {
   if (!startVote) return;
   const voters = [...editors];
   if (voters.some(id => startVote.no.has(id))) {
-    sysMsg('Start vote failed.');
     clearStartVote();
     return;
   }
@@ -1191,7 +1186,6 @@ function endClaim() {
   for (const id of claim.ids) if (id) claimSpawnFor(id);
   io.emit('spawnZones', spawnZones);
   io.emit('claimState', claimSnapshot());
-  sysMsg('Land divided. Sculpt your own ground, then start the game.');
   clearInterval(claimTimer);
   claimTimer = setInterval(() => {
     if (!claim || claim.phase !== 'edit') return;
@@ -1451,7 +1445,7 @@ io.on('connection', (socket) => {
   socket.on('endClaim', () => {
     if (!claim || claim.phase !== 'claim') return;
     const who = players[socket.id] ? players[socket.id].name : 'Someone';
-    sysMsg(`${who} ended the land grab.`);
+    sysMsg(`${who} ended the grab.`);
     endClaim();
   });
 
@@ -1473,7 +1467,6 @@ io.on('connection', (socket) => {
     // EXCEPT the physics tuning sliders — those stay live in every mode.
     const TUNABLE = ['speedScale', 'jumpScale', 'gravityScale'];
     if (readyIds.size > 0 && gameSettings.mode !== 'build' && !TUNABLE.includes(u.key)) {
-      socket.emit('systemMessage', { text: 'Settings are locked once a game starts. Build mode can change them live.' });
       return;
     }
     const who = players[socket.id] ? players[socket.id].name : 'Someone';
@@ -1492,7 +1485,6 @@ io.on('connection', (socket) => {
       if (!GRID_OPTIONS.some(o => o[0] === w && o[1] === h)) return;
       if (w === gameSettings.gridW && h === gameSettings.gridH) return;
       if (claim) {
-        socket.emit('systemMessage', { text: 'The map size is set for this round.' });
         return;
       }
       gameSettings.gridW = w;
@@ -1757,7 +1749,6 @@ io.on('connection', (socket) => {
     if (p === null || p === undefined) {
       // Spawns are removable, but a map with none has nowhere to put anyone.
       if (Object.keys(spawnZones).length <= 1) {
-        socket.emit('systemMessage', { text: 'The map needs at least one spawn.' });
         return;
       }
       delete spawnZones[socket.id];
@@ -1767,11 +1758,9 @@ io.on('connection', (socket) => {
     const r = Math.max(0, Math.min(gridH() - 1, Math.floor(Number(p.r) || 0)));
     const c = Math.max(0, Math.min(gridW() - 1, Math.floor(Number(p.c) || 0)));
     if (!zoneFree(r, c, socket.id)) {
-      socket.emit('systemMessage', { text: 'That overlaps another spawn zone.' });
       return;
     }
     if (!mayEdit(socket.id, r, c)) {
-      socket.emit('systemMessage', { text: 'Your spawn has to sit on your own ground.' });
       return;
     }
     spawnZones[socket.id] = [r, c];
@@ -1787,7 +1776,6 @@ io.on('connection', (socket) => {
     // that. This also stops a client that missed the claim snapshot (and so
     // still shows a plain painter) from skipping everyone past the editor.
     if (claim && claim.phase === 'claim') {
-      socket.emit('systemMessage', { text: 'End the land grab first.' });
       return;
     }
     openStartVote(socket.id);
@@ -1967,7 +1955,6 @@ io.on('connection', (socket) => {
 
   socket.on('godmodeGive', (item) => {
     if (!gameSettings.selfAssign) {
-      socket.emit('systemMessage', { text: 'Self-assigning items is disabled in game settings.' });
       return;
     }
     socket.emit('itemPickedUp', item);
@@ -2267,7 +2254,7 @@ io.on('connection', (socket) => {
     };
     endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
     const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} wants to end the game. /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
+    sysMsg(`${name} voted end (${endVote.yes.size}/${votesNeeded()}).  /vote yes  /vote no`);
     checkEndVote();
   });
 
@@ -2277,7 +2264,7 @@ io.on('connection', (socket) => {
     if (yes) { endVote.yes.add(socket.id); endVote.no.delete(socket.id); }
     else { endVote.no.add(socket.id); endVote.yes.delete(socket.id); }
     const name = players[socket.id] ? players[socket.id].name : 'Player';
-    sysMsg(`${name} voted ${yes ? 'yes' : 'no'} (${endVote.yes.size}/${votesNeeded()} to end)`);
+    sysMsg(`${name} voted ${yes ? 'yes' : 'no'} (${endVote.yes.size}/${votesNeeded()})`);
     checkEndVote();
   });
 
@@ -2362,7 +2349,7 @@ server.listen(PORT, () => console.log(`Server running at http://localhost:${PORT
 // immediately so everyone reconnects to the new version.
 process.on('SIGTERM', () => {
   console.log('SIGTERM — new deploy going live, disconnecting all sessions');
-  sysMsg('Server updating — you will be reconnected in a few seconds.');
+  sysMsg('Server updating.');
   io.disconnectSockets(true);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
