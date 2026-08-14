@@ -36,6 +36,7 @@ func _ready() -> void:
 	add_to_group("net_sync")
 	Net.socket_connected.connect(_on_socket_connected)
 	Net.socket_disconnected.connect(_on_socket_disconnected)
+	Net.server_outdated.connect(_on_server_outdated)
 	Net.event_received.connect(_on_event)
 	if Net.is_socket_connected():
 		_on_socket_connected()
@@ -52,6 +53,13 @@ func _on_socket_connected() -> void:
 		"model": null,
 		"build": Net.git_commit(),
 	})
+
+
+## An outdated server is being rebuilt under us, so there is nothing to stay
+## connected to. Same teardown as losing the connection: the level, the terrain
+## and everything spawned in it go, and we come back up in the lobby.
+func _on_server_outdated() -> void:
+	_return_to_menu("server is behind, rebuilding")
 
 
 func _on_socket_disconnected() -> void:

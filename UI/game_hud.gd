@@ -54,7 +54,7 @@ func _ready() -> void:
 	_it_label.visible = false
 	_scoreboard.visible = false
 	_update_banner.visible = false
-	_version_label.text = "build " + Net.git_commit()
+	_version_label.text = "build %s  %s" % [Net.git_commit(), Net.commit_when()]
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
@@ -796,7 +796,11 @@ func _update_slayer_hud() -> void:
 		_death_label.text = "💀 %d" % int(ceil(p.dead_timer))
 
 
-## Connection pill (top-right): green = connected, red = disconnected.
+## Status pill (top-right). Outline only, no fill: green while the server is up
+## and running our commit, red the moment it is not. Reads
+##   • active - 2h 14m
+## because "server connected" said nothing you could act on -- it could not tell
+## you the server had been up for a week on last Tuesday's code.
 func _build_conn_pill() -> void:
 	_conn_pill = PanelContainer.new()
 	_conn_pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
@@ -808,6 +812,8 @@ func _build_conn_pill() -> void:
 	_conn_style = StyleBoxFlat.new()
 	_conn_style.set_corner_radius_all(0)
 	_conn_style.set_content_margin_all(4)
+	_conn_style.bg_color = Color(0, 0, 0, 0)
+	_conn_style.set_border_width_all(1)
 	_conn_pill.add_theme_stylebox_override("panel", _conn_style)
 	var label := Label.new()
 	label.name = "Text"
@@ -821,9 +827,16 @@ func _build_conn_pill() -> void:
 func _update_conn_pill() -> void:
 	if _conn_pill == null:
 		return
-	var ok := Net.is_socket_connected()
-	_conn_style.bg_color = Color(0.1, 0.45, 0.2, 0.85) if ok else Color(0.55, 0.1, 0.1, 0.9)
-	(_conn_pill.get_node("Text") as Label).text = "● server connected" if ok else "● disconnected"
+	var ok := Net.is_socket_connected() and not Net.server_stale()
+	var green := Color(0.35, 0.9, 0.5)
+	var red := Color(1.0, 0.35, 0.3)
+	_conn_style.border_color = green if ok else red
+	var text := "● offline"
+	if Net.is_socket_connected():
+		text = "● active - %s" % Net.uptime_text() if ok else "● rebuilding"
+	(_conn_pill.get_node("Text") as Label).text = text
+	(_conn_pill.get_node("Text") as Label).add_theme_color_override(
+		"font_color", green if ok else red)
 
 
 func _process(_delta: float) -> void:

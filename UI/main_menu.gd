@@ -107,7 +107,10 @@ func _refresh_status() -> void:
 	if _status == null:
 		return
 	if Net.is_socket_connected():
-		_status.text = "● server connected"
+		if Net.server_stale():
+			_status.text = "● rebuilding"
+		else:
+			_status.text = "● active - %s" % Net.uptime_text()
 		_status.add_theme_color_override("font_color", Color("#7dedb0"))
 	else:
 		_status.text = "● disconnected - retrying"
@@ -351,7 +354,7 @@ func _build_ui() -> void:
 	add_child(_countdown)
 
 	var build := Label.new()
-	build.text = "build " + Net.git_commit()
+	build.text = "build %s  %s" % [Net.git_commit(), Net.commit_when()]
 	build.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	build.add_theme_font_size_override("font_size", 16)
 	build.add_theme_color_override("font_color", Color(1, 1, 1, 0.35))

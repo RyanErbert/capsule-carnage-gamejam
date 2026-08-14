@@ -10,6 +10,7 @@ extends Node
 signal socket_connected
 signal socket_disconnected
 signal event_received(event: String, data: Variant)
+signal server_outdated
 
 ## Deployed game server (auto-deploys from this repo's main branch).
 ## Override with FRIENDSLOP_SERVER=ws://localhost:3001 for local dev.
@@ -37,6 +38,9 @@ var presence: Array = []            # everyone connected: {id, name, color, wher
 var chat_log: Array = []            # the room's conversation, replayed on connect
 const CHAT_LOG_MAX := 80
 var socket_id := ""                 # our own id, so we know which zone is ours
+var server_build := ""              # commit the SERVER is running
+var _uptime_ms := 0                 # ...how long it had been up when it told us
+var _uptime_at := 0.0               # ...and our clock when that arrived
 var _reconnect_timer := 0.0
 
 
@@ -45,6 +49,97 @@ func _ready() -> void:
 	if server.is_empty():
 		server = DEFAULT_SERVER
 	connect_to_server(server)
+
+
+## Seconds the server has been up, carried forward on our own clock between
+## snapshots. -1 when it has not told us yet.
+func server_uptime() -> float:
+	if _uptime_at <= 0.0:
+		return -1.0
+	return float(_uptime_ms) / 1000.0 + (Time.get_ticks_msec() / 1000.0 - _uptime_at)
+
+
+func note_server(build: String, uptime_ms: int) -> void:
+	var was := server_build
+	server_build = build
+	_uptime_ms = uptime_ms
+	_uptime_at = Time.get_ticks_msec() / 1000.0
+	if was != build and server_stale():
+		_rebuild_server()
+
+
+## A server on an older commit is not something to play on: the protocol and the
+## world generator both move. Kick the rebuild once, then let the disconnect that
+## follows drop everyone to a clean lobby.
+const DEPLOY_HOOK := "https://api.render.com/deploy/srv-d9s2kkegekts73faq3vg?key=psfptLVM8D4"
+
+var _rebuild_sent := ""
+
+
+func _rebuild_server() -> void:
+	if _rebuild_sent == server_build:
+		return                     # already asked, for this exact stale build
+	_rebuild_sent = server_build
+	print("[net] server is on %s, we are on %s -- asking for a rebuild" % [
+		server_build, git_commit()])
+	var req := HTTPRequest.new()
+	add_child(req)
+	req.request_completed.connect(func(_r, code, _h, _b):
+		print("[net] rebuild hook returned %d" % code)
+		req.queue_free())
+	if req.request(DEPLOY_HOOK, [], HTTPClient.METHOD_POST, "") != OK:
+		req.queue_free()
+	server_outdated.emit()
+
+
+## The server is behind when it is not running the commit we are. Ryan deploys
+## the same commit he plays, so anything else means the deploy has not landed.
+func server_stale() -> bool:
+	var mine := git_commit()
+	return not server_build.is_empty() and mine != "dev" and server_build != mine
+
+
+## "2h 14m", "3d 04h", "45s" -- whatever reads at a glance.
+func uptime_text() -> String:
+	var s := server_uptime()
+	if s < 0.0:
+		return "?"
+	if s < 60.0:
+		return "%ds" % int(s)
+	if s < 3600.0:
+		return "%dm %02ds" % [int(s / 60.0), int(s) % 60]
+	if s < 86400.0:
+		return "%dh %02dm" % [int(s / 3600.0), int(s / 60.0) % 60]
+	return "%dd %02dh" % [int(s / 86400.0), int(s / 3600.0) % 24]
+
+
+## The commit's own date, so a build label says WHEN as well as which.
+func commit_when() -> String:
+	var t := git_commit_time()
+	if t <= 0:
+		return ""
+	var d := Time.get_datetime_dict_from_unix_time(t)
+	return "%04d-%02d-%02d %02d:%02d" % [d.year, d.month, d.day, d.hour, d.minute]
+
+
+## When HEAD last moved, from the reflog -- the commit object itself is zlib and
+## not worth unpacking in GDScript. Unix seconds, 0 if unknown.
+func git_commit_time() -> int:
+	var f := FileAccess.open("res://.git/logs/HEAD", FileAccess.READ)
+	if f == null:
+		return 0
+	var last := ""
+	for l in f.get_as_text().split("
+"):
+		if not l.strip_edges().is_empty():
+			last = l
+	var head := last.split("	")[0].split(" ")
+	# <old> <new> <name> <email> <unix> <tz>
+	for i in range(head.size() - 1, -1, -1):
+		var tok: String = head[i]
+		if tok.is_valid_int() and tok.length() >= 9:
+			return int(tok)
+	return 0
 
 
 ## Current git commit (short) — used for the HUD build label and the server
@@ -202,4 +297,9 @@ func _handle_frame(frame: String) -> void:
 						if str(spawn_points[i].get("id", "")) == str(data):
 							spawn_points.remove_at(i)
 							break
+			# Every snapshot the server opens with carries what it is running and
+			# how long it has been up; the pill is driven off these.
+			if event == "spectatorPlayers" and data is Dictionary:
+				note_server(str((data as Dictionary).get("build", "")),
+					int((data as Dictionary).get("uptimeMs", 0)))
 			event_received.emit(event, data)
