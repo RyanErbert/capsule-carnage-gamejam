@@ -42,6 +42,7 @@ var server_build := ""              # commit the SERVER is running
 var _uptime_ms := 0                 # ...how long it had been up when it told us
 var _uptime_at := 0.0               # ...and our clock when that arrived
 var server_build_time := 0          # when the server's commit was made
+var server_version := [0, 0, 0]     # ...and the version it is running
 var _reconnect_timer := 0.0
 
 
@@ -60,10 +61,13 @@ func server_uptime() -> float:
 	return float(_uptime_ms) / 1000.0 + (Time.get_ticks_msec() / 1000.0 - _uptime_at)
 
 
-func note_server(build: String, uptime_ms: int, build_time := 0) -> void:
+func note_server(build: String, uptime_ms: int, build_time := 0,
+		version: Array = []) -> void:
 	var was := server_build
 	server_build = build
 	server_build_time = build_time
+	if version.size() == 3:
+		server_version = [int(version[0]), int(version[1]), int(version[2])]
 	_uptime_ms = uptime_ms
 	_uptime_at = Time.get_ticks_msec() / 1000.0
 	if was != build and server_stale():
@@ -94,31 +98,48 @@ func _rebuild_server() -> void:
 	server_outdated.emit()
 
 
-## Which of us is behind. Comparing hashes only says they DIFFER, and acting on
-## that alone means a client running an older commit asks the server to rebuild
-## to the commit it is already on, over and over. So compare the commit dates.
-## When the server cannot report its date (an export with no .git), fall back to
-## treating it as behind -- the deploy lagging is the common case -- and the
-## once-per-build guard stops it looping.
-func _builds_differ() -> bool:
-	return not server_build.is_empty() and git_commit() != "dev" 		and server_build != git_commit()
+## version.json, the one source of truth for which build is which. A hash only
+## says two builds DIFFER; a number says which came first, which is the whole
+## question. Comparing commit dates worked but had to parse a reflog on both
+## ends and was blank in any export without a .git.
+var _ver: Array = []
+
+
+func version() -> Array:
+	if not _ver.is_empty():
+		return _ver
+	_ver = [0, 0, 0]
+	var f := FileAccess.open("res://version.json", FileAccess.READ)
+	if f:
+		var j: Variant = JSON.parse_string(f.get_as_text())
+		if j is Dictionary:
+			_ver = [int((j as Dictionary).get("major", 0)),
+				int((j as Dictionary).get("minor", 0)),
+				int((j as Dictionary).get("build", 0))]
+	return _ver
+
+
+func version_text() -> String:
+	var v := version()
+	return "v%d.%d.%d" % [v[0], v[1], v[2]]
+
+
+## -1 we are older, 0 same, 1 we are newer.
+func _cmp_version() -> int:
+	var mine := version()
+	for i in 3:
+		if mine[i] != int(server_version[i]):
+			return 1 if mine[i] > int(server_version[i]) else -1
+	return 0
 
 
 func server_stale() -> bool:
-	if not _builds_differ():
-		return false
-	var mine := git_commit_time()
-	if server_build_time <= 0 or mine <= 0:
-		return true
-	return server_build_time < mine
+	return _cmp_version() > 0
 
 
 ## We are the old one. Rebuilding the server would not help; the fix is a pull.
 func client_stale() -> bool:
-	if not _builds_differ():
-		return false
-	var mine := git_commit_time()
-	return server_build_time > 0 and mine > 0 and server_build_time > mine
+	return _cmp_version() < 0
 
 
 ## "2h 14m", "3d 04h", "45s" -- whatever reads at a glance.
@@ -324,5 +345,6 @@ func _handle_frame(frame: String) -> void:
 			if event == "spectatorPlayers" and data is Dictionary:
 				note_server(str((data as Dictionary).get("build", "")),
 					int((data as Dictionary).get("uptimeMs", 0)),
-					int((data as Dictionary).get("buildTime", 0)))
+					int((data as Dictionary).get("buildTime", 0)),
+					(data as Dictionary).get("version", []) as Array)
 			event_received.emit(event, data)

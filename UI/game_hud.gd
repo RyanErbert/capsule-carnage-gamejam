@@ -54,7 +54,7 @@ func _ready() -> void:
 	_it_label.visible = false
 	_scoreboard.visible = false
 	_update_banner.visible = false
-	_version_label.text = "build %s  %s" % [Net.git_commit(), Net.commit_when()]
+	_version_label.text = "%s  %s" % [Net.version_text(), Net.git_commit()]
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))

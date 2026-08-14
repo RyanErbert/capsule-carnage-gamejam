@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Bump the build number on every commit, so the version can never drift from
+# what is actually running. tools/bump.sh minor|major for the bigger ones.
+set -e
+"$(git rev-parse --show-toplevel)/tools/bump.sh" >/dev/null
+git add "$(git rev-parse --show-toplevel)/version.json"

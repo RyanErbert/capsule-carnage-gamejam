@@ -56,6 +56,17 @@ function readGitCommitTime() {
   return 0;
 }
 const SERVER_BUILD_TIME = readGitCommitTime();
+
+// version.json is the answer to "which build is newer" -- a hash cannot be
+// ordered, a number can. Client and server read the same file.
+function readVersion() {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'version.json'), 'utf8'));
+    return [v.major | 0, v.minor | 0, v.build | 0];
+  } catch (e) { return [0, 0, 0]; }
+}
+const SERVER_VERSION = readVersion();
+console.log(`Server version: v${SERVER_VERSION.join('.')}`);
 const SERVER_BUILD = readGitCommit();
 if (SERVER_BUILD) console.log(`Server build: ${SERVER_BUILD}`);
 const STARTED_AT = Date.now();
@@ -1422,6 +1433,7 @@ io.on('connection', (socket) => {
     holder: holderID,
     build: SERVER_BUILD,
     buildTime: SERVER_BUILD_TIME,
+    version: SERVER_VERSION,
     uptimeMs: Date.now() - STARTED_AT
   });
 

@@ -361,7 +361,7 @@ func _build_ui() -> void:
 	add_child(_countdown)
 
 	var build := Label.new()
-	build.text = "build %s  %s" % [Net.git_commit(), Net.commit_when()]
+	build.text = "%s  %s" % [Net.version_text(), Net.git_commit()]
 	build.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	build.add_theme_font_size_override("font_size", 16)
 	build.add_theme_color_override("font_color", Color(1, 1, 1, 0.35))
