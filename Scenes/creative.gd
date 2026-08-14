@@ -794,23 +794,24 @@ func _deadzone_edge(at: Vector3) -> void:
 # --- World backstops --------------------------------------------------------
 # (riding a vehicle: world_vehicles.gd rescues the vehicle + driver instead)
 
-## "Am I buried" cannot be answered by the density field, and the old rule that
-## tried was the jump. density_at snaps to the nearest node of a 2 m lattice and
-## returns it -- no interpolation -- so a ball standing on a slope gets sampled up
-## to a metre away, often at a node just inside the hill reading 0.556 against a
-## 0.55 trip, and gets lifted a metre off ground it was standing on. Measured on
-## a 53 degree face: 386 lifts in 12 seconds while standing still.
+## "Am I buried" is asked of TERRAIN and nothing else, because terrain is the
+## only thing here that can answer it.
 ##
-## No threshold fixes it. A body buried a full metre reads 0.333 -- LOWER than
-## the resting ball at 0.556 -- so the two cases overlap and cannot be separated
-## by any cutoff.
+## Counting surface crossings on the way up is exact -- odd means you started
+## inside solid -- but only on a CLOSED mesh. Surface nets seals its boundary,
+## so terrain qualifies. WFC blocks do not: they are chamfered and missing
+## corner triangles, so a ray through an arch tunnel crosses ONCE, reads odd,
+## and the rescue lifts you a metre into the ceiling. Every few frames. That was
+## "going into a tunnel flies you into it", and it was this test being pointed at
+## geometry it was never valid for.
 ##
-## Parity can separate them, and it is exact: walk straight up counting surface
-## crossings. An odd number means you started inside the solid. It needs no
-## interpolation, no threshold, and no opinion about which way a normal faces.
-## Measured: 0 false positives over 46 resting positions, 0 misses over 184
-## burial depths.
+## The density field cannot do the job either: it snaps to the nearest node of a
+## 2 m lattice, so a ball resting on a 53 degree face reads 0.556 while a body
+## buried a full metre reads 0.333. The cases overlap, so no threshold separates
+## them. Terrain-only parity is measured at 0 false positives over 46 resting
+## positions and 0 misses over 184 burial depths.
 const BURY_EVERY := 4        # frames between checks; a rescue can wait 66 ms
+const TERRAIN_LAYER := 8     # mirrors voxel_terrain.gd
 
 var _bury_tick := 0
 
@@ -826,6 +827,7 @@ func _is_buried() -> bool:
 	while at.y < top and crossings < 32:
 		var q := PhysicsRayQueryParameters3D.create(at, Vector3(at.x, top, at.z))
 		q.hit_back_faces = true
+		q.collision_mask = TERRAIN_LAYER
 		q.exclude = [player.get_rid()]
 		var hit := space.intersect_ray(q)
 		if hit.is_empty():

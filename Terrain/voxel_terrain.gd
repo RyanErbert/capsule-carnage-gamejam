@@ -44,6 +44,11 @@ const BRUSH_REACH := 3
 # +2 [16,24]. A flat ground surface meshes out at y ~= 1.0 (crossing +
 # smoothing), unchanged by the basement going in underneath it.
 const SLAB := 8.0
+## Terrain answers "is this point inside solid" by counting surface crossings,
+## which is only valid on a CLOSED mesh. Surface nets seals its boundary, so
+## terrain qualifies; WFC blocks are chamfered with corner triangles missing and
+## do not. An extra layer bit lets that query ask terrain and nothing else.
+const TERRAIN_LAYER := 8
 
 # The world beyond the paintable region: a flat unmodifiable CIRCULAR plain
 # level with the ground layer, so the map has no rim dropoff. The fog
@@ -336,6 +341,7 @@ func _build_frame() -> void:
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, _material)  # same sand shader as the field
 	var body := StaticBody3D.new()
+	body.collision_layer |= TERRAIN_LAYER
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	body.add_child(mi)
@@ -586,6 +592,7 @@ func _remesh_chunk(key: Vector2i) -> void:
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, _material)
 	var body := StaticBody3D.new()
+	body.collision_layer |= TERRAIN_LAYER
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	body.add_child(mi)
