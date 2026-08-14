@@ -827,13 +827,20 @@ func _build_conn_pill() -> void:
 func _update_conn_pill() -> void:
 	if _conn_pill == null:
 		return
-	var ok := Net.is_socket_connected() and not Net.server_stale()
+	var ok := Net.is_socket_connected() and not Net.server_stale() \
+		and not Net.client_stale()
 	var green := Color(0.35, 0.9, 0.5)
 	var red := Color(1.0, 0.35, 0.3)
 	_conn_style.border_color = green if ok else red
 	var text := "● offline"
-	if Net.is_socket_connected():
-		text = "● active - %s" % Net.uptime_text() if ok else "● rebuilding"
+	if not Net.is_socket_connected():
+		text = "● offline"
+	elif Net.server_stale():
+		text = "● rebuilding"
+	elif Net.client_stale():
+		text = "● out of date"
+	else:
+		text = "● active - %s" % Net.uptime_text()
 	(_conn_pill.get_node("Text") as Label).text = text
 	(_conn_pill.get_node("Text") as Label).add_theme_color_override(
 		"font_color", green if ok else red)

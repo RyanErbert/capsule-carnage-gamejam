@@ -106,16 +106,23 @@ func _apply_game_settings(gs: Variant) -> void:
 func _refresh_status() -> void:
 	if _status == null:
 		return
-	if Net.is_socket_connected():
-		if Net.server_stale():
-			_status.text = "● rebuilding"
-		else:
-			_status.text = "● active - %s" % Net.uptime_text()
-		_status.add_theme_color_override("font_color", Color("#7dedb0"))
-	else:
+	# Green means one thing only: connected, and running the same commit we are.
+	# Anything else is red, including a live connection to a server that is
+	# rebuilding or ahead of us -- a green light next to the word "rebuilding"
+	# tells you nothing.
+	var healthy := Net.is_socket_connected() and not Net.server_stale() \
+		and not Net.client_stale()
+	if not Net.is_socket_connected():
 		_status.text = "● disconnected - retrying"
-		_status.add_theme_color_override("font_color", Color("#ff8080"))
-	_join_btn.disabled = not Net.is_socket_connected()
+	elif Net.server_stale():
+		_status.text = "● rebuilding"
+	elif Net.client_stale():
+		_status.text = "● out of date - git pull"
+	else:
+		_status.text = "● active - %s" % Net.uptime_text()
+	_status.add_theme_color_override("font_color",
+		Color("#7dedb0") if healthy else Color("#ff8080"))
+	_join_btn.disabled = not healthy
 	var my_name := Settings.player_name
 	if _name_edit and _name_edit.text.strip_edges() != "":
 		my_name = _name_edit.text.strip_edges().left(16)

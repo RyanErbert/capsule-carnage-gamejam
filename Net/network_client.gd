@@ -41,6 +41,7 @@ var socket_id := ""                 # our own id, so we know which zone is ours
 var server_build := ""              # commit the SERVER is running
 var _uptime_ms := 0                 # ...how long it had been up when it told us
 var _uptime_at := 0.0               # ...and our clock when that arrived
+var server_build_time := 0          # when the server's commit was made
 var _reconnect_timer := 0.0
 
 
@@ -59,9 +60,10 @@ func server_uptime() -> float:
 	return float(_uptime_ms) / 1000.0 + (Time.get_ticks_msec() / 1000.0 - _uptime_at)
 
 
-func note_server(build: String, uptime_ms: int) -> void:
+func note_server(build: String, uptime_ms: int, build_time := 0) -> void:
 	var was := server_build
 	server_build = build
+	server_build_time = build_time
 	_uptime_ms = uptime_ms
 	_uptime_at = Time.get_ticks_msec() / 1000.0
 	if was != build and server_stale():
@@ -92,11 +94,31 @@ func _rebuild_server() -> void:
 	server_outdated.emit()
 
 
-## The server is behind when it is not running the commit we are. Ryan deploys
-## the same commit he plays, so anything else means the deploy has not landed.
+## Which of us is behind. Comparing hashes only says they DIFFER, and acting on
+## that alone means a client running an older commit asks the server to rebuild
+## to the commit it is already on, over and over. So compare the commit dates.
+## When the server cannot report its date (an export with no .git), fall back to
+## treating it as behind -- the deploy lagging is the common case -- and the
+## once-per-build guard stops it looping.
+func _builds_differ() -> bool:
+	return not server_build.is_empty() and git_commit() != "dev" 		and server_build != git_commit()
+
+
 func server_stale() -> bool:
-	var mine := git_commit()
-	return not server_build.is_empty() and mine != "dev" and server_build != mine
+	if not _builds_differ():
+		return false
+	var mine := git_commit_time()
+	if server_build_time <= 0 or mine <= 0:
+		return true
+	return server_build_time < mine
+
+
+## We are the old one. Rebuilding the server would not help; the fix is a pull.
+func client_stale() -> bool:
+	if not _builds_differ():
+		return false
+	var mine := git_commit_time()
+	return server_build_time > 0 and mine > 0 and server_build_time > mine
 
 
 ## "2h 14m", "3d 04h", "45s" -- whatever reads at a glance.
@@ -301,5 +323,6 @@ func _handle_frame(frame: String) -> void:
 			# how long it has been up; the pill is driven off these.
 			if event == "spectatorPlayers" and data is Dictionary:
 				note_server(str((data as Dictionary).get("build", "")),
-					int((data as Dictionary).get("uptimeMs", 0)))
+					int((data as Dictionary).get("uptimeMs", 0)),
+					int((data as Dictionary).get("buildTime", 0)))
 			event_received.emit(event, data)

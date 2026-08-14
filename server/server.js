@@ -40,6 +40,22 @@ function readGitCommit() {
   } catch (e) { /* not running from a clone */ }
   return '';
 }
+// ...and WHEN that commit was made, so a client can tell which of the two is
+// behind. Without it "the builds differ" is all anyone knows, and a client on an
+// older commit would ask the server to rebuild to the very commit it is already
+// running, forever.
+function readGitCommitTime() {
+  try {
+    const logPath = path.join(__dirname, '..', '.git', 'logs', 'HEAD');
+    const lines = fs.readFileSync(logPath, 'utf8').trim().split(/\r?\n/);
+    const head = lines[lines.length - 1].split(/\t/)[0].split(' ');
+    for (let i = head.length - 1; i >= 0; i--) {
+      if (/^\d{9,}$/.test(head[i])) return parseInt(head[i], 10);
+    }
+  } catch (e) { /* not running from a clone */ }
+  return 0;
+}
+const SERVER_BUILD_TIME = readGitCommitTime();
 const SERVER_BUILD = readGitCommit();
 if (SERVER_BUILD) console.log(`Server build: ${SERVER_BUILD}`);
 const STARTED_AT = Date.now();
@@ -1405,6 +1421,7 @@ io.on('connection', (socket) => {
     scores,
     holder: holderID,
     build: SERVER_BUILD,
+    buildTime: SERVER_BUILD_TIME,
     uptimeMs: Date.now() - STARTED_AT
   });
 
