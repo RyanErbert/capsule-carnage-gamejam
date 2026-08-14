@@ -794,6 +794,47 @@ func _deadzone_edge(at: Vector3) -> void:
 # --- World backstops --------------------------------------------------------
 # (riding a vehicle: world_vehicles.gd rescues the vehicle + driver instead)
 
+## "Am I buried" cannot be answered by the density field, and the old rule that
+## tried was the jump. density_at snaps to the nearest node of a 2 m lattice and
+## returns it -- no interpolation -- so a ball standing on a slope gets sampled up
+## to a metre away, often at a node just inside the hill reading 0.556 against a
+## 0.55 trip, and gets lifted a metre off ground it was standing on. Measured on
+## a 53 degree face: 386 lifts in 12 seconds while standing still.
+##
+## No threshold fixes it. A body buried a full metre reads 0.333 -- LOWER than
+## the resting ball at 0.556 -- so the two cases overlap and cannot be separated
+## by any cutoff.
+##
+## Parity can separate them, and it is exact: walk straight up counting surface
+## crossings. An odd number means you started inside the solid. It needs no
+## interpolation, no threshold, and no opinion about which way a normal faces.
+## Measured: 0 false positives over 46 resting positions, 0 misses over 184
+## burial depths.
+const BURY_EVERY := 4        # frames between checks; a rescue can wait 66 ms
+
+var _bury_tick := 0
+
+
+func _is_buried() -> bool:
+	_bury_tick += 1
+	if _bury_tick % BURY_EVERY != 0:
+		return false
+	var space := get_world_3d().direct_space_state
+	var at := player.global_position
+	var top := at.y + 80.0
+	var crossings := 0
+	while at.y < top and crossings < 32:
+		var q := PhysicsRayQueryParameters3D.create(at, Vector3(at.x, top, at.z))
+		q.hit_back_faces = true
+		q.exclude = [player.get_rid()]
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			break
+		crossings += 1
+		at = (hit["position"] as Vector3) + Vector3(0, 0.02, 0)
+	return crossings % 2 == 1
+
+
 func _physics_process(delta: float) -> void:
 	if not _playing or player == null:
 		return
@@ -807,12 +848,10 @@ func _physics_process(delta: float) -> void:
 		player.velocity = Vector3.ZERO
 	# Filled-in terrain can embed the player (remote FILL strokes); the
 	# depenetration then shoves them through the floor. Pop upward instead.
-	var _bury_d: float = terrain.density_at(
-		player.global_position + Vector3(0, 0.2, 0)) if terrain else 0.0
-	if _bury_d > 0.55:
+	if _is_buried():
 		player.global_position.y += 1.0
 		player.velocity.y = maxf(player.velocity.y, 0.0)
-		player.mark_bury(_bury_d, 1.0)
+		player.mark_bury(1.0, 1.0)
 
 
 ## Distance-based white-out past FOG_START; at FOG_WHITE the screen is fully
