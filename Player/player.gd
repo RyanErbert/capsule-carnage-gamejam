@@ -46,8 +46,20 @@ const COYOTE_TIME := 0.28
 const JUMP_BUFFER_TIME := 0.25
 
 # --- Sprint stamina (web §1.1 / §3.3) ---
-const SPRINT_DURATION := 4.0      # seconds of stamina
-const SPRINT_REFILL_TIME := 6.0   # empty → full
+# Short, snappy and worth spending. Four seconds of boost is a travel mode you
+# hold down; one and a half is a decision, so it can afford to hit much harder.
+# The refill matches: back on your feet in three seconds, not six.
+const SPRINT_DURATION := 1.5      # seconds of stamina
+const SPRINT_REFILL_TIME := 3.0   # empty → full
+const SPRINT_KICK := 5.5          # ...and the shove the first frame gives you
+
+# --- Slam: buy height back as speed --------------------------------------
+# Ctrl drives you at the floor. On flat ground it just plants you, but the
+# world is full of curved and banked faces, and arriving on one fast enough is
+# how you leave it faster: the run is redirected up the far side rather than
+# eaten. Only in the air, and it never fights an upward throw you have earned.
+const SLAM_ACCEL := 55.0     # m/s2 downward, on top of gravity
+const SLAM_MAX := 46.0       # ...to this much downward speed and no further
 
 # --- Fall respawn (web §1.10) ---
 const FALL_RESPAWN_AIRTIME := 10.0
@@ -344,7 +356,12 @@ func _physics_process(delta: float) -> void:
 
 	# --- Sprint stamina ---
 	var wants_sprint := not typing and Input.is_action_pressed("sprint") and input_mag > 0.0
+	var was_sprinting := sprinting
 	sprinting = wants_sprint and not sprint_exhausted
+	# The first frame of a sprint is a shove, not a ramp. Without it a 1.5 s
+	# burst is over before the acceleration has done anything with it.
+	if sprinting and not was_sprinting and wish_dir.length() > 0.01:
+		velocity += wish_dir.normalized() * SPRINT_KICK
 	if sprinting:
 		sprint_stamina = maxf(0.0, sprint_stamina - delta)
 		if sprint_stamina <= 0.0:
@@ -422,6 +439,7 @@ func _physics_process(delta: float) -> void:
 		# the part of it the ground is holding up, and what survives is the run
 		# downhill — at every angle, with no case for any of them.
 		velocity.y -= GRAVITY * grv * delta
+		_slam(delta, typing)
 
 		_charge_jump(delta, typing, jmp, now)
 
@@ -688,6 +706,23 @@ func _stick(was_touching: bool) -> void:
 ## own line, and it refuses to stretch. So a hook thrown past a corner swings
 ## you around it, and letting go at the bottom of the arc keeps every bit of
 ## the speed the swing built.
+## Ctrl in the air: drive at the floor. Flat ground just plants you, but a
+## banked or curved face turns the arrival into exit speed, so a slam into the
+## low side of a bowl is how you leave the high side. Airborne only -- slamming
+## while touching would just grind you into the surface -- and it stops at
+## SLAM_MAX so it stays a tool rather than a way to tunnel through the world.
+func _slam(delta: float, typing: bool) -> void:
+	if typing or touching or dead or godmode or piloting or vehicle != null:
+		return
+	if not Input.is_action_pressed("slam"):
+		return
+	var down := -up_direction
+	var falling := velocity.dot(down)
+	if falling >= SLAM_MAX:
+		return
+	velocity += down * minf(SLAM_ACCEL * delta, SLAM_MAX - falling)
+
+
 func _grapple_swing(delta: float) -> void:
 	var to: Vector3 = _items.grapple_target - global_position
 	var dist := to.length()
@@ -798,6 +833,7 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 	# takes back whatever the surface is holding up and leaves the run downhill,
 	# which is why there is no slope case here at all.
 	velocity.y -= g * (MB_ROLL if touching else 1.0) * delta
+	_slam(delta, typing)
 
 	if touching:
 		var damp := exp(-MB_DRAG * delta)

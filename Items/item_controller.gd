@@ -23,11 +23,24 @@ const AIM_RANGE := 200.0
 # Weapons (web §5.1–5.3)
 const MG_INTERVAL := 0.08       # 12.5 rounds/s
 const MG_SPEED := 200.0
+# Recoil, as a movement tool. Firing down holds you up: at 12.5 rounds a second
+# MG_KICK works out to about 15 m/s2 against gravity's 20, so it can never lift
+# you on its own -- you always lose height -- but it stretches a jump a long way
+# and turns a fall into something you can steer. It fades out as the muzzle
+# comes level, so shooting someone across a plaza does not shove you around.
+const MG_KICK := 1.2            # m/s per round, straight back up the barrel
+const MG_KICK_CEIL := 9.0       # ...and it stops adding once you are rising this fast
 const MG_SPREAD := 0.04         # (rand-0.5)*0.04 per axis
 const ROCKET_SPEED := 60.0
 const ROCKET_COOLDOWN := 2.0
 
 var inventory: Array = []   # of {type: String, ammo: int}
+## The grapple is traversal, not a weapon, and a traversal tool you have to
+## swap away from your gun to reach is one you stop using. It lives in its own
+## slot, off the four-item carousel entirely, and fires on right click whatever
+## you are holding. Unlimited, because a hook with a round count is a hook you
+## hoard instead of using.
+var has_grapple := false
 var is_grappling := false
 var grapple_target := Vector3.ZERO
 var pending_teleporter: Variant = null  # first click position, or null
@@ -63,7 +76,11 @@ func _ready() -> void:
 	# Lobby starting weapon (web menu: none/machinegun/rocket/mines/grapple)
 	var weapon: String = Settings.starting_weapon
 	if weapon != "none" and weapon != "":
-		inventory.append({"type": weapon, "ammo": int(Settings.STARTING_AMMO.get(weapon, 0))})
+		if weapon == "grapple":
+			has_grapple = true
+		else:
+			inventory.append({"type": weapon,
+				"ammo": int(Settings.STARTING_AMMO.get(weapon, 0))})
 		inventory_changed.emit.call_deferred(inventory)
 	_rope = MeshInstance3D.new()
 	_rope.top_level = true
@@ -92,6 +109,10 @@ func _on_net_event(event: String, data: Variant) -> void:
 		if item != "":
 			# New item always takes slot 0 (picked up OR god-given); the rest
 			# shift right, and a fourth pushes the last one off the end.
+			if item == "grapple":
+				has_grapple = true
+				inventory_changed.emit(inventory)
+				return
 			inventory.push_front({"type": item, "ammo": int(PICKUP_AMMO.get(item, 0))})
 			if inventory.size() > MAX_INVENTORY:
 				inventory.resize(MAX_INVENTORY)
@@ -111,6 +132,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	# carve owns the mouse there), and piloting a bot (click = swarm strike)
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED or player.godmode \
 			or player.vehicle != null or player.piloting:
+		return
+	# The terra gun owns right click for carving while it is out; nothing else
+	# does, so the hook takes it.
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_RIGHT \
+			and held_type() != "terragun":
+		use_secondary()
 		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		# Web: mousedown starts the machinegun loop; anything else is consumeItem()
@@ -154,6 +182,18 @@ func swap_to_first(index: int) -> void:
 	inventory_changed.emit(inventory)
 
 
+## Right click, from anywhere in the carousel: throw the hook, or let go if it
+## is already out.
+func use_secondary() -> void:
+	if not has_grapple or player.dead:
+		return
+	if _hook_state != "":
+		is_grappling = false     # click again to let go; the hook reels back
+		_hook_state = "back"
+		return
+	_fire_hook()
+
+
 ## Web consumeItem(): dispatch on the active slot's item type.
 func use_item() -> void:
 	if inventory.is_empty() or player.dead:
@@ -161,13 +201,6 @@ func use_item() -> void:
 	var item: String = inventory[0]["type"]
 	var target: Variant = _aim_point()
 	match item:
-		"grapple":
-			if _hook_state != "":
-				is_grappling = false     # click again to let go; the hook reels back
-				_hook_state = "back"
-				return
-			_fire_hook()
-			_use_ammo()
 		"launch_pad", "boost_pad", "mines":
 			if target == null or player.global_position.distance_to(target) > PLACE_RANGE:
 				return
@@ -283,6 +316,7 @@ func _fire_machinegun_shot() -> void:
 		"start": {"x": start.x, "y": start.y, "z": start.z},
 		"velocity": {"x": dir.x * MG_SPEED, "y": dir.y * MG_SPEED, "z": dir.z * MG_SPEED},
 	})
+	_mg_recoil(dir)
 	if bool(Net.game_settings.get("infiniteAmmo", false)):
 		return
 	inventory[0]["ammo"] = int(inventory[0]["ammo"]) - 1
@@ -291,6 +325,26 @@ func _fire_machinegun_shot() -> void:
 		_shift_inventory()
 	else:
 		inventory_changed.emit(inventory)
+
+
+## The shove back up the barrel. Weighted by how far DOWN you are aiming, so it
+## is a jetpack when you point at your feet and almost nothing when you point at
+## someone. Capped by how fast you are already rising, which is what keeps it
+## from becoming a hover.
+func _mg_recoil(dir: Vector3) -> void:
+	if player == null or player.dead or player.vehicle != null or player.piloting:
+		return
+	var down_frac := clampf(-dir.y, 0.0, 1.0)
+	if down_frac <= 0.05:
+		return
+	var rising: float = player.velocity.y
+	if rising >= MG_KICK_CEIL:
+		return
+	var kick := -dir * MG_KICK * down_frac
+	# Never add more upward than the ceiling allows, so the cap is a real limit
+	# rather than something one fast burst can step over.
+	kick.y = minf(kick.y, MG_KICK_CEIL - rising)
+	player.velocity += kick
 
 
 ## Raycast from the camera center (mouse is captured; web used mouse NDC).

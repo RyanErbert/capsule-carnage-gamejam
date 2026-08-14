@@ -64,6 +64,7 @@ func _ready() -> void:
 	_build_meters()
 	_build_esc_menu()
 	_build_conn_pill()
+	_build_secondary()
 	_build_slayer_hud()
 	_build_scrollback()
 	_build_vote_row()
@@ -730,6 +731,50 @@ func _update_slayer_hud() -> void:
 		_death_label.text = "💀 %d" % int(ceil(p.dead_timer))
 
 
+## The grapple sits opposite the connection pill, top-LEFT, because it is not
+## part of the four-item carousel and should not read as one of them. Hidden
+## until you find one, lit once you have, and filled while the hook is out.
+var _grapple_box: PanelContainer
+var _grapple_style: StyleBoxFlat
+var _grapple_icon: TextureRect
+
+
+func _build_secondary() -> void:
+	_grapple_box = PanelContainer.new()
+	_grapple_box.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_grapple_box.offset_left = 12
+	_grapple_box.offset_top = 12
+	_grapple_box.offset_right = 68
+	_grapple_box.offset_bottom = 68
+	_grapple_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_grapple_style = StyleBoxFlat.new()
+	_grapple_style.bg_color = Color(0, 0, 0, 0.6)
+	_grapple_style.set_corner_radius_all(0)
+	_grapple_style.set_border_width_all(2)
+	_grapple_style.set_content_margin_all(6)
+	_grapple_box.add_theme_stylebox_override("panel", _grapple_style)
+	_grapple_icon = _item_icon("grapple", Color("#44ff44"))
+	_grapple_box.add_child(_grapple_icon)
+	add_child(_grapple_box)
+	_grapple_box.visible = false
+
+
+func _update_secondary() -> void:
+	if _grapple_box == null or sync_node == null or sync_node.player == null:
+		return
+	var items: Node = sync_node.player.get_node_or_null("ItemController")
+	if items == null:
+		return
+	_grapple_box.visible = bool(items.has_grapple)
+	if not _grapple_box.visible:
+		return
+	var out: bool = bool(items.is_grappling)
+	var tint := Color("#7dffa0") if out else Color("#44ff44")
+	_grapple_style.border_color = tint
+	_grapple_style.bg_color = Color(0.1, 0.4, 0.15, 0.75) if out else Color(0, 0, 0, 0.6)
+	_grapple_icon.modulate = tint
+
+
 ## Status pill (top-right). Outline only, no fill: green while the server is up
 ## and running our commit, red the moment it is not. Reads
 ##   • active - 2h 14m
@@ -784,6 +829,7 @@ func _process(_delta: float) -> void:
 	_scoreboard.visible = Input.is_key_pressed(KEY_TAB) and get_viewport().gui_get_focus_owner() == null
 	_update_meters()
 	_update_conn_pill()
+	_update_secondary()
 	_update_slayer_hud()
 	_expire_chat_rows()
 
