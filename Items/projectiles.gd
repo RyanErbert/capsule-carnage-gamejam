@@ -310,7 +310,11 @@ func _on_player_died(data: Dictionary) -> void:
 	_on_explosion({"x": pos.x, "y": pos.y, "z": pos.z})
 	if str(data.get("id", "")) == _self_id() and player:
 		_carve(pos, DEATH_CRATER, 1.0)
-		player.die_slayer(float(data.get("respawnMs", 4000.0)) / 1000.0)
+		var killer := Vector3.ZERO
+		if data.has("by") and data["by"] != null:
+			killer = Vector3(float(data.get("byX", 0.0)), float(data.get("byY", 0.0)),
+				float(data.get("byZ", 0.0)))
+		player.die_slayer(float(data.get("respawnMs", 4000.0)) / 1000.0, pos, killer)
 
 
 func _on_apply_impulse(data: Dictionary) -> void:

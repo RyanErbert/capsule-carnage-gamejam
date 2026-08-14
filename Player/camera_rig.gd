@@ -14,6 +14,13 @@ const MOUSE_IDLE_DELAY := 0.6     # seconds before auto-follow kicks in
 const POS_LERP_RATE := 6.0
 const AUTO_FOLLOW_MIN_SPEED := 1.5
 const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
+const ARM_RADIUS := 0.35     # the arm is a ball, not a thread, so it cannot
+                             # slip through a corner or a hairline gap
+const ARM_OUT_RATE := 4.0    # how fast the chain is allowed to pay back OUT
+const TELEPORT_SNAP := 6.0   # a jump further than this is a respawn, not travel
+const SPEED_SMOOTH := 8.0    # contact changes speed in one frame; the chain
+                             # should not
+const ACCEL_SMOOTH := 12.0   # ...and neither should the lean
 
 @export var spring_arm: SpringArm3D
 
@@ -26,9 +33,22 @@ var _mouse_idle_timer := 999.0
 @onready var _player: CharacterBody3D = get_parent()
 
 
+var _smooth_speed := 0.0
+var _smooth_accel := Vector3.ZERO
+var _arm_len := 0.0
+
+
 func _ready() -> void:
 	top_level = true
 	global_position = _player.global_position
+	if spring_arm:
+		# A ray finds nothing when it threads a corner, and the camera ends up
+		# inside the wall it just missed. A sphere has to fit through.
+		var ball := SphereShape3D.new()
+		ball.radius = ARM_RADIUS
+		spring_arm.shape = ball
+		spring_arm.add_excluded_object(_player.get_rid())
+		_arm_len = spring_arm.spring_length
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -47,6 +67,11 @@ func _physics_process(delta: float) -> void:
 	var target: Node3D = follow_target if is_instance_valid(follow_target) else _player
 	var vel: Vector3 = target.velocity if target is CharacterBody3D else Vector3.ZERO
 	var h_speed := Vector2(vel.x, vel.z).length()
+	_smooth_speed = lerpf(_smooth_speed, h_speed, minf(1.0, SPEED_SMOOTH * delta))
+
+	if _death_left > 0.0:
+		_death_step(delta)
+		return
 
 	# Auto-follow: swing behind the movement direction when the mouse is idle (web §1.5)
 	if h_speed > AUTO_FOLLOW_MIN_SPEED and _mouse_idle_timer > MOUSE_IDLE_DELAY and not _player.godmode:
@@ -55,17 +80,34 @@ func _physics_process(delta: float) -> void:
 		var rate := CAM_DRAG_SPEED * (1.0 + minf(1.0, diff / (PI / 2.0)) * CAM_TURN_BOOST) * delta
 		yaw = lerp_angle(yaw, target_yaw, minf(1.0, rate))
 
-	# Chain stretches when moving past walk speed (sprint/explosions).
-	# The resting length is the local player's zoom slider (Esc gear).
+	# Chain stretches when moving past walk speed (sprint/explosions). Off the
+	# SMOOTHED speed: hitting anything changes the real one in a single frame,
+	# and the chain jerking in and out on every scrape reads as camera jitter.
 	base_chain_length = Settings.camera_zoom
-	var chain := clampf(base_chain_length + maxf(0.0, h_speed - 9.0) * CHAIN_SPEED_STRETCH, BASE_CHAIN_MIN, BASE_CHAIN_MAX)
+	var want_chain := clampf(
+		base_chain_length + maxf(0.0, _smooth_speed - 9.0) * CHAIN_SPEED_STRETCH,
+		BASE_CHAIN_MIN, BASE_CHAIN_MAX)
 	if spring_arm:
-		spring_arm.spring_length = chain
+		# Coming IN is instant, because anything slower is a frame of camera
+		# inside the wall. Going back OUT is eased, because that is the part you
+		# can see. Snapping both ways is what makes a spring arm feel cheap.
+		if want_chain < _arm_len:
+			_arm_len = want_chain
+		else:
+			_arm_len = lerpf(_arm_len, want_chain, minf(1.0, ARM_OUT_RATE * delta))
+		spring_arm.spring_length = _arm_len
 
 	# Lagged position follow, damped less at high speed (web: 1-exp(-6*dt) * (1 - speedFactor*0.4))
-	var speed_factor := minf(1.0, h_speed / 18.0)
+	var anchor := target.global_position + Vector3(0, 1, 0)
+	var speed_factor := minf(1.0, _smooth_speed / 18.0)
 	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
-	global_position = global_position.lerp(target.global_position + Vector3(0, 1, 0), t)
+	# A respawn moves the body across the map. Lerping to it flies the camera
+	# through everything in between, so a jump that big is followed, not chased.
+	if global_position.distance_to(anchor) > TELEPORT_SNAP:
+		global_position = anchor
+	else:
+		global_position = global_position.lerp(anchor, t)
+	_declip(anchor)
 
 	rotation.y = yaw
 	rotation.x = -pitch
@@ -84,11 +126,104 @@ var _prev_vel := Vector3.ZERO
 
 
 func _wobble(delta: float, vel: Vector3) -> float:
-	var accel := (vel - _prev_vel) / maxf(delta, 0.0001)
+	# Contact rewrites velocity in a single frame, so the raw derivative spikes
+	# to hundreds of m/s^2 every time you so much as scrape a wall, and the lean
+	# snaps with it. Lean off a smoothed acceleration and only real cornering
+	# survives.
+	var raw := (vel - _prev_vel) / maxf(delta, 0.0001)
 	_prev_vel = vel
+	_smooth_accel = _smooth_accel.lerp(raw, minf(1.0, ACCEL_SMOOTH * delta))
+	var accel := _smooth_accel
 	var want := 0.0
 	if bool(Net.game_settings.get("monkey", true)):
 		var right := Vector3(cos(yaw), 0.0, -sin(yaw))
 		want = clampf(-accel.dot(right) * WOBBLE_GAIN, -WOBBLE_MAX, WOBBLE_MAX)
 	_roll = lerpf(_roll, want, minf(1.0, WOBBLE_RATE * delta))
 	return _roll
+
+
+## The arm casts from the rig, and the rig lags behind the player -- so at speed
+## the rig itself can end up on the far side of a wall, where the arm has
+## nothing to hit and the camera sits happily inside the geometry. Keep the rig
+## on the player's side of anything between them, and the arm always starts
+## somewhere real.
+func _declip(anchor: Vector3) -> void:
+	var space := get_world_3d().direct_space_state
+	var q := PhysicsRayQueryParameters3D.create(anchor, global_position)
+	q.exclude = [_player.get_rid()]
+	var hit := space.intersect_ray(q)
+	if hit:
+		global_position = (hit["position"] as Vector3).lerp(anchor, 0.2)
+
+
+# --- Death cam --------------------------------------------------------------
+## Dying should show you what happened, then where you are going: hold on
+## whoever did it, climb to a look at the whole thing, and come down on the spawn
+## exactly as the countdown runs out, so you are already looking at the ground
+## you land on.
+const DEATH_HOLD := 0.35     # of the countdown spent watching the killer
+const DEATH_RISE := 0.80     # ...up to here climbing; the rest is the descent
+const DEATH_HIGH := 20.0     # how far overhead the top of the arc sits
+
+var _death_left := 0.0
+var _death_len := 0.0
+var _death_at := Vector3.ZERO
+var _killer_at := Vector3.ZERO
+var _spawn_at := Vector3.ZERO
+
+
+func begin_death(death_at: Vector3, killer_at: Vector3, spawn_at: Vector3,
+		secs: float) -> void:
+	_death_len = maxf(0.4, secs)
+	_death_left = _death_len
+	_death_at = death_at
+	_killer_at = killer_at
+	_spawn_at = spawn_at
+
+
+func end_death() -> void:
+	_death_left = 0.0
+
+
+## Aim the rig at a point. The rig looks along its own -Z, so this is the yaw
+## and pitch that put that axis on the target -- set rather than snapped, so
+## handing control back at the end is seamless.
+func _aim_at(from: Vector3, to: Vector3) -> Array:
+	var d := to - from
+	if d.length() < 0.01:
+		return [yaw, pitch]
+	var flat := Vector2(d.x, d.z).length()
+	return [atan2(-d.x, -d.z), -atan2(d.y, maxf(flat, 0.01))]
+
+
+func _death_step(delta: float) -> void:
+	_death_left = maxf(0.0, _death_left - delta)
+	var u := 1.0 - _death_left / _death_len
+	var eye := _death_at + Vector3(0, 1.5, 0)
+	var high := _death_at + Vector3(0, DEATH_HIGH, 0)
+	var want_yaw := yaw
+	var want_pitch := pitch
+	var pivot := eye
+	if u < DEATH_HOLD:
+		# Whoever did it, if the server named them; the spot itself if not.
+		if _killer_at != Vector3.ZERO:
+			var aim := _aim_at(eye, _killer_at)
+			want_yaw = aim[0]
+			want_pitch = aim[1]
+	elif u < DEATH_RISE:
+		var k := (u - DEATH_HOLD) / (DEATH_RISE - DEATH_HOLD)
+		pivot = eye.lerp(high, k * k * (3.0 - 2.0 * k))
+		want_pitch = lerpf(want_pitch, CAM_PITCH_MAX * 0.9, k)
+	else:
+		var k := (u - DEATH_RISE) / (1.0 - DEATH_RISE)
+		k = k * k * (3.0 - 2.0 * k)
+		pivot = high.lerp(_spawn_at + Vector3(0, 1, 0), k)
+		want_pitch = lerpf(CAM_PITCH_MAX * 0.9, 0.4, k)
+	global_position = global_position.lerp(pivot, 1.0 - exp(-6.0 * delta))
+	yaw = lerp_angle(yaw, want_yaw, minf(1.0, 3.0 * delta))
+	pitch = lerpf(pitch, want_pitch, minf(1.0, 3.0 * delta))
+	rotation.y = yaw
+	rotation.x = -pitch
+	rotation.z = 0.0
+	if spring_arm:
+		spring_arm.spring_length = _arm_len

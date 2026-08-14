@@ -427,9 +427,15 @@ function checkDeath(id) {
   scores[id] = 0;
   deadUntil[id] = Date.now() + RESPAWN_MS;
   const pos = { x: players[id].x, y: players[id].y, z: players[id].z };
-  io.emit('playerDied', { id, ...pos, respawnMs: RESPAWN_MS });
   // What killed them names the line, and whoever landed it banks the kill.
   const hit = freshHit(id);
+  // Where the killer was standing rides along, so the dead player's camera can
+  // hold on them instead of cutting straight to the respawn.
+  const by = hit && hit.by && players[hit.by] ? hit.by : null;
+  const byPos = by
+    ? { byX: players[by].x, byY: players[by].y, byZ: players[by].z }
+    : {};
+  io.emit('playerDied', { id, ...pos, respawnMs: RESPAWN_MS, by, ...byPos });
   sysMsg(DEATH_LINES[hit ? hit.cause : 'blast'].replace('%s', players[id].name));
   if (hit && hit.by) {
     kills[hit.by] = (kills[hit.by] || 0) + 1;

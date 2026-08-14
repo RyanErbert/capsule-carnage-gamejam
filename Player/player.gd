@@ -232,7 +232,8 @@ func suicide() -> void:
 
 ## Slayer death: hide + freeze through the countdown, then pop up at a spawn
 ## point. The server restores health on its own matching timer.
-func die_slayer(respawn_secs: float) -> void:
+func die_slayer(respawn_secs: float, died_at := Vector3.INF,
+		killer_at := Vector3.ZERO) -> void:
 	if dead:
 		return
 	dead = true
@@ -248,12 +249,19 @@ func die_slayer(respawn_secs: float) -> void:
 	if capsuleCollider:
 		capsuleCollider.disabled = true
 	# Move to the respawn spot now so remotes see one clean jump, not a corpse
+	var fell_at: Vector3 = global_position if died_at == Vector3.INF else died_at
 	global_position = respawn_point()
+	# The body is already at the spawn; the CAMERA is what stays behind, holds on
+	# whoever did it, climbs, and comes down here as the countdown ends.
+	if camera_rig and camera_rig.has_method("begin_death"):
+		camera_rig.begin_death(fell_at, killer_at, global_position, respawn_secs)
 
 
 func _dead_tick(delta: float) -> void:
 	dead_timer -= delta
 	if dead_timer <= 0.0:
+		if camera_rig and camera_rig.has_method("end_death"):
+			camera_rig.end_death()
 		dead = false
 		visible = true
 		if capsuleCollider:

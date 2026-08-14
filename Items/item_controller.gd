@@ -156,7 +156,7 @@ func swap_to_first(index: int) -> void:
 
 ## Web consumeItem(): dispatch on the active slot's item type.
 func use_item() -> void:
-	if inventory.is_empty():
+	if inventory.is_empty() or player.dead:
 		return
 	var item: String = inventory[0]["type"]
 	var target: Variant = _aim_point()
