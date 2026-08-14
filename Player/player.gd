@@ -57,9 +57,11 @@ const SPRINT_KICK := 5.5          # ...and the shove the first frame gives you
 # Ctrl drives you at the floor. On flat ground it just plants you, but the
 # world is full of curved and banked faces, and arriving on one fast enough is
 # how you leave it faster: the run is redirected up the far side rather than
-# eaten. Only in the air, and it never fights an upward throw you have earned.
+# eaten. Held on the GROUND it is a tuck instead, feeding the downhill run --
+# nothing at all on the flat, most of it on a bowl wall.
 const SLAM_ACCEL := 55.0     # m/s2 downward, on top of gravity
 const SLAM_MAX := 46.0       # ...to this much downward speed and no further
+const SLAM_TUCK := 12.0      # ...and held on the ground, a tuck down the slope
 
 # --- Fall respawn (web §1.10) ---
 const FALL_RESPAWN_AIRTIME := 10.0
@@ -712,11 +714,21 @@ func _stick(was_touching: bool) -> void:
 ## while touching would just grind you into the surface -- and it stops at
 ## SLAM_MAX so it stays a tool rather than a way to tunnel through the world.
 func _slam(delta: float, typing: bool) -> void:
-	if typing or touching or dead or godmode or piloting or vehicle != null:
+	if typing or dead or godmode or piloting or vehicle != null:
 		return
 	if not Input.is_action_pressed("slam"):
 		return
 	var down := -up_direction
+	if touching:
+		# On the ground it is a tuck. Feed the DOWNHILL direction of whatever
+		# you are standing on, scaled by how steep it is -- the projection of
+		# down onto the surface is exactly sin(angle) long, so flat ground gets
+		# nothing and a bowl wall gets the lot, with no threshold to pick.
+		var slope := down - _surf_n * down.dot(_surf_n)
+		var steep := slope.length()
+		if steep > 0.02:
+			velocity += slope.normalized() * SLAM_TUCK * steep * delta
+		return
 	var falling := velocity.dot(down)
 	if falling >= SLAM_MAX:
 		return
