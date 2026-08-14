@@ -28,12 +28,6 @@ const ITEM_COLORS := {
 	"terragun": "#ffff44",
 }
 
-## Render deploy hook — kicks a server redeploy (used when the server is the
-## stale side). Owners consider this key non-sensitive for this project.
-const DEPLOY_HOOK := "https://api.render.com/deploy/srv-d9s2kkegekts73faq3vg?key=psfptLVM8D4"
-
-var _offer_pull := false
-var _offer_server_kick := false
 var _meters: VBoxContainer
 var _meter_fills: Array = []
 var _esc_menu: PanelContainer
@@ -54,11 +48,11 @@ func _ready() -> void:
 	_it_label.visible = false
 	_scoreboard.visible = false
 	_update_banner.visible = false
+	Net.client_outdated.connect(_on_client_outdated)
 	_version_label.text = "%s  %s" % [Net.version_text(), Net.git_commit()]
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
-		sync_node.version_mismatch.connect(_on_version_mismatch)
 	_chat_input.text_submitted.connect(_on_chat_submitted)
 	_chat_input.text_changed.connect(_on_chat_text_changed)
 	_chat_input.focus_exited.connect(_close_chat)
@@ -91,31 +85,14 @@ func _ready() -> void:
 	add_child(music)
 
 
-func _on_version_mismatch(server_build: String, _client_build: String) -> void:
+## An older client cannot be fixed from in here, and playing on against a newer
+## protocol is how desyncs and corrupt worlds happen. So it is a wall, not a
+## prompt: the banner stays up and the lobby refuses to let you back in until
+## the pull lands.
+func _on_client_outdated() -> void:
 	_update_banner.visible = true
-	_update_banner.text = "Version differs from server - checking who's behind..."
-	# Let the banner render before blocking on git.
-	await get_tree().process_frame
-	_diagnose_mismatch(server_build)
-
-
-## Uses commit ancestry to determine WHO is out of date:
-## server's commit is an ancestor of ours -> the server is behind (offer F10);
-## ours is an ancestor of the server's   -> we are behind (offer F9).
-func _diagnose_mismatch(server_build: String) -> void:
-	var dir := ProjectSettings.globalize_path("res://")
-	OS.execute("git", ["-C", dir, "fetch", "--quiet", "origin"], [], true)
-	var server_is_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", server_build, "HEAD"], [], true) == 0
-	var we_are_old := OS.execute("git", ["-C", dir, "merge-base", "--is-ancestor", "HEAD", server_build], [], true) == 0
-	if server_is_old:
-		_offer_server_kick = true
-		_update_banner.text = "SERVER IS OUT OF DATE (server %s, you %s)\nPress F10 to trigger a server redeploy (~2 min) - you'll be reconnected automatically." % [server_build, Net.git_commit()]
-	elif we_are_old:
-		_offer_pull = true
-		_update_banner.text = "YOUR GAME IS OUT OF DATE (you %s, server %s)\nPress F9 to update (runs git pull), then restart the game." % [Net.git_commit(), server_build]
-	else:
-		_offer_pull = true
-		_update_banner.text = "Your copy and the server have DIVERGED (you %s, server %s)\nPress F9 to try updating - if that fails, sort it out in git together." % [Net.git_commit(), server_build]
+	_update_banner.text = "OUT OF DATE  %s
+git pull, then restart" % Net.version_text()
 
 
 func _hotkey_input(event: InputEvent) -> void:
@@ -129,10 +106,6 @@ func _hotkey_input(event: InputEvent) -> void:
 		if event.keycode == KEY_T and not event.echo:
 			_open_chat()
 			get_viewport().set_input_as_handled()  # don't type the opening "t"
-		elif _offer_pull and event.keycode == KEY_F9:
-			_run_git_pull()
-		elif _offer_server_kick and event.keycode == KEY_F10:
-			_trigger_server_deploy()
 
 
 # --- Chat (web §6.5: T to talk, Enter sends, Esc/unfocus closes) ---
@@ -389,45 +362,6 @@ func _expire_chat_rows() -> void:
 	for row in _chat_log.get_children():
 		if now - int(row.get_meta("born", now)) > int(CHAT_LIFETIME * 1000.0):
 			row.free()
-
-
-func _run_git_pull() -> void:
-	_offer_pull = false
-	_update_banner.text = "Updating (git pull)..."
-	var output: Array = []
-	var code := OS.execute("git", ["-C", ProjectSettings.globalize_path("res://"), "pull", "--ff-only"], output, true)
-	var result := "".join(output).strip_edges()
-	if code == 0:
-		if result.contains("Already up to date"):
-			_update_banner.text = "You already have the latest - nothing to pull."
-		else:
-			# Self-restart on the new code: spawn a fresh instance with the
-			# same command line, then quit this one.
-			_update_banner.text = "UPDATED - restarting on the new build..."
-			await get_tree().create_timer(1.5).timeout
-			OS.create_process(OS.get_executable_path(), OS.get_cmdline_args())
-			get_tree().quit()
-	else:
-		_offer_pull = true
-		_update_banner.text = "Update failed (local changes? git missing?) - press F9 to retry\n%s" % result.left(200)
-
-
-func _trigger_server_deploy() -> void:
-	_offer_server_kick = false
-	_update_banner.text = "Triggering server redeploy..."
-	var req := HTTPRequest.new()
-	add_child(req)
-	req.request_completed.connect(func(_r, code, _h, _b):
-		if code >= 200 and code < 300:
-			_update_banner.text = "Server redeploy started - give it ~2 minutes; you'll be reconnected automatically."
-		else:
-			_offer_server_kick = true
-			_update_banner.text = "Deploy hook failed (HTTP %d) - check the Render dashboard.\nPress F10 to retry." % code
-		req.queue_free()
-	)
-	if req.request(DEPLOY_HOOK) != OK:
-		_offer_server_kick = true
-		_update_banner.text = "Could not reach the deploy hook - check your connection. Press F10 to retry."
 
 
 ## Blocky 8x8 icons, drawn from a text mask and blown up nearest-neighbour so

@@ -11,6 +11,7 @@ signal socket_connected
 signal socket_disconnected
 signal event_received(event: String, data: Variant)
 signal server_outdated
+signal client_outdated
 
 ## Deployed game server (auto-deploys from this repo's main branch).
 ## Override with FRIENDSLOP_SERVER=ws://localhost:3001 for local dev.
@@ -70,8 +71,12 @@ func note_server(build: String, uptime_ms: int, build_time := 0,
 		server_version = [int(version[0]), int(version[1]), int(version[2])]
 	_uptime_ms = uptime_ms
 	_uptime_at = Time.get_ticks_msec() / 1000.0
-	if was != build and server_stale():
+	if was == build:
+		return
+	if server_stale():
 		_rebuild_server()
+	elif client_stale():
+		client_outdated.emit()
 
 
 ## A server on an older commit is not something to play on: the protocol and the

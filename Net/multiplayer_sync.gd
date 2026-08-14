@@ -6,7 +6,6 @@ extends Node
 
 signal scores_changed(scores: Dictionary)
 signal holder_changed(holder_id: String)
-signal version_mismatch(server_build: String, client_build: String)
 
 const RemotePlayerScene := preload("res://Net/remote_player.tscn")
 const SEND_RATE := 20.0  # Hz — the web client sent every frame; 20 Hz is plenty
@@ -37,6 +36,7 @@ func _ready() -> void:
 	Net.socket_connected.connect(_on_socket_connected)
 	Net.socket_disconnected.connect(_on_socket_disconnected)
 	Net.server_outdated.connect(_on_server_outdated)
+	Net.client_outdated.connect(_on_client_outdated)
 	Net.event_received.connect(_on_event)
 	if Net.is_socket_connected():
 		_on_socket_connected()
@@ -60,6 +60,13 @@ func _on_socket_connected() -> void:
 ## and everything spawned in it go, and we come back up in the lobby.
 func _on_server_outdated() -> void:
 	_return_to_menu("server is behind, rebuilding")
+
+
+## Nothing here can update us, and an old client on a new protocol desyncs
+## quietly rather than loudly. Out of the match, and the lobby keeps JOIN
+## disabled until the pull lands.
+func _on_client_outdated() -> void:
+	_return_to_menu("client is out of date, pull required")
 
 
 func _on_socket_disconnected() -> void:
@@ -121,10 +128,6 @@ func _on_event(event: String, data: Variant) -> void:
 			_return_to_menu("kicked (inactivity)")
 		"gameEnded":
 			_return_to_menu("game ended by vote")
-		"versionMismatch":
-			var server_build := str(data.get("server", "?"))
-			print("[net] VERSION MISMATCH — server %s, local %s" % [server_build, Net.git_commit()])
-			version_mismatch.emit(server_build, Net.git_commit())
 		"kicked", "gameEnded":
 			# Menu flow comes in a later phase; for now just note it.
 			print("[net] server ended session: ", event)
