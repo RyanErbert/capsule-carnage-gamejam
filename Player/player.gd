@@ -358,12 +358,12 @@ func _physics_process(delta: float) -> void:
 	var grappling: bool = _items != null and _items.is_grappling
 
 	# Global tuning sliders (Esc menu, server-synced)
-	var spd := clampf(float(Net.game_settings.get("speedScale", 0.7)), 0.05, 3.0)
-	var acc := clampf(float(Net.game_settings.get("accelScale", 1.0)), 0.05, 3.0)
-	var trn := clampf(float(Net.game_settings.get("turnScale", 1.0)), 0.05, 3.0)
-	var bst := clampf(float(Net.game_settings.get("boostScale", 1.0)), 0.05, 3.0)
-	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 3.0)
-	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 3.0)
+	var spd := clampf(float(Net.game_settings.get("speedScale", 1.3)), 0.05, 4.0)
+	var acc := clampf(float(Net.game_settings.get("accelScale", 1.5)), 0.05, 4.0)
+	var trn := clampf(float(Net.game_settings.get("turnScale", 1.0)), 0.05, 4.0)
+	var bst := clampf(float(Net.game_settings.get("boostScale", 1.93)), 0.05, 4.0)
+	var jmp := clampf(float(Net.game_settings.get("jumpScale", 0.58)), 0.05, 4.0)
+	var grv := clampf(float(Net.game_settings.get("gravityScale", 1.0)), 0.05, 4.0)
 	# (dragging the generator slows you via real rope tension — generators.gd)
 	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
 	_no_snap = maxf(0.0, _no_snap - delta)

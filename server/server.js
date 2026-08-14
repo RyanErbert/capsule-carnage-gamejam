@@ -330,10 +330,10 @@ const gameSettings = {
   infiniteAmmo: true,        // default ON per Ryan
   selfAssign: true,          // creative: players may spawn items for themselves
   pedestals: true,           // auto item pedestals when a map generates
-  speedScale: 0.7,           // movement tuning: top speed
-  accelScale: 1.0,           // ...how hard you push toward it
-  turnScale: 1.0,            // ...how fast momentum swings to a new heading
-  boostScale: 1.0,           // ...and what holding shift is worth
+  speedScale: 1.3,           // movement tuning: top speed        -> 11.7 m/s
+  accelScale: 1.5,           // ...how hard you push toward it     -> 90 m/s2
+  turnScale: 1.0,            // ...how fast momentum swings        -> 4.0 /s
+  boostScale: 1.93,          // ...and what holding shift is worth -> 3.9x
   jumpScale: 0.58,           // ~1/3 of web jump HEIGHT (velocity scales by sqrt)
   gravityScale: 1.0,
   gridW: 32,                 // painted map size in pixels, per axis

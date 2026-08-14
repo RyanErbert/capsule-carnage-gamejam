@@ -16,17 +16,31 @@ const TOGGLES := [
 	["pedestals", "Item pedestals"],
 	["monkey", "Monkey ball"],
 ]
-## key, label, and the base constant + unit the scale multiplies — the readout
-## next to each slider shows the number the slider actually lands on, so a bad
-## feel can be read off the menu instead of guessed at.
+## key, label, the base constant + unit the scale multiplies, then the range and
+## whether the slider runs backwards. The readout shows the number the slider
+## actually lands on, so a bad feel can be read off the menu instead of guessed.
+##
+## Every slider used to share one 0.1-2.0 range, which put the tuned defaults
+## hard against the right-hand end -- boost sat at 1.93 of 2.0 with nowhere left
+## to go. Each has its own range now, chosen so the default lands around a third
+## of the way along: room to push, and the useless bottom end trimmed off.
+##
+## Gravity is inverted, because the slider should read as the thing you want.
+## Pushing it up makes you lighter.
 const SLIDERS := [
-	["speedScale", "Speed", Player.MAX_SPEED, "m/s"],
-	["accelScale", "Accel", Player.MOVE_ACCEL, "m/s2"],
-	["turnScale", "Turn", Player.TURN_RATE, "/s"],
-	["boostScale", "Boost", Player.BOOST_MULT, "x"],
-	["jumpScale", "Jump", Player.JUMP_IMPULSE, "m/s"],
-	["gravityScale", "Gravity", Player.GRAVITY, "m/s2"],
+	["speedScale", "Speed", Player.MAX_SPEED, "m/s", 0.4, 3.0, false],
+	["accelScale", "Accel", Player.MOVE_ACCEL, "m/s2", 0.5, 3.5, false],
+	["turnScale", "Turn", Player.TURN_RATE, "/s", 0.2, 2.5, false],
+	["boostScale", "Boost", Player.BOOST_MULT, "x", 1.0, 4.0, false],
+	["jumpScale", "Jump", Player.JUMP_IMPULSE, "m/s", 0.2, 1.5, false],
+	["gravityScale", "Gravity", Player.GRAVITY, "m/s2", 0.15, 1.6, true],
 ]
+
+
+## An inverted slider shows one number and means the other; the two are
+## reflections about the middle of the range, so the mapping is its own inverse.
+static func _flip(entry: Array, v: float) -> float:
+	return (float(entry[4]) + float(entry[5]) - v) if bool(entry[6]) else v
 
 var _checks: Dictionary = {}
 var _sliders: Dictionary = {}
@@ -68,11 +82,15 @@ func _ready() -> void:
 	for entry in SLIDERS:
 		var readout := Label.new()
 		var slider := _slider_row(entry[1], readout)
+		slider.min_value = float(entry[4])
+		slider.max_value = float(entry[5])
 		slider.value_changed.connect(func(v: float):
-			readout.text = "%.2f  %.1f%s" % [v, v * float(entry[2]), entry[3]])
+			var scale := _flip(entry, v)
+			readout.text = "%.2f  %.1f%s" % [scale, scale * float(entry[2]), entry[3]])
 		slider.drag_ended.connect(func(changed: bool):
 			if changed:
-				Net.emit_event("updateGameSetting", {"key": entry[0], "value": slider.value}))
+				Net.emit_event("updateGameSetting",
+					{"key": entry[0], "value": _flip(entry, slider.value)}))
 		_sliders[entry[0]] = slider
 		_readouts[entry[0]] = readout
 
@@ -130,6 +148,9 @@ func apply(gs: Variant) -> void:
 	for key in _checks:
 		_checks[key].set_pressed_no_signal(bool(gs.get(key, false)))
 	for entry in SLIDERS:
-		var v := clampf(float(gs.get(entry[0], 1.0)), 0.1, 2.0)
-		_sliders[entry[0]].set_value_no_signal(v)
-		_readouts[entry[0]].text = "%.2f  %.1f%s" % [v, v * float(entry[2]), entry[3]]
+		# The server speaks in scales; the slider may show its reflection.
+		var scale := clampf(float(gs.get(entry[0], 1.0)),
+			float(entry[4]), float(entry[5]))
+		_sliders[entry[0]].set_value_no_signal(_flip(entry, scale))
+		_readouts[entry[0]].text = "%.2f  %.1f%s" % [
+			scale, scale * float(entry[2]), entry[3]]
