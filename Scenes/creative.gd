@@ -840,7 +840,11 @@ func _physics_process(delta: float) -> void:
 		return
 	_update_fog_bounds()
 	_update_ambience(delta)
-	if player.vehicle != null:
+	# Nothing here may touch the body unless the body is the thing being played.
+	# Flying the drone, piloting a bot or dead, it is parked and often left inside
+	# geometry on purpose, so a rescue that lifts it a metre just walks it up into
+	# the air under whatever you are actually controlling.
+	if player.vehicle != null or player.godmode or player.piloting or player.dead:
 		return
 	# Backstop: anything that slips below the world snaps back to a spawn
 	if player.global_position.y < KILL_Y:
@@ -851,7 +855,6 @@ func _physics_process(delta: float) -> void:
 	if _is_buried():
 		player.global_position.y += 1.0
 		player.velocity.y = maxf(player.velocity.y, 0.0)
-		player.mark_bury(1.0, 1.0)
 
 
 ## Distance-based white-out past FOG_START; at FOG_WHITE the screen is fully

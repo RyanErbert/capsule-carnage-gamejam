@@ -109,16 +109,7 @@ var _builds: Node
 var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
-var _pop_cd := 0.0            # rate limit on the ejection report
-var _kick_cd := 0.0           # rate limit on the upward-velocity report
-var _loop_age := 0.0          # how long the current bouncing-on-the-spot window is
-var _loop_takeoffs := 0       # ...and how many times we have left the ground in it
-var _loop_gain := 0.0
-var _loop_cd := 0.0
-var _stick_cd := 0.0          # rate limit on the ground-snap report
 var _stick_grace := 0.0       # seconds the reel may keep closing a gap for
-var _pop_total := 0           # ...and how many there have been in total
-var _pop_logged := 0          # lines written to user://pop.log this session
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
 var _jump_eaten := false      # the press that let go of a rope must not jump
 
@@ -152,13 +143,11 @@ func _ready() -> void:
 	# whole second and ended at vy 0.00), which is what forces a threshold angle
 	# to exist at all. Floating mode has no such opinion, so neither do we.
 	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
-	_make_hud()
 	# Floating mode still refuses to slide along anything it meets closer to
 	# head-on than this, and stops dead instead. A marble always slides.
 	wall_min_slide_angle = 0.0
 	safe_margin = 0.02
 	spawn_position = global_position
-	_log_session()
 	if devInfoLabel:
 		devInfoLabel.visible = false
 	use_cube = Settings.model == "cube"
@@ -274,14 +263,6 @@ func _dead_tick(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_F9:
-		dump_tape_now()
-		return
-	if event is InputEventKey and event.pressed and not event.echo \
-			and event.keycode == KEY_F10 and _hud:
-		_hud.visible = not _hud.visible
-		return
-	if event is InputEventKey and event.pressed and not event.echo \
 			and event.keycode == KEY_K \
 			and get_viewport().gui_get_focus_owner() == null \
 			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -378,9 +359,6 @@ func _physics_process(delta: float) -> void:
 	# (dragging the generator slows you via real rope tension — generators.gd)
 	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
 	_no_snap = maxf(0.0, _no_snap - delta)
-	_kick_cd = maxf(0.0, _kick_cd - delta)
-	_loop_cd = maxf(0.0, _loop_cd - delta)
-	_stick_cd = maxf(0.0, _stick_cd - delta)
 
 	# Riding a channel replaces every other movement mode while it lasts: down
 	# is the trough's wall, not the world's floor.
@@ -488,8 +466,6 @@ func _physics_process(delta: float) -> void:
 	_resolve_contact()
 	_curb_ejection(pre_pos, pre_vel, delta)
 	_stick(was_touching)
-	_watch_loop(delta, was_grounded)
-	_record(delta, pre_pos, pre_vel)
 
 
 # --- Channel riding (Items/builds.gd §4.4) ----------------------------------
@@ -612,7 +588,6 @@ func _resolve_contact() -> void:
 	var raw := velocity.dot(up_direction) - before.dot(up_direction)
 	if grounded and _no_snap <= 0.0 and raw > GROUND_LIFT_MAX:
 		velocity -= up_direction * (raw - GROUND_LIFT_MAX)
-	_watch_kick(before, raw)
 
 
 ## A body that is already overlapping geometry gets shoved back out, and that
@@ -632,83 +607,15 @@ func _curb_ejection(pre_pos: Vector3, pre_vel: Vector3, delta: float) -> void:
 	if over <= allowed:
 		return
 	global_position -= resid * (1.0 - allowed / over)
-	_pop_total += 1
-	_pop_cd -= delta
-	if _pop_cd > 0.0:
-		return
-	_pop_cd = 0.5
-	# What we are overlapping is the whole question, so name it by its place in
-	# the tree — that says terrain vs builds vs wfc vs props without guessing.
-	var who := ""
-	for i in get_slide_collision_count():
-		var c: Object = get_slide_collision(i).get_collider()
-		if c is Node:
-			who += " " + str((c as Node).get_path()).replace("/root/", "")
-	_log_pop("[pop] #%d ejected %.2f m (allowed %.2f) at %v dir(%.2f,%.2f,%.2f) |v|%.1f %s hit:%s" % [
-		_pop_total, over, allowed, global_position.round(),
-		resid.x / over, resid.y / over, resid.z / over, velocity.length(),
-		"ground" if grounded else ("face" if touching else "air"), who])
 
 
 ## Both to the editor Output and to user://pop.log, so a session can be read
 ## back afterwards instead of copied out of a scrolling panel.
-const POP_LOG := "user://pop.log"
-const POP_LOG_MAX := 4000  # a tape dump alone is 122 lines
-
-func _log_pop(text: String) -> void:
-	print(text)
-	if _pop_logged >= POP_LOG_MAX:
-		return
-	var f := FileAccess.open(POP_LOG, FileAccess.READ_WRITE) if FileAccess.file_exists(POP_LOG) \
-		else FileAccess.open(POP_LOG, FileAccess.WRITE)
-	if f == null:
-		return
-	f.seek_end()
-	_pop_logged += 1
-	f.store_line(text)
-	if _pop_logged == POP_LOG_MAX:
-		f.store_line("[log] ...capped at %d lines for this session" % POP_LOG_MAX)
-	f.close()
-
-
-## Written the moment a body spawns, whether or not anything goes wrong, so a
-## silent log means "played and nothing fired" rather than "never ran".
-func _log_session() -> void:
-	var stamp := FileAccess.get_modified_time("res://Player/player.gd")
-	_log_pop("=== %s  monkey=%s  %s  player.gd built %s ===" % [
-		Time.get_datetime_string_from_system(), Net.game_settings.get("monkey", true),
-		Settings.player_name, Time.get_datetime_string_from_unix_time(int(stamp))])
 
 
 ## Where the upward velocity actually comes from. A landing is not this: it ends
 ## at rest against the floor, not climbing. This is the frame where you were not
 ## going up and suddenly are, which is what reads as being thrown.
-const KICK_MIN := 2.5
-
-func _watch_kick(before: Vector3, raw_lift: float) -> void:
-	if before.dot(up_direction) > 0.5 or velocity.dot(up_direction) < KICK_MIN:
-		return
-	if _kick_cd > 0.0:
-		return
-	_kick_cd = 0.35
-	_log_pop("[kick] +%.1f up (asked %.1f, was %.1f) |v| %.1f -> %.1f  at %v  %s%s" % [
-		velocity.dot(up_direction), raw_lift, before.dot(up_direction), before.length(),
-		velocity.length(), global_position.round(),
-		"ground" if grounded else ("face" if touching else "air"), _contact_report()])
-
-
-## Every face we are touching, its angle from upright, and the node it belongs
-## to — which is the difference between "a ramp" and "something overlapping me".
-func _contact_report() -> String:
-	var out := "  %d faces:" % get_slide_collision_count()
-	for i in get_slide_collision_count():
-		var c := get_slide_collision(i)
-		var n := c.get_normal()
-		var who: Object = c.get_collider()
-		out += " [%.0fdeg n(%.2f,%.2f,%.2f) %s]" % [
-			rad_to_deg(acos(clampf(n.dot(up_direction), -1.0, 1.0))), n.x, n.y, n.z,
-			str((who as Node).get_path()).replace("/root/", "") if who is Node else "?"]
-	return out
 
 
 ## Bouncing on the spot. Standing still and leaving the ground over and over is
@@ -721,20 +628,6 @@ func _contact_report() -> String:
 ## on the TOTAL height gained that velocity cannot account for. Position cannot
 ## move without either velocity or someone writing to it, so a run of frames
 ## climbing with vy at zero names the culprit outright.
-const REC_FRAMES := 120        # two seconds of history
-const REC_WINDOW := 0.5        # ...and how long the climb has to happen within
-const REC_TRIGGER := 0.45      # metres of unexplained height that counts
-const REC_DUMPS := 3           # ...and how many dumps one session may write
-
-var _rec: Array[String] = []
-var _rec_at := 0
-var _rec_gain: Array[float] = []   # per-frame unexplained rise, same window
-var _rec_dumps := 0
-var _rec_cd := 0.0
-var _hud: Label               # the probe's readout, in the game
-var _hud_flash := 0.0
-var _hud_run := 0.0
-var _bury := 0                # times creative.gd decided we were buried
 
 
 ## What is AROUND the body, not just what it is touching. At the instant of a
@@ -742,167 +635,6 @@ var _bury := 0                # times creative.gd decided we were buried
 ## caused it -- the face just ahead, the one under you, the crease behind -- never
 ## appears. Six rays along the direction of travel, each reported as
 ## angle-from-upright / distance, which is the shape of the ground in one line.
-const NEAR_REACH := 3.0
-
-func _nearby() -> String:
-	var space := get_world_3d().direct_space_state
-	var fwd := Vector3(velocity.x, 0.0, velocity.z)
-	if fwd.length() < 0.5:
-		fwd = -global_transform.basis.z
-		fwd = Vector3(fwd.x, 0.0, fwd.z)
-	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.FORWARD
-	var side := up_direction.cross(fwd).normalized()
-	var down := -up_direction
-	var rays := {
-		"dn": down,
-		"ah": fwd,
-		"ad": (fwd + down).normalized(),
-		"bd": (-fwd + down).normalized(),
-		"ld": (side + down).normalized(),
-		"rd": (-side + down).normalized(),
-	}
-	var out := ""
-	for key: String in rays:
-		var q := PhysicsRayQueryParameters3D.create(
-			global_position, global_position + (rays[key] as Vector3) * NEAR_REACH)
-		q.exclude = [get_rid()]
-		var hit := space.intersect_ray(q)
-		if hit.is_empty():
-			continue
-		var n: Vector3 = hit["normal"]
-		out += " %s%.0f/%.2f" % [key, rad_to_deg(acos(clampf(
-			n.dot(up_direction), -1.0, 1.0))), global_position.distance_to(hit["position"])]
-	return out
-
-
-func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
-	# Height gained beyond what the frame set out to gain. Contact can only ever
-	# SUBTRACT from intended motion, so rising further than you meant to is the
-	# one thing physics cannot do. Measuring `actual - intended` instead counts an
-	# ordinary landing as a huge rise -- you meant to drop 0.37 m and the ground
-	# held you at zero -- which is how the first cut of this read a touchdown as a
-	# teleport.
-	var want := (pre_vel * delta).dot(up_direction)
-	var slip := maxf(0.0, (global_position - pre_pos).dot(up_direction) - maxf(0.0, want))
-	var faces := ""
-	for i in get_slide_collision_count():
-		faces += " %.0f" % rad_to_deg(acos(clampf(
-			get_slide_collision(i).get_normal().dot(up_direction), -1.0, 1.0)))
-	var line := "%7.2f %6.3f %+7.2f %+6.1f %s%s n%d%s  |%s" % [
-		global_position.dot(up_direction), slip,
-		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
-		"T" if touching else "-", "G" if grounded else "-",
-		get_slide_collision_count(), faces, _nearby()]
-	if _rec.size() < REC_FRAMES:
-		_rec.append(line)
-		_rec_gain.append(slip)
-	else:
-		_rec[_rec_at] = line
-		_rec_gain[_rec_at] = slip
-	_rec_at = (_rec_at + 1) % REC_FRAMES
-
-	# Sum the unexplained rise over the last REC_WINDOW seconds. Computed every
-	# frame, not only when a dump is allowed, because the readout wants it too.
-	var span := int(REC_WINDOW / maxf(delta, 0.001))
-	var total := 0.0
-	for k in mini(span, _rec_gain.size()):
-		total += _rec_gain[(_rec_at - 1 - k + REC_FRAMES * 2) % _rec_gain.size()]
-	_hud_run = total
-	_hud_flash = maxf(0.0, _hud_flash - delta * 2.0)
-	_paint_hud(slip, faces)
-
-	_rec_cd = maxf(0.0, _rec_cd - delta)
-	if total < REC_TRIGGER or _rec_dumps >= REC_DUMPS or _rec_cd > 0.0:
-		return
-	_hud_flash = 1.0
-	_dump_tape("climbed %.2f m in %.1fs that velocity cannot account for" % [total, REC_WINDOW])
-
-
-## The same readout the probe had, in the game. SLIP is height this frame that
-## the velocity going into it cannot account for; RUN is that totalled over half
-## a second, and it going red is the detector saying "there it is". The point is
-## to see whether what you FEEL as a jump is what the detector CALLS one -- every
-## wrong answer today came from me picking the threshold and never checking it
-## against the thing you were actually looking at.
-func _paint_hud(slip: float, faces: String) -> void:
-	if _hud == null or not _hud.visible:
-		return
-	_hud.text = "TAPE %d\n\nslip %+.3f   run %+.3f\ny %.2f  vy %+.2f  speed %.1f\n%s%s  n%d%s" % [
-		_rec_dumps, _bury, slip, _hud_run, global_position.dot(up_direction),
-		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
-		"TOUCH " if touching else "air   ", "GROUND" if grounded else "      ",
-		get_slide_collision_count(), faces]
-	_hud.add_theme_color_override("font_color",
-		Color(1.0, 1.0 - _hud_flash, 1.0 - _hud_flash))
-
-
-func _make_hud() -> void:
-	var layer := CanvasLayer.new()
-	layer.layer = 100
-	add_child(layer)
-	_hud = Label.new()
-	_hud.position = Vector2(14, 10)
-	_hud.add_theme_font_size_override("font_size", 16)
-	_hud.add_theme_color_override("font_outline_color", Color.BLACK)
-	_hud.add_theme_constant_override("outline_size", 6)
-	layer.add_child(_hud)
-
-
-## creative.gd lifts the body a whole metre when the terrain density field says
-## it is buried, from ITS physics step, not ours. Nothing in here can see that:
-## it lands after _record has already run, which is why slip reads 0.000 through
-## a one metre jump. So it reports itself. If the jump you feel lines up with
-## BURY going up and the screen flashing, that line is the bug; if you jump and
-## this stays still, it is not, and I am wrong.
-func mark_bury(density: float, lifted: float) -> void:
-	_bury += 1
-	_hud_flash = 1.0
-	if _bury <= 40:
-		_log_pop("[bury] #%d lifted %.2f m, density %.3f, at %v  vy %+.2f %s%s" % [
-			_bury, lifted, density, global_position.round(), velocity.dot(up_direction),
-			"ground" if grounded else ("face" if touching else "AIR"), _nearby()])
-
-
-## Every automatic trigger so far has been ME deciding what the bug looks like,
-## and each has been wrong about it at least once. This one is Ryan's: press it
-## the instant the jump happens and the last two seconds go to the log, whatever
-## they contain. No threshold of mine gets to rule it out.
-func dump_tape_now() -> void:
-	_dump_tape("asked for by hand")
-	_hud_flash = 1.0
-	Sfx.boost(global_position, 0.25)   # so you know it took, without a word on screen
-
-
-func _dump_tape(why: String) -> void:
-	_rec_dumps += 1
-	_rec_cd = 4.0
-	_log_pop("[tape] %s, at %v%s" % [why, global_position.round(), _contact_report()])
-	_log_pop("[tape]       y   slip      vy  speed  ctc  touching | around: dn ahead ahead-dn behind-dn left-dn right-dn  as angle/distance")
-	for k in _rec.size():
-		_log_pop("[tape] " + _rec[(_rec_at + k) % _rec.size()])
-
-
-const LOOP_WINDOW := 3.0     # seconds the takeoffs have to fall within
-const LOOP_TAKEOFFS := 3     # ...and how many of them counts as a loop
-const LOOP_STILL := 2.5      # horizontal speed below which we are "not moving"
-
-func _watch_loop(delta: float, was_grounded: bool) -> void:
-	_loop_age += delta
-	if _loop_age > LOOP_WINDOW:
-		_loop_age = 0.0
-		_loop_takeoffs = 0
-		_loop_gain = 0.0
-	if Vector2(velocity.x, velocity.z).length() > LOOP_STILL:
-		_loop_takeoffs = 0        # actually going somewhere: not a loop
-		return
-	if was_grounded and not grounded:
-		_loop_takeoffs += 1
-		_loop_gain = maxf(_loop_gain, velocity.dot(up_direction))
-	if _loop_takeoffs < LOOP_TAKEOFFS or _loop_cd > 0.0:
-		return
-	_loop_cd = 3.0
-	_log_pop("[loop] left the ground %d times in %.1fs while standing still, best +%.1f up, at %v%s" % [
-		_loop_takeoffs, _loop_age, _loop_gain, global_position.round(), _contact_report()])
 
 
 ## Terrain is a mesh of flat triangles, so following it exactly means popping
@@ -941,13 +673,6 @@ func _stick(was_touching: bool) -> void:
 	touching = true
 	grounded = true
 	_surf_n = n
-	# This moves the body without touching its velocity, so it shows up as
-	# neither a pop nor a kick. On a crest it can reel you down most of a metre
-	# in one frame, which on its own would read as being dropped.
-	if drop > 0.25 and _stick_cd <= 0.0:
-		_stick_cd = 0.4
-		_log_pop("[stick] reeled down %.2f m in one frame at %v  |v|%.1f%s" % [
-			drop, global_position.round(), velocity.length(), _contact_report()])
 
 
 ## A hook that has bitten is an anchor, not a destination. Gravity and the
