@@ -152,6 +152,7 @@ func _ready() -> void:
 	# whole second and ended at vy 0.00), which is what forces a threshold angle
 	# to exist at all. Floating mode has no such opinion, so neither do we.
 	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
+	_make_hud()
 	# Floating mode still refuses to slide along anything it meets closer to
 	# head-on than this, and stops dead instead. A marble always slides.
 	wall_min_slide_angle = 0.0
@@ -272,6 +273,14 @@ func _dead_tick(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_F9:
+		dump_tape_now()
+		return
+	if event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_F10 and _hud:
+		_hud.visible = not _hud.visible
+		return
 	if event is InputEventKey and event.pressed and not event.echo \
 			and event.keycode == KEY_K \
 			and get_viewport().gui_get_focus_owner() == null \
@@ -644,7 +653,7 @@ func _curb_ejection(pre_pos: Vector3, pre_vel: Vector3, delta: float) -> void:
 ## Both to the editor Output and to user://pop.log, so a session can be read
 ## back afterwards instead of copied out of a scrolling panel.
 const POP_LOG := "user://pop.log"
-const POP_LOG_MAX := 900   # a tape dump alone is 120 lines
+const POP_LOG_MAX := 4000  # a tape dump alone is 122 lines
 
 func _log_pop(text: String) -> void:
 	print(text)
@@ -722,6 +731,9 @@ var _rec_at := 0
 var _rec_gain: Array[float] = []   # per-frame unexplained rise, same window
 var _rec_dumps := 0
 var _rec_cd := 0.0
+var _hud: Label               # the probe's readout, in the game
+var _hud_flash := 0.0
+var _hud_run := 0.0
 
 
 func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
@@ -733,12 +745,15 @@ func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
 	# teleport.
 	var want := (pre_vel * delta).dot(up_direction)
 	var slip := maxf(0.0, (global_position - pre_pos).dot(up_direction) - maxf(0.0, want))
-	var line := "%7.3f %7.3f %+7.3f %+7.3f %s%s n%d %s" % [
+	var faces := ""
+	for i in get_slide_collision_count():
+		faces += " %.0f" % rad_to_deg(acos(clampf(
+			get_slide_collision(i).get_normal().dot(up_direction), -1.0, 1.0)))
+	var line := "%7.2f %6.3f %+7.2f %+6.1f %s%s n%d%s" % [
 		global_position.dot(up_direction), slip,
 		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
 		"T" if touching else "-", "G" if grounded else "-",
-		get_slide_collision_count(),
-		"%3.0fdeg" % rad_to_deg(acos(clampf(_surf_n.dot(up_direction), -1.0, 1.0)))]
+		get_slide_collision_count(), faces]
 	if _rec.size() < REC_FRAMES:
 		_rec.append(line)
 		_rec_gain.append(slip)
@@ -747,21 +762,68 @@ func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
 		_rec_gain[_rec_at] = slip
 	_rec_at = (_rec_at + 1) % REC_FRAMES
 
-	_rec_cd = maxf(0.0, _rec_cd - delta)
-	if _rec_dumps >= REC_DUMPS or _rec_cd > 0.0:
-		return
-	# Sum the unexplained rise over the last REC_WINDOW seconds only.
+	# Sum the unexplained rise over the last REC_WINDOW seconds. Computed every
+	# frame, not only when a dump is allowed, because the readout wants it too.
 	var span := int(REC_WINDOW / maxf(delta, 0.001))
 	var total := 0.0
 	for k in mini(span, _rec_gain.size()):
 		total += _rec_gain[(_rec_at - 1 - k + REC_FRAMES * 2) % _rec_gain.size()]
-	if total < REC_TRIGGER:
+	_hud_run = total
+	_hud_flash = maxf(0.0, _hud_flash - delta * 2.0)
+	_paint_hud(slip, faces)
+
+	_rec_cd = maxf(0.0, _rec_cd - delta)
+	if total < REC_TRIGGER or _rec_dumps >= REC_DUMPS or _rec_cd > 0.0:
 		return
+	_hud_flash = 1.0
+	_dump_tape("climbed %.2f m in %.1fs that velocity cannot account for" % [total, REC_WINDOW])
+
+
+## The same readout the probe had, in the game. SLIP is height this frame that
+## the velocity going into it cannot account for; RUN is that totalled over half
+## a second, and it going red is the detector saying "there it is". The point is
+## to see whether what you FEEL as a jump is what the detector CALLS one -- every
+## wrong answer today came from me picking the threshold and never checking it
+## against the thing you were actually looking at.
+func _paint_hud(slip: float, faces: String) -> void:
+	if _hud == null or not _hud.visible:
+		return
+	_hud.text = "TAPE %d\n\nslip %+.3f   run %+.3f\ny %.2f  vy %+.2f  speed %.1f\n%s%s  n%d%s" % [
+		_rec_dumps, slip, _hud_run, global_position.dot(up_direction),
+		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
+		"TOUCH " if touching else "air   ", "GROUND" if grounded else "      ",
+		get_slide_collision_count(), faces]
+	_hud.add_theme_color_override("font_color",
+		Color(1.0, 1.0 - _hud_flash, 1.0 - _hud_flash))
+
+
+func _make_hud() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 100
+	add_child(layer)
+	_hud = Label.new()
+	_hud.position = Vector2(14, 10)
+	_hud.add_theme_font_size_override("font_size", 16)
+	_hud.add_theme_color_override("font_outline_color", Color.BLACK)
+	_hud.add_theme_constant_override("outline_size", 6)
+	layer.add_child(_hud)
+
+
+## Every automatic trigger so far has been ME deciding what the bug looks like,
+## and each has been wrong about it at least once. This one is Ryan's: press it
+## the instant the jump happens and the last two seconds go to the log, whatever
+## they contain. No threshold of mine gets to rule it out.
+func dump_tape_now() -> void:
+	_dump_tape("asked for by hand")
+	_hud_flash = 1.0
+	Sfx.boost(global_position, 0.25)   # so you know it took, without a word on screen
+
+
+func _dump_tape(why: String) -> void:
 	_rec_dumps += 1
 	_rec_cd = 4.0
-	_log_pop("[tape] climbed %.2f m in %.1fs that velocity cannot account for, at %v%s" % [
-		total, REC_WINDOW, global_position.round(), _contact_report()])
-	_log_pop("[tape]       y   slip      vy   speed  ctc  face")
+	_log_pop("[tape] %s, at %v%s" % [why, global_position.round(), _contact_report()])
+	_log_pop("[tape]       y   slip      vy  speed  ctc  faces")
 	for k in _rec.size():
 		_log_pop("[tape] " + _rec[(_rec_at + k) % _rec.size()])
 
