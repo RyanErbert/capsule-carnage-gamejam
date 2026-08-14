@@ -784,6 +784,11 @@ static func _ramp_kerb(st: SurfaceTool, tris: PackedVector3Array, at: Vector3,
 	var hi_in: Vector3 = pts[2]
 	var hi_out: Vector3 = pts[3]
 	var out_n := side * s
+	# The underside. It sits flush on the slope so you never see it, but without
+	# it the kerb is an open box, and an open box is a hole in the mesh --
+	# which is a hole anything asking "is this point inside" falls straight
+	# through.
+	_quad(st, tris, lo_in, lo_out, hi_out, hi_in, Vector3.DOWN)
 	_quad(st, tris, lo_in + up, hi_in + up, hi_out + up, lo_out + up, Vector3.UP)
 	_quad(st, tris, lo_in, hi_in, hi_in + up, lo_in + up, -out_n)
 	_quad(st, tris, lo_out, hi_out, hi_out + up, lo_out + up, out_n)
