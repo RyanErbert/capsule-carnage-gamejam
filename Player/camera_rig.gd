@@ -16,6 +16,12 @@ const AUTO_FOLLOW_MIN_SPEED := 1.5
 const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
 const ARM_RADIUS := 0.35     # the arm is a ball, not a thread, so it cannot
                              # slip through a corner or a hairline gap
+# There WAS a third guard here: a ray from the player to the rig, clamping the
+# rig to whatever it hit so the arm never cast from inside geometry. It set the
+# position outright, and in a tunnel -- or against the boundary frame at the fog
+# edge -- something is between you and the rig every few frames, so it snapped
+# on and off. A camera briefly inside a wall is better than one that strobes,
+# and the sphere arm plus the snap-in/ease-out below already do the real work.
 const ARM_OUT_RATE := 4.0    # how fast the chain is allowed to pay back OUT
 const TELEPORT_SNAP := 6.0   # a jump further than this is a respawn, not travel
 const SPEED_SMOOTH := 8.0    # contact changes speed in one frame; the chain
@@ -107,7 +113,6 @@ func _physics_process(delta: float) -> void:
 		global_position = anchor
 	else:
 		global_position = global_position.lerp(anchor, t)
-	_declip(anchor)
 
 	rotation.y = yaw
 	rotation.x = -pitch
@@ -142,18 +147,6 @@ func _wobble(delta: float, vel: Vector3) -> float:
 	return _roll
 
 
-## The arm casts from the rig, and the rig lags behind the player -- so at speed
-## the rig itself can end up on the far side of a wall, where the arm has
-## nothing to hit and the camera sits happily inside the geometry. Keep the rig
-## on the player's side of anything between them, and the arm always starts
-## somewhere real.
-func _declip(anchor: Vector3) -> void:
-	var space := get_world_3d().direct_space_state
-	var q := PhysicsRayQueryParameters3D.create(anchor, global_position)
-	q.exclude = [_player.get_rid()]
-	var hit := space.intersect_ray(q)
-	if hit:
-		global_position = (hit["position"] as Vector3).lerp(anchor, 0.2)
 
 
 # --- Death cam --------------------------------------------------------------
