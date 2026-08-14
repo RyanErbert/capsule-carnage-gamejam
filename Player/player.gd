@@ -734,6 +734,7 @@ var _rec_cd := 0.0
 var _hud: Label               # the probe's readout, in the game
 var _hud_flash := 0.0
 var _hud_run := 0.0
+var _bury := 0                # times creative.gd decided we were buried
 
 
 ## What is AROUND the body, not just what it is touching. At the instant of a
@@ -827,7 +828,7 @@ func _paint_hud(slip: float, faces: String) -> void:
 	if _hud == null or not _hud.visible:
 		return
 	_hud.text = "TAPE %d\n\nslip %+.3f   run %+.3f\ny %.2f  vy %+.2f  speed %.1f\n%s%s  n%d%s" % [
-		_rec_dumps, slip, _hud_run, global_position.dot(up_direction),
+		_rec_dumps, _bury, slip, _hud_run, global_position.dot(up_direction),
 		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
 		"TOUCH " if touching else "air   ", "GROUND" if grounded else "      ",
 		get_slide_collision_count(), faces]
@@ -845,6 +846,21 @@ func _make_hud() -> void:
 	_hud.add_theme_color_override("font_outline_color", Color.BLACK)
 	_hud.add_theme_constant_override("outline_size", 6)
 	layer.add_child(_hud)
+
+
+## creative.gd lifts the body a whole metre when the terrain density field says
+## it is buried, from ITS physics step, not ours. Nothing in here can see that:
+## it lands after _record has already run, which is why slip reads 0.000 through
+## a one metre jump. So it reports itself. If the jump you feel lines up with
+## BURY going up and the screen flashing, that line is the bug; if you jump and
+## this stays still, it is not, and I am wrong.
+func mark_bury(density: float, lifted: float) -> void:
+	_bury += 1
+	_hud_flash = 1.0
+	if _bury <= 40:
+		_log_pop("[bury] #%d lifted %.2f m, density %.3f, at %v  vy %+.2f %s%s" % [
+			_bury, lifted, density, global_position.round(), velocity.dot(up_direction),
+			"ground" if grounded else ("face" if touching else "AIR"), _nearby()])
 
 
 ## Every automatic trigger so far has been ME deciding what the bug looks like,

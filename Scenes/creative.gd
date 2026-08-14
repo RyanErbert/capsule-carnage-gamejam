@@ -807,9 +807,12 @@ func _physics_process(delta: float) -> void:
 		player.velocity = Vector3.ZERO
 	# Filled-in terrain can embed the player (remote FILL strokes); the
 	# depenetration then shoves them through the floor. Pop upward instead.
-	if terrain and terrain.density_at(player.global_position + Vector3(0, 0.2, 0)) > 0.55:
+	var _bury_d: float = terrain.density_at(
+		player.global_position + Vector3(0, 0.2, 0)) if terrain else 0.0
+	if _bury_d > 0.55:
 		player.global_position.y += 1.0
 		player.velocity.y = maxf(player.velocity.y, 0.0)
+		player.mark_bury(_bury_d, 1.0)
 
 
 ## Distance-based white-out past FOG_START; at FOG_WHITE the screen is fully
