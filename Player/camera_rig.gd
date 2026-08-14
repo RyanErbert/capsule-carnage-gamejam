@@ -37,6 +37,26 @@ var follow_target: Node3D = null  # god-mode drone override; null = the player
 var _mouse_idle_timer := 999.0
 
 @onready var _player: CharacterBody3D = get_parent()
+@onready var _cam: Camera3D = spring_arm.get_node_or_null("Camera3D") if spring_arm else null
+
+# --- Legacy camera (the web game's, kept as an option) -----------------------
+# Godot's SpringArm casts and PLACES the camera at the hit, every frame, so a
+# wall arriving or leaving is a hard cut. The web one never touched the camera
+# with its ray: it moved the camera's GOAL and let the camera ease toward it, so
+# the same event glides. Three elastic stages feed that goal -- the chain length,
+# the look-at point, and the camera itself -- and the ray only ever shortens the
+# goal, with a buffer so it never sits flush on the surface.
+const LEG_CHAIN_RATE := 2.0    # the chain itself is elastic, and slow
+const LEG_LOOK_RATE := 15.0    # ...the look-at point is snappier, which is what
+                               # keeps ground jitter out of the vertical
+const LEG_BUFFER := 0.3        # stand off the surface by this
+const LEG_MIN := 0.5           # ...and never collapse closer than this
+const LEG_EYE := 1.0           # look-at sits this far above the body
+const LEG_LIFT := 0.5          # ...and the camera this much above that
+
+var _leg_look := Vector3.ZERO
+var _leg_chain := 4.5
+var _leg_on := false
 
 
 var _smooth_speed := 0.0
@@ -74,6 +94,7 @@ func _physics_process(delta: float) -> void:
 	_smooth_speed = lerpf(_smooth_speed, h_speed, minf(1.0, SPEED_SMOOTH * delta))
 
 	if _death_left > 0.0:
+		_spring_camera()          # the death arc is driven off the rig
 		_death_step(delta)
 		return
 
@@ -83,6 +104,11 @@ func _physics_process(delta: float) -> void:
 		var diff := absf(wrapf(target_yaw - yaw, -PI, PI))
 		var rate := CAM_DRAG_SPEED * (1.0 + minf(1.0, diff / (PI / 2.0)) * CAM_TURN_BOOST) * delta
 		yaw = lerp_angle(yaw, target_yaw, minf(1.0, rate))
+
+	if Settings.camera_mode == "legacy":
+		_legacy_step(delta, target, vel)
+		return
+	_spring_camera()
 
 	# Chain stretches when moving past walk speed (sprint/explosions). Off the
 	# SMOOTHED speed: hitting anything changes the real one in a single frame,
@@ -213,3 +239,62 @@ func _death_step(delta: float) -> void:
 	rotation.y = yaw
 	rotation.x = -pitch
 	rotation.z = 0.0
+
+
+## Hand the camera back to the spring arm, undoing the legacy takeover.
+func _spring_camera() -> void:
+	if _cam == null or not _leg_on:
+		return
+	_leg_on = false
+	_cam.top_level = false
+	_cam.position = Vector3.ZERO
+	_cam.rotation = Vector3.ZERO
+
+
+## The web camera, port of updateCamera() in friendslop-web/public/game.js.
+func _legacy_step(delta: float, target: Node3D, vel: Vector3) -> void:
+	if _cam == null:
+		return
+	if not _leg_on:
+		# Taking the camera off the arm: from here we place it ourselves, so the
+		# arm's instant clamp never gets a say.
+		_leg_on = true
+		_cam.top_level = true
+		_leg_look = target.global_position + Vector3(0, LEG_EYE, 0)
+		_leg_chain = Settings.camera_zoom
+	var want := clampf(
+		Settings.camera_zoom + maxf(0.0, _smooth_speed - 9.0) * CHAIN_SPEED_STRETCH,
+		BASE_CHAIN_MIN, BASE_CHAIN_MAX)
+	_leg_chain = lerpf(_leg_chain, want, minf(1.0, LEG_CHAIN_RATE * delta))
+	# Stage two: the look-at point chases the head faster than the camera chases
+	# anything, which is what stops ground jitter reaching the picture.
+	var head := target.global_position + Vector3(0, LEG_EYE, 0)
+	_leg_look = _leg_look.lerp(head, 1.0 - exp(-LEG_LOOK_RATE * delta))
+	var off := Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * _leg_chain
+	# Height comes off the SMOOTHED point, x and z off the raw one: bob killed,
+	# without making the camera lag sideways.
+	var desired := Vector3(
+		target.global_position.x + off.x,
+		_leg_look.y + LEG_LIFT + off.y,
+		target.global_position.z + off.z)
+	var d := desired - _leg_look
+	var dist := d.length()
+	if dist > 0.1:
+		var dir := d / dist
+		var q := PhysicsRayQueryParameters3D.create(_leg_look, _leg_look + dir * dist)
+		q.exclude = [_player.get_rid()]
+		var hit := get_world_3d().direct_space_state.intersect_ray(q)
+		if hit:
+			var reach := (hit["position"] as Vector3).distance_to(_leg_look) - LEG_BUFFER
+			desired = _leg_look + dir * maxf(LEG_MIN, reach)
+	var speed_factor := minf(1.0, _smooth_speed / 18.0)
+	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
+	if _cam.global_position.distance_to(desired) > TELEPORT_SNAP:
+		_cam.global_position = desired
+	else:
+		_cam.global_position = _cam.global_position.lerp(desired, t)
+	_cam.look_at(_leg_look, Vector3.UP)
+	# ...and the lean we added since, which is the one thing the web never had.
+	_cam.rotate_object_local(Vector3.FORWARD, _wobble(delta, vel))
+	rotation.y = yaw
+	rotation.x = -pitch

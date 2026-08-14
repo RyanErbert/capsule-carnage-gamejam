@@ -106,6 +106,17 @@ func _ready() -> void:
 		_zoom_readout.text = "%.1fm" % v)
 	_zoom.value = Settings.camera_zoom
 
+	# Camera model. Local only, like zoom: which one you look through is yours.
+	var cam_btn := OptionButton.new()
+	cam_btn.focus_mode = Control.FOCUS_NONE
+	cam_btn.add_item("camera: spring")
+	cam_btn.add_item("camera: legacy")
+	cam_btn.select(1 if Settings.camera_mode == "legacy" else 0)
+	cam_btn.item_selected.connect(func(i: int):
+		Settings.camera_mode = "legacy" if i == 1 else "spring"
+		Settings.save_profile())
+	add_child(cam_btn)
+
 	Net.event_received.connect(_on_net_event)
 	apply(Net.game_settings)
 

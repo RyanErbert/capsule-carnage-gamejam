@@ -21,6 +21,11 @@ var starting_weapon := "rocket"  # default loadout (infinite ammo is on)
 var infinite_ammo := false
 var movement := "web"          # "web" (Cube Fight physics) | "source" (bhop/air-strafe)
 var camera_zoom := 4.5         # chain length, local only (camera_rig.gd)
+## "spring" is Godot's SpringArm, which casts and PLACES the camera at the hit
+## every frame. "legacy" is the web game's: three lerps and one ray, where the
+## ray moves the camera's GOAL and the camera eases toward it, so a wall
+## appearing or vanishing glides instead of snapping. Local only.
+var camera_mode := "spring"
 var level := "creative"        # "creative" (default) | "testworld"
 
 ## Who you are, kept between launches so the lobby opens on the name and colour
@@ -49,6 +54,9 @@ func _load_profile() -> void:
 	var hex := str(cfg.get_value("player", "color", ""))
 	if hex != "" and Color.html_is_valid(hex):
 		color = Color.html(hex)
+	camera_mode = "legacy" \
+		if str(cfg.get_value("player", "camera", "spring")) == "legacy" else "spring"
+	camera_zoom = clampf(float(cfg.get_value("player", "zoom", 4.5)), 2.0, 20.0)
 	var saved_model := str(cfg.get_value("player", "model", ""))
 	if saved_model == "bear" or saved_model == "cube":
 		model = saved_model
@@ -59,6 +67,8 @@ func save_profile() -> void:
 	cfg.set_value("player", "name", player_name)
 	cfg.set_value("player", "color", color_hex())
 	cfg.set_value("player", "model", model)
+	cfg.set_value("player", "camera", camera_mode)
+	cfg.set_value("player", "zoom", camera_zoom)
 	cfg.save(PROFILE_PATH)
 
 
