@@ -16,13 +16,13 @@ const AUTO_FOLLOW_MIN_SPEED := 1.5
 const CHAIN_SPEED_STRETCH := 0.4  # chain extends past walk speed
 const ARM_RADIUS := 0.35     # the arm is a ball, not a thread, so it cannot
                              # slip through a corner or a hairline gap
-# There WAS a third guard here: a ray from the player to the rig, clamping the
-# rig to whatever it hit so the arm never cast from inside geometry. It set the
-# position outright, and in a tunnel -- or against the boundary frame at the fog
-# edge -- something is between you and the rig every few frames, so it snapped
-# on and off. A camera briefly inside a wall is better than one that strobes,
-# and the sphere arm plus the snap-in/ease-out below already do the real work.
-const ARM_OUT_RATE := 4.0    # how fast the chain is allowed to pay back OUT
+# The sphere is the whole of the anti-clip fix, and it is enough. Two other
+# guards were tried and both went back: a ray from the player to the rig that
+# SET the rig onto whatever it hit (it snapped on and off in tunnels and at the
+# fog edge), and a smoothing pass on the arm length (which only ever smoothed
+# zoom and speed, and so did nothing about walls at all). SpringArm3D casts and
+# clamps instantly by design; if that ever needs softening, it has to be the
+# CAST result that is smoothed, not the requested length.
 const TELEPORT_SNAP := 6.0   # a jump further than this is a respawn, not travel
 const SPEED_SMOOTH := 8.0    # contact changes speed in one frame; the chain
                              # should not
@@ -41,7 +41,6 @@ var _mouse_idle_timer := 999.0
 
 var _smooth_speed := 0.0
 var _smooth_accel := Vector3.ZERO
-var _arm_len := 0.0
 
 
 func _ready() -> void:
@@ -54,7 +53,6 @@ func _ready() -> void:
 		ball.radius = ARM_RADIUS
 		spring_arm.shape = ball
 		spring_arm.add_excluded_object(_player.get_rid())
-		_arm_len = spring_arm.spring_length
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -94,14 +92,11 @@ func _physics_process(delta: float) -> void:
 		base_chain_length + maxf(0.0, _smooth_speed - 9.0) * CHAIN_SPEED_STRETCH,
 		BASE_CHAIN_MIN, BASE_CHAIN_MAX)
 	if spring_arm:
-		# Coming IN is instant, because anything slower is a frame of camera
-		# inside the wall. Going back OUT is eased, because that is the part you
-		# can see. Snapping both ways is what makes a spring arm feel cheap.
-		if want_chain < _arm_len:
-			_arm_len = want_chain
-		else:
-			_arm_len = lerpf(_arm_len, want_chain, minf(1.0, ARM_OUT_RATE * delta))
-		spring_arm.spring_length = _arm_len
+		# Straight through, the way it always was. The arm-length smoothing that
+		# used to sit here only ever smoothed want_chain -- zoom and speed, which
+		# know nothing about walls -- so it did none of the work its comment
+		# claimed. The sphere below is what actually stops the clipping.
+		spring_arm.spring_length = want_chain
 
 	# Lagged position follow, damped less at high speed (web: 1-exp(-6*dt) * (1 - speedFactor*0.4))
 	var anchor := target.global_position + Vector3(0, 1, 0)
@@ -218,5 +213,3 @@ func _death_step(delta: float) -> void:
 	rotation.y = yaw
 	rotation.x = -pitch
 	rotation.z = 0.0
-	if spring_arm:
-		spring_arm.spring_length = _arm_len
