@@ -736,6 +736,44 @@ var _hud_flash := 0.0
 var _hud_run := 0.0
 
 
+## What is AROUND the body, not just what it is touching. At the instant of a
+## jump the contact list is often empty or a single face, so the geometry that
+## caused it -- the face just ahead, the one under you, the crease behind -- never
+## appears. Six rays along the direction of travel, each reported as
+## angle-from-upright / distance, which is the shape of the ground in one line.
+const NEAR_REACH := 3.0
+
+func _nearby() -> String:
+	var space := get_world_3d().direct_space_state
+	var fwd := Vector3(velocity.x, 0.0, velocity.z)
+	if fwd.length() < 0.5:
+		fwd = -global_transform.basis.z
+		fwd = Vector3(fwd.x, 0.0, fwd.z)
+	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.FORWARD
+	var side := up_direction.cross(fwd).normalized()
+	var down := -up_direction
+	var rays := {
+		"dn": down,
+		"ah": fwd,
+		"ad": (fwd + down).normalized(),
+		"bd": (-fwd + down).normalized(),
+		"ld": (side + down).normalized(),
+		"rd": (-side + down).normalized(),
+	}
+	var out := ""
+	for key: String in rays:
+		var q := PhysicsRayQueryParameters3D.create(
+			global_position, global_position + (rays[key] as Vector3) * NEAR_REACH)
+		q.exclude = [get_rid()]
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			continue
+		var n: Vector3 = hit["normal"]
+		out += " %s%.0f/%.2f" % [key, rad_to_deg(acos(clampf(
+			n.dot(up_direction), -1.0, 1.0))), global_position.distance_to(hit["position"])]
+	return out
+
+
 func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
 	# Height gained beyond what the frame set out to gain. Contact can only ever
 	# SUBTRACT from intended motion, so rising further than you meant to is the
@@ -749,11 +787,11 @@ func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
 	for i in get_slide_collision_count():
 		faces += " %.0f" % rad_to_deg(acos(clampf(
 			get_slide_collision(i).get_normal().dot(up_direction), -1.0, 1.0)))
-	var line := "%7.2f %6.3f %+7.2f %+6.1f %s%s n%d%s" % [
+	var line := "%7.2f %6.3f %+7.2f %+6.1f %s%s n%d%s  |%s" % [
 		global_position.dot(up_direction), slip,
 		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
 		"T" if touching else "-", "G" if grounded else "-",
-		get_slide_collision_count(), faces]
+		get_slide_collision_count(), faces, _nearby()]
 	if _rec.size() < REC_FRAMES:
 		_rec.append(line)
 		_rec_gain.append(slip)
@@ -823,7 +861,7 @@ func _dump_tape(why: String) -> void:
 	_rec_dumps += 1
 	_rec_cd = 4.0
 	_log_pop("[tape] %s, at %v%s" % [why, global_position.round(), _contact_report()])
-	_log_pop("[tape]       y   slip      vy  speed  ctc  faces")
+	_log_pop("[tape]       y   slip      vy  speed  ctc  touching | around: dn ahead ahead-dn behind-dn left-dn right-dn  as angle/distance")
 	for k in _rec.size():
 		_log_pop("[tape] " + _rec[(_rec_at + k) % _rec.size()])
 
