@@ -110,7 +110,6 @@ var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
 var _pop_cd := 0.0            # rate limit on the ejection report
-var _bounce_cd := 0.0         # so one hard face cannot kick you over and over
 var _kick_cd := 0.0           # rate limit on the upward-velocity report
 var _loop_age := 0.0          # how long the current bouncing-on-the-spot window is
 var _loop_takeoffs := 0       # ...and how many times we have left the ground in it
@@ -370,7 +369,6 @@ func _physics_process(delta: float) -> void:
 	# (dragging the generator slows you via real rope tension — generators.gd)
 	var boost := 1.0 + BOOST_MULT * bst if sprinting else 1.0
 	_no_snap = maxf(0.0, _no_snap - delta)
-	_bounce_cd = maxf(0.0, _bounce_cd - delta)
 	_kick_cd = maxf(0.0, _kick_cd - delta)
 	_loop_cd = maxf(0.0, _loop_cd - delta)
 	_stick_cd = maxf(0.0, _stick_cd - delta)
@@ -478,10 +476,11 @@ func _physics_process(delta: float) -> void:
 	# Floating mode slides the MOTION but leaves the velocity alone, so the
 	# whole of contact is this call. Hitting a face too steep to hold gives some
 	# of the impact back instead of just eating it.
-	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n), MB_BOUNCE)
+	_resolve_contact()
 	_curb_ejection(pre_pos, pre_vel, delta)
 	_stick(was_touching)
 	_watch_loop(delta, was_grounded)
+	_record(delta, pre_pos, pre_vel)
 
 
 # --- Channel riding (Items/builds.gd §4.4) ----------------------------------
@@ -564,28 +563,22 @@ func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
 ## running downhill, and at a lip there is nothing to take so you simply carry
 ## on. Nobody has to know what angle anything is.
 ##
-## `restitution` is how much the surface hands BACK on top of that — 0 for
-## ordinary contact, more for a face hit too hard to hold (monkey ball).
-## `bounce_n` is the ONE face that earned a restitution, and it gets it alone.
-## Handing the scalar to every contact meant that clipping a wall made the floor
-## you were standing on 42% bouncy for that frame, so the throw came off the
-## GROUND, pointing up, and you landed and it happened again: the repeating
-## teleport-up-and-drop, always found next to something steep. A face also only
-## gets one impulse however many times move_and_slide lists it.
-func _resolve_contact(bounce_n := Vector3.ZERO, restitution := 0.0) -> void:
+## Nothing is ever handed back. A face past 72.5 degrees used to return 42% of
+## the impact, on the theory that it was too steep to hold — and that is what
+## threw you off a quarter pipe at the same angle every single time. Ride up,
+## cross the threshold, get REFLECTED instead of carried. Measured on a two-face
+## crease at 32 m/s: 19 m/s straight up and backwards off the ramp. A pipe made
+## of two or more facets never did it, which is why it looked like geometry;
+## every ramp in the world is one facet meeting another.
+func _resolve_contact() -> void:
 	var before := velocity
 	touching = false
 	var best := -2.0
-	var bounced := false
 	for i in get_slide_collision_count():
 		var n := get_slide_collision(i).get_normal()
 		var into := velocity.dot(n)
 		if into < 0.0:
-			var give := 0.0
-			if not bounced and n.dot(bounce_n) > 0.999:
-				give = restitution
-				bounced = true
-			velocity -= n * (into * (1.0 + give))
+			velocity -= n * into
 		touching = true
 		var d := n.dot(up_direction)
 		if d > best:
@@ -610,7 +603,7 @@ func _resolve_contact(bounce_n := Vector3.ZERO, restitution := 0.0) -> void:
 	var raw := velocity.dot(up_direction) - before.dot(up_direction)
 	if grounded and _no_snap <= 0.0 and raw > GROUND_LIFT_MAX:
 		velocity -= up_direction * (raw - GROUND_LIFT_MAX)
-	_watch_kick(before, restitution if bounced else 0.0, raw)
+	_watch_kick(before, raw)
 
 
 ## A body that is already overlapping geometry gets shoved back out, and that
@@ -651,7 +644,7 @@ func _curb_ejection(pre_pos: Vector3, pre_vel: Vector3, delta: float) -> void:
 ## Both to the editor Output and to user://pop.log, so a session can be read
 ## back afterwards instead of copied out of a scrolling panel.
 const POP_LOG := "user://pop.log"
-const POP_LOG_MAX := 200
+const POP_LOG_MAX := 900   # a tape dump alone is 120 lines
 
 func _log_pop(text: String) -> void:
 	print(text)
@@ -683,15 +676,15 @@ func _log_session() -> void:
 ## going up and suddenly are, which is what reads as being thrown.
 const KICK_MIN := 2.5
 
-func _watch_kick(before: Vector3, restitution: float, raw_lift: float) -> void:
+func _watch_kick(before: Vector3, raw_lift: float) -> void:
 	if before.dot(up_direction) > 0.5 or velocity.dot(up_direction) < KICK_MIN:
 		return
 	if _kick_cd > 0.0:
 		return
 	_kick_cd = 0.35
-	_log_pop("[kick] +%.1f up (asked %.1f, was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s%s" % [
+	_log_pop("[kick] +%.1f up (asked %.1f, was %.1f) |v| %.1f -> %.1f  at %v  %s%s" % [
 		velocity.dot(up_direction), raw_lift, before.dot(up_direction), before.length(),
-		velocity.length(), restitution, global_position.round(),
+		velocity.length(), global_position.round(),
 		"ground" if grounded else ("face" if touching else "air"), _contact_report()])
 
 
@@ -712,6 +705,67 @@ func _contact_report() -> String:
 ## Bouncing on the spot. Standing still and leaving the ground over and over is
 ## not something the movement code can do on its own, so when it happens, say
 ## everything about where we are and what is under us.
+## Every watcher so far is threshold-triggered, so it samples ONE frame and can
+## never show a waveform. That is how the lift cap fooled me: it limited the
+## per-frame rate, the single-frame detector went quiet, and the total was
+## untouched. So keep the last two seconds of every frame in a ring, and trigger
+## on the TOTAL height gained that velocity cannot account for. Position cannot
+## move without either velocity or someone writing to it, so a run of frames
+## climbing with vy at zero names the culprit outright.
+const REC_FRAMES := 120        # two seconds of history
+const REC_WINDOW := 0.5        # ...and how long the climb has to happen within
+const REC_TRIGGER := 0.45      # metres of unexplained height that counts
+const REC_DUMPS := 3           # ...and how many dumps one session may write
+
+var _rec: Array[String] = []
+var _rec_at := 0
+var _rec_gain: Array[float] = []   # per-frame unexplained rise, same window
+var _rec_dumps := 0
+var _rec_cd := 0.0
+
+
+func _record(delta: float, pre_pos: Vector3, pre_vel: Vector3) -> void:
+	# Height gained beyond what the frame set out to gain. Contact can only ever
+	# SUBTRACT from intended motion, so rising further than you meant to is the
+	# one thing physics cannot do. Measuring `actual - intended` instead counts an
+	# ordinary landing as a huge rise -- you meant to drop 0.37 m and the ground
+	# held you at zero -- which is how the first cut of this read a touchdown as a
+	# teleport.
+	var want := (pre_vel * delta).dot(up_direction)
+	var slip := maxf(0.0, (global_position - pre_pos).dot(up_direction) - maxf(0.0, want))
+	var line := "%7.3f %7.3f %+7.3f %+7.3f %s%s n%d %s" % [
+		global_position.dot(up_direction), slip,
+		velocity.dot(up_direction), Vector2(velocity.x, velocity.z).length(),
+		"T" if touching else "-", "G" if grounded else "-",
+		get_slide_collision_count(),
+		"%3.0fdeg" % rad_to_deg(acos(clampf(_surf_n.dot(up_direction), -1.0, 1.0)))]
+	if _rec.size() < REC_FRAMES:
+		_rec.append(line)
+		_rec_gain.append(slip)
+	else:
+		_rec[_rec_at] = line
+		_rec_gain[_rec_at] = slip
+	_rec_at = (_rec_at + 1) % REC_FRAMES
+
+	_rec_cd = maxf(0.0, _rec_cd - delta)
+	if _rec_dumps >= REC_DUMPS or _rec_cd > 0.0:
+		return
+	# Sum the unexplained rise over the last REC_WINDOW seconds only.
+	var span := int(REC_WINDOW / maxf(delta, 0.001))
+	var total := 0.0
+	for k in mini(span, _rec_gain.size()):
+		total += _rec_gain[(_rec_at - 1 - k + REC_FRAMES * 2) % _rec_gain.size()]
+	if total < REC_TRIGGER:
+		return
+	_rec_dumps += 1
+	_rec_cd = 4.0
+	_log_pop("[tape] climbed %.2f m in %.1fs that velocity cannot account for, at %v%s" % [
+		total, REC_WINDOW, global_position.round(), _contact_report()])
+	_log_pop("[tape]       y   slip      vy   speed  ctc  face")
+	for k in _rec.size():
+		_log_pop("[tape] " + _rec[(_rec_at + k) % _rec.size()])
+
+
 const LOOP_WINDOW := 3.0     # seconds the takeoffs have to fall within
 const LOOP_TAKEOFFS := 3     # ...and how many of them counts as a loop
 const LOOP_STILL := 2.5      # horizontal speed below which we are "not moving"
@@ -872,10 +926,6 @@ const MB_ROLL := 0.714     # 5/7 — a solid sphere rolling, not a box sliding
 const MB_DRAG := 0.25      # rolling resistance per second: barely there
 const MB_AIR := 0.16       # how much of the lean survives once you leave the floor
 const MB_TOP := 6.0        # terminal speed as a multiple of the walk cap
-const MB_BOUNCE := 0.42     # how much of the impact a face too steep to hold gives back
-const MB_BOUNCE_MIN := 9.0  # ...how hard you have to hit it before it does
-const MB_BOUNCE_HOLD := 0.3 # ...how far from upright it has to be to count at all
-const MB_BOUNCE_GAP := 0.3  # ...and how long before another one can fire
 
 
 func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
@@ -927,64 +977,6 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 ## contact itself does the giving. It is about the IMPACT, not about angles in
 ## the world: what matters is how sharply this face turns away from the one you
 ## were already riding, and how hard you arrived.
-## Returns the normal of the face that may throw you back, or ZERO for none.
-## The normal, not a bare number: only the face steep enough to earn a bounce is
-## allowed to give one.
-func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> Vector3:
-	if not was_touching or _bounce_cd > 0.0 or not bool(Net.game_settings.get("monkey", true)):
-		return Vector3.ZERO
-	for i in get_slide_collision_count():
-		var c := get_slide_collision(i)
-		var n := c.get_normal()
-		# You cannot bounce off something you could roll on. What throws you
-		# back is a face too steep to hold AT ALL, and that is measured against
-		# gravity — not against whatever you happened to be riding a frame ago.
-		# Judging it by the change in angle meant rolling off flat ground onto a
-		# 45 degree ramp read as an impact (cos 45 is 0.707, the old cutoff was
-		# 0.72) and fired a 0.42 restitution kick straight up the ramp face:
-		# 24 m/s of run became 18.7 m/s of lift, every single time you tried it.
-		if n.dot(up_direction) > MB_BOUNCE_HOLD:
-			continue
-		if n.dot(pre_n) > 0.72:
-			continue                       # already sliding along this one
-		var hit_speed := -pre_vel.dot(n)   # how much of the run went into the face
-		if hit_speed < MB_BOUNCE_MIN:
-			continue
-		_bounce_cd = MB_BOUNCE_GAP
-		launched(0.12)
-		Sfx.boost(c.get_position(), 0.35)
-		_sparks(c.get_position(), n)
-		return n
-	return Vector3.ZERO
-
-
-func _sparks(at: Vector3, n: Vector3) -> void:
-	var p := CPUParticles3D.new()
-	p.top_level = true
-	p.emitting = false
-	p.one_shot = true
-	p.amount = 14
-	p.lifetime = 0.45
-	p.explosiveness = 1.0
-	p.direction = n
-	p.spread = 42.0
-	p.initial_velocity_min = 5.0
-	p.initial_velocity_max = 13.0
-	p.gravity = Vector3(0, -22, 0)
-	p.scale_amount_min = 0.05
-	p.scale_amount_max = 0.12
-	p.color = Color(1.0, 0.86, 0.45)
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.vertex_color_use_as_albedo = true
-	var box := BoxMesh.new()
-	box.size = Vector3(0.06, 0.06, 0.34)
-	box.material = mat
-	p.mesh = box
-	add_child(p)
-	p.global_position = at
-	p.emitting = true
-	get_tree().create_timer(1.0).timeout.connect(p.queue_free)
 
 
 ## One tick of Source movement: gravity, hop, friction, accelerate.
