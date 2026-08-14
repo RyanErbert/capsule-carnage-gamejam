@@ -478,7 +478,7 @@ func _physics_process(delta: float) -> void:
 	# Floating mode slides the MOTION but leaves the velocity alone, so the
 	# whole of contact is this call. Hitting a face too steep to hold gives some
 	# of the impact back instead of just eating it.
-	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n))
+	_resolve_contact(_bounce_off(was_touching, pre_vel, pre_n), MB_BOUNCE)
 	_curb_ejection(pre_pos, pre_vel, delta)
 	_stick(was_touching)
 	_watch_loop(delta, was_grounded)
@@ -566,15 +566,26 @@ func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
 ##
 ## `restitution` is how much the surface hands BACK on top of that — 0 for
 ## ordinary contact, more for a face hit too hard to hold (monkey ball).
-func _resolve_contact(restitution := 0.0) -> void:
+## `bounce_n` is the ONE face that earned a restitution, and it gets it alone.
+## Handing the scalar to every contact meant that clipping a wall made the floor
+## you were standing on 42% bouncy for that frame, so the throw came off the
+## GROUND, pointing up, and you landed and it happened again: the repeating
+## teleport-up-and-drop, always found next to something steep. A face also only
+## gets one impulse however many times move_and_slide lists it.
+func _resolve_contact(bounce_n := Vector3.ZERO, restitution := 0.0) -> void:
 	var before := velocity
 	touching = false
 	var best := -2.0
+	var bounced := false
 	for i in get_slide_collision_count():
 		var n := get_slide_collision(i).get_normal()
 		var into := velocity.dot(n)
 		if into < 0.0:
-			velocity -= n * (into * (1.0 + restitution))
+			var give := 0.0
+			if not bounced and n.dot(bounce_n) > 0.999:
+				give = restitution
+				bounced = true
+			velocity -= n * (into * (1.0 + give))
 		touching = true
 		var d := n.dot(up_direction)
 		if d > best:
@@ -593,11 +604,13 @@ func _resolve_contact(restitution := 0.0) -> void:
 	# and then it lands and does it again. So limit how fast contact may turn
 	# the run upward. A real ramp is a gradual turn and passes through
 	# untouched; a seam is a step change and gets absorbed over a few frames.
-	if grounded and _no_snap <= 0.0:
-		var lift := velocity.dot(up_direction) - before.dot(up_direction)
-		if lift > GROUND_LIFT_MAX:
-			velocity -= up_direction * (lift - GROUND_LIFT_MAX)
-	_watch_kick(before, restitution)
+	# Measure the lift BEFORE clamping it. Reporting the post-clamp figure meant
+	# every kick in the log read `before + 2.5` — the instrument was quoting its
+	# own limiter back at me and hiding how hard the ground was actually pushing.
+	var raw := velocity.dot(up_direction) - before.dot(up_direction)
+	if grounded and _no_snap <= 0.0 and raw > GROUND_LIFT_MAX:
+		velocity -= up_direction * (raw - GROUND_LIFT_MAX)
+	_watch_kick(before, restitution if bounced else 0.0, raw)
 
 
 ## A body that is already overlapping geometry gets shoved back out, and that
@@ -670,14 +683,14 @@ func _log_session() -> void:
 ## going up and suddenly are, which is what reads as being thrown.
 const KICK_MIN := 2.5
 
-func _watch_kick(before: Vector3, restitution: float) -> void:
+func _watch_kick(before: Vector3, restitution: float, raw_lift: float) -> void:
 	if before.dot(up_direction) > 0.5 or velocity.dot(up_direction) < KICK_MIN:
 		return
 	if _kick_cd > 0.0:
 		return
 	_kick_cd = 0.35
-	_log_pop("[kick] +%.1f up (was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s%s" % [
-		velocity.dot(up_direction), before.dot(up_direction), before.length(),
+	_log_pop("[kick] +%.1f up (asked %.1f, was %.1f) |v| %.1f -> %.1f  bounce=%.2f  at %v  %s%s" % [
+		velocity.dot(up_direction), raw_lift, before.dot(up_direction), before.length(),
 		velocity.length(), restitution, global_position.round(),
 		"ground" if grounded else ("face" if touching else "air"), _contact_report()])
 
@@ -914,9 +927,12 @@ func _monkey_step(delta: float, wish_dir: Vector3, typing: bool, spd: float,
 ## contact itself does the giving. It is about the IMPACT, not about angles in
 ## the world: what matters is how sharply this face turns away from the one you
 ## were already riding, and how hard you arrived.
-func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> float:
+## Returns the normal of the face that may throw you back, or ZERO for none.
+## The normal, not a bare number: only the face steep enough to earn a bounce is
+## allowed to give one.
+func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> Vector3:
 	if not was_touching or _bounce_cd > 0.0 or not bool(Net.game_settings.get("monkey", true)):
-		return 0.0
+		return Vector3.ZERO
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
 		var n := c.get_normal()
@@ -938,8 +954,8 @@ func _bounce_off(was_touching: bool, pre_vel: Vector3, pre_n: Vector3) -> float:
 		launched(0.12)
 		Sfx.boost(c.get_position(), 0.35)
 		_sparks(c.get_position(), n)
-		return MB_BOUNCE
-	return 0.0
+		return n
+	return Vector3.ZERO
 
 
 func _sparks(at: Vector3, n: Vector3) -> void:
