@@ -35,8 +35,8 @@ func _ready() -> void:
 func _shoot() -> void:
 	var cam := Camera3D.new()
 	add_child(cam)
-	cam.position = Vector3(-6, 20, 44)
-	cam.look_at(Vector3(0, 3, 2))
+	cam.position = Vector3(-4, 16, 40)
+	cam.look_at(Vector3(-6, 2, 0))
 	cam.fov = 55.0
 	var sun := DirectionalLight3D.new()
 	add_child(sun)
@@ -71,6 +71,8 @@ func _check(label: String, node: Node3D, pts: Array, arch: bool, holes: Array) -
 	var body := StaticBody3D.new()
 	node.add_child(body)
 	var built: Node3D = node.call("_make", pts, "wall", arch, 6.0, holes, Castle.stone_material(), true)
+	if built:
+		node.add_child(built)
 	_report(label, built if built else body)
 
 
