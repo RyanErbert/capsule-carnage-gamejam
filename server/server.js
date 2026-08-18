@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
 const mapgen = require('./mapgen');
+const parametrics = require('./parametrics');
 const { LAYERS, GROUND } = mapgen;
 
 const app = express();
@@ -622,6 +623,15 @@ setInterval(() => {
 // --- Castle walls (parametric, brick-built) ---
 const activeCastles = [];  // { id, nodes, arch, kind, h, holes }
 
+// --- Parametric structures (server/parametrics.js) ---
+// Records, never geometry: { id, type, owner, nodes, params }. Saved to disk on
+// every change and reloaded on boot, so a redeploy does not take the world with
+// it. See parametrics.js for why the wipe archives instead of deleting.
+{
+  const restored = parametrics.load();
+  if (restored) console.log(`[parametrics] restored ${restored} structures`);
+}
+
 // --- NPCs ---
 // Turrets belong to their spawner and shoot everyone else. The OWNER's client
 // runs the aiming/firing sim (through the normal machinegun pipeline, so
@@ -813,6 +823,7 @@ function endGame() {
   activeModels.length = 0;
   activeChannels.length = 0;
   activeCastles.length = 0;
+  parametrics.clear();   // archives first
   activeVehicles.length = 0;
   activeGenerators.length = 0;
   activeTurrets.length = 0;
@@ -826,6 +837,7 @@ function endGame() {
   io.emit('currentModels', []);
   io.emit('currentChannels', []);
   io.emit('currentCastles', []);
+  io.emit('currentParametrics', []);
   io.emit('currentVehicles', []);
   io.emit('currentGenerators', []);
   io.emit('currentTurrets', []);
@@ -1659,6 +1671,37 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Parametric structures -------------------------------------------------
+  // Place once, then edit forever. A handle drag sends only the parameter it
+  // moved and gets the whole record back, so every client rebuilds from one
+  // payload and none of them can disagree about what is standing there.
+
+  socket.on('placeParametric', (msg) => {
+    const rec = parametrics.place(msg, nameOf(socket.id));
+    if (rec) io.emit('parametricPlaced', rec);
+  });
+
+  socket.on('updateParametric', (msg) => {
+    const rec = parametrics.update(msg);
+    if (rec) io.emit('parametricUpdated', rec);
+  });
+
+  socket.on('removeParametric', (id) => {
+    if (parametrics.remove(id)) io.emit('parametricRemoved', id);
+  });
+
+  // Saved sets: every round wipe leaves one behind, and any of them can be
+  // stood back up on the current map.
+  socket.on('listParametricSaves', () => {
+    socket.emit('parametricSaves', parametrics.listArchive());
+  });
+
+  socket.on('loadParametricSave', (name) => {
+    const added = parametrics.loadArchive(name);
+    for (const rec of added) io.emit('parametricPlaced', rec);
+    if (added.length) sysMsg(`${nameOf(socket.id)} loaded ${added.length} structures`);
+  });
+
   // --- NPC turrets ---
   socket.on('placeTurret', (t) => {
     if (!t || typeof t.x !== 'number') return;
@@ -1997,6 +2040,7 @@ io.on('connection', (socket) => {
     socket.emit('currentModels', activeModels);
     socket.emit('currentChannels', activeChannels);
     socket.emit('currentCastles', activeCastles);
+    socket.emit('currentParametrics', parametrics.active);
     socket.emit('currentVehicles', activeVehicles);
     socket.emit('currentGenerators', activeGenerators);
     socket.emit('currentTurrets', activeTurrets);

@@ -20,3 +20,6 @@ server/node_modules/
 # Headless physics probes: throwaway scenes that drive the player against test
 # geometry and print numbers. Kept out of the repo, kept on disk between runs.
 
+
+# Parametric structure saves (server-side, per machine)
+server/data/
