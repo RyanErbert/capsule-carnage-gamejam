@@ -16,6 +16,13 @@ extends Node3D
 const VOXEL := 2.0                 # meters per lattice step
 const NY := 24                     # cells along Y  (world 48 m: -20 .. +28)
 const ISO := 0.5
+## Blur passes over the freshly seeded field. Each one widens the chamfer on a
+## slab step, and costs nothing in vertices -- surface nets emits one vertex per
+## cell the surface crosses, however smooth the field is. It is not free in
+## SHAPE though: a box blur pulls everything toward the iso value, so thin
+## ridges thin further and eventually vanish. Two is a noticeable softening with
+## nothing lost; past about four the map starts melting.
+const SMOOTH_PASSES := 2
 const CHUNK := 8                   # cells per chunk side (X/Z; Y is one chunk)
 
 # Horizontal extent follows the painted grid (configure(w, h)): pixels are
@@ -229,7 +236,8 @@ func build_from_layers(layers: Array) -> void:
 				if solid:
 					_density[_idx(x, y, z)] = 1.0
 	var t0 := Time.get_ticks_msec()
-	_smooth_once()
+	for i in SMOOTH_PASSES:
+		_smooth_once()
 	_seal_boundary()
 	_build_frame()
 	_remesh_all()
@@ -495,6 +503,47 @@ func _cell_vertex(cx: int, cy: int, cz: int, cache: Dictionary) -> Variant:
 	var vert: Vector3 = ORIGIN + (Vector3(cx, cy, cz) + acc / n) * VOXEL
 	cache[key] = vert
 	return vert
+
+
+## Density sampled TRILINEARLY between lattice points, not snapped to the
+## nearest one. The snapped version is piecewise constant, so anything built on
+## it bands at the 2 m cell size instead of varying smoothly.
+func _sample(p: Vector3) -> float:
+	var g := (p - ORIGIN) / VOXEL
+	var x0 := clampi(floori(g.x), 0, NX)
+	var y0 := clampi(floori(g.y), 0, NY)
+	var z0 := clampi(floori(g.z), 0, NZ)
+	var x1 := mini(x0 + 1, NX)
+	var y1 := mini(y0 + 1, NY)
+	var z1 := mini(z0 + 1, NZ)
+	var fx := clampf(g.x - float(x0), 0.0, 1.0)
+	var fy := clampf(g.y - float(y0), 0.0, 1.0)
+	var fz := clampf(g.z - float(z0), 0.0, 1.0)
+	var c00 := lerpf(_d(x0, y0, z0), _d(x1, y0, z0), fx)
+	var c10 := lerpf(_d(x0, y1, z0), _d(x1, y1, z0), fx)
+	var c01 := lerpf(_d(x0, y0, z1), _d(x1, y0, z1), fx)
+	var c11 := lerpf(_d(x0, y1, z1), _d(x1, y1, z1), fx)
+	return lerpf(lerpf(c00, c10, fy), lerpf(c01, c11, fy), fz)
+
+
+## The surface normal the FIELD says is here, as opposed to the one the mesh
+## happens to have triangulated.
+##
+## This is the whole trick for rolling. Physics uses triangle normals -- shading
+## normals never reach it -- so a marble crossing a face boundary gets a normal
+## that jumps, and you feel every facet no matter how smooth the terrain looks.
+## The density field underneath is smooth by construction, and its gradient is
+## the true normal, continuous everywhere. Costs six trilinear samples and not
+## one extra vertex: the mesh is untouched, only what the player is told about
+## it changes.
+func surface_normal(pos: Vector3) -> Vector3:
+	var e := VOXEL * 0.5
+	var n := Vector3(
+		_sample(pos - Vector3(e, 0, 0)) - _sample(pos + Vector3(e, 0, 0)),
+		_sample(pos - Vector3(0, e, 0)) - _sample(pos + Vector3(0, e, 0)),
+		_sample(pos - Vector3(0, 0, e)) - _sample(pos + Vector3(0, 0, e)),
+	)
+	return n.normalized() if n.length() > 0.0001 else Vector3.UP
 
 
 func _gradient(p: Vector3) -> Vector3:

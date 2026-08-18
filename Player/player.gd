@@ -123,6 +123,7 @@ var _builds: Node
 var touching := false         # in contact with a surface, at any angle at all
 var grounded := false         # ...and it is flat enough to stand on and jump from
 var _surf_n := Vector3.UP     # the most supporting surface we are touching
+var _terrain: Node3D = null   # set in _ready; contacts with it get field normals
 var _stick_grace := 0.0       # seconds the reel may keep closing a gap for
 var _rope_len := 0.0          # what the grapple was paid out to when it bit
 var _jump_eaten := false      # the press that let go of a rope must not jump
@@ -151,6 +152,10 @@ var _shell: Node3D    # the glass marble, when we're not playing the cube
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Looked up once: terrain contacts answer with the density field's normal
+	# rather than the triangle's (see _contact_normal). Absent in the lobby and
+	# the menu background, where the fallback keeps everything working.
+	_terrain = get_tree().get_first_node_in_group("voxel_terrain") as Node3D
 	# No floor, no wall, no ceiling — see the contact block at the top. Godot's
 	# grounded mode DELETES the vertical velocity of anything it decides is
 	# standing on a floor (measured: a body on a 70 degree face slid 0.15 m in a
@@ -583,12 +588,36 @@ func _steer(delta: float, wish_dir: Vector3, rate: float) -> void:
 ## crease at 32 m/s: 19 m/s straight up and backwards off the ramp. A pipe made
 ## of two or more facets never did it, which is why it looked like geometry;
 ## every ramp in the world is one facet meeting another.
+## Terrain contacts report the FIELD normal instead of the triangle one.
+##
+## A marble is the case that shows why. The mesh is one vertex per surface cell,
+## so a 2 m lattice gives facets a marble crosses several times a second, and at
+## each crossing the triangle normal jumps -- that reads as a rumble strip, and
+## no amount of smoothing the mesh fixes it, because physics never sees shading
+## normals. The density field the mesh was built from is smooth, so its gradient
+## is a normal with no seams in it at all. Same vertices, same triangles, same
+## collider: only the answer to "which way is up here" changes.
+##
+## Anything that is not terrain (buildings, vehicles, WFC blocks) keeps its real
+## normal, because a wall's corner is meant to be a corner.
+func _contact_normal(fallback: Vector3, at: Vector3, collider: Object) -> Vector3:
+	if _terrain == null or collider == null:
+		return fallback
+	if not (collider is CollisionObject3D) or not _terrain.is_ancestor_of(collider):
+		return fallback
+	var n: Vector3 = _terrain.surface_normal(at)
+	# A gradient goes slack in the flat interior of a slab, where every
+	# neighbour reads the same. Keep the mesh normal when that happens.
+	return n if n.dot(fallback) > 0.2 else fallback
+
+
 func _resolve_contact() -> void:
 	var before := velocity
 	touching = false
 	var best := -2.0
 	for i in get_slide_collision_count():
-		var n := get_slide_collision(i).get_normal()
+		var col := get_slide_collision(i)
+		var n := _contact_normal(col.get_normal(), col.get_position(), col.get_collider())
 		var into := velocity.dot(n)
 		if into < 0.0:
 			velocity -= n * into
@@ -694,7 +723,7 @@ func _stick(was_touching: bool) -> void:
 		_stick_grace = 0.2       # still reeling: keep the right to finish next frame
 		return
 	_stick_grace = 0.0
-	var n := hit.get_normal()
+	var n := _contact_normal(hit.get_normal(), hit.get_position(), hit.get_collider())
 	var into := velocity.dot(n)
 	if into < 0.0:
 		velocity -= n * into
