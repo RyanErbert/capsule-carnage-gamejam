@@ -260,8 +260,14 @@ static func lift(frames: Array, amount: float) -> Array:
 ## Closest point on the rail to `pos`: how far along it lies (`d`) and how far
 ## off it sits (`off`). Punched openings, handle picking and any "which part of
 ## this did I click" question all resolve through here.
+## Where a point falls on the rail: how far along it, how far off it, and the
+## rail point itself. `off` is the true distance; `lat` is the same thing with
+## height thrown away, and `lat` is the one a swept model wants. A wall IS its
+## rail extruded upward, so whether a point is on the wall is a question about
+## the plan, not the section -- measured in 3D, a window aimed at head height on
+## a fifteen metre wall reads as fifteen metres off the rail and is discarded.
 static func project(frames: Array, pos: Vector3) -> Dictionary:
-	var best := {"d": 0.0, "off": INF, "point": Vector3.ZERO}
+	var best := {"d": 0.0, "off": INF, "lat": INF, "point": Vector3.ZERO}
 	var acc := 0.0
 	for i in frames.size() - 1:
 		var a: Vector3 = frames[i]["p"]
@@ -270,9 +276,9 @@ static func project(frames: Array, pos: Vector3) -> Dictionary:
 		var span := ab.length()
 		var t := 0.0 if span < 1e-6 else clampf((pos - a).dot(ab) / (span * span), 0.0, 1.0)
 		var on := a + ab * t
-		var off := pos.distance_to(on)
-		if off < float(best["off"]):
-			best = {"d": acc + span * t, "off": off, "point": on}
+		var lat := Vector2(pos.x - on.x, pos.z - on.z).length()
+		if lat < float(best["lat"]):
+			best = {"d": acc + span * t, "off": pos.distance_to(on), "lat": lat, "point": on}
 		acc += span
 	return best
 

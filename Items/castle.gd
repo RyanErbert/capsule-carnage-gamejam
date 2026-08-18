@@ -1,13 +1,14 @@
 extends Node3D
 
-## Parametric castle structures (Tiny Glade energy, jam budget):
-##  - WALLS: click a chain of points and a solid stone wall runs through
-##    them — crenellation teeth, posts at bends, gate variant with an arch.
-##    Height is LIVE (select in god mode, scroll), and penetrations can be
-##    punched through any segment after the fact.
-##  - TOWERS: one click, a cylindrical tower with a crenellated rim; height
-##    set by scroll while placing (and live after, like walls).
-## Everything rebuilds from its record on 'castleUpdated'.
+## LEGACY. Walls and towers placed before the parametric records existed, kept
+## alive so a round already in progress does not lose what is standing in it.
+## The build drone places Items/parametrics.gd structures now, which persist to
+## disk, take handles and carry their own parameters; this node only renders
+## what the server still holds in activeCastles and is read-only from here.
+##
+## The geometry is the same code either way -- everything below goes through
+## Items/parametric/registry -- so an old wall and a new one are the same object
+## with a thinner protocol in front of it.
 
 const Registry := preload("res://Items/parametric/registry.gd")
 
@@ -131,34 +132,6 @@ static func stone_material() -> StandardMaterial3D:
 	mat.uv1_triplanar = true
 	mat.uv1_scale = Vector3(0.22, 0.22, 0.22)
 	mat.roughness = 1.0
-	return mat
-
-
-## The wall a click-chain would build, as an unlit blue ghost. Caller owns
-## the node and frees it when the cursor moves.
-func make_preview(pts: Array, arch: bool, h := WALL_H) -> Node3D:
-	var root := _make(pts, "wall", arch, h, [], _ghost_material(), false) 		if pts.size() >= 2 else null
-	if root == null:
-		root = Node3D.new()
-	add_child(root)
-	return root
-
-
-## A tower the size the scroll picked, as a ghost (god menu preview).
-func make_tower_preview(h: float) -> Node3D:
-	var root := _make([Vector3.ZERO], "tower", false, h, [], _ghost_material(), false)
-	if root == null:
-		root = Node3D.new()
-	add_child(root)
-	return root
-
-
-static func _ghost_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.3, 0.6, 1.0, 0.35)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return mat
 
 

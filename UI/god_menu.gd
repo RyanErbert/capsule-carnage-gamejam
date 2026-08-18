@@ -12,7 +12,16 @@ const GIVE_ITEMS := [
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
 const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
-const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"], ["tower", "#d8c9a3"]]
+const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"],
+	["tower", "#d8c9a3"], ["bridge", "#c2b393"], ["path", "#b9ac95"]]
+## Which parametric model each structure tool places. A gate is a wall with its
+## arch parameter turned on -- same model, one number moved -- which is the
+## whole point of the models declaring their parameters.
+const STRUCT_TYPES := {
+	"castle": "wall", "gate": "wall", "tower": "tower",
+	"bridge": "bridge", "path": "path",
+}
+const Registry := preload("res://Items/parametric/registry.gd")
 const NPC_TOOLS := [["turret", "#ff9d5c"], ["crows", "#9db4c9"], ["rats", "#b7a08c"]]
 const PROPS := ["building_1.glb", "building_2.glb", "building_3.glb", "building_4.glb", "building_5.glb", "tree_1.glb", "cactus.glb", "grass.glb", "lamp.glb"]
 const NO_SCALE := ["lamp.glb"]   # fixed-size props; scroll does nothing
@@ -39,16 +48,21 @@ var _status: Label
 var _drone: CharacterBody3D
 var _channel_nodes: Array = []
 var _channel_markers: Array = []
-var _castle_nodes: Array = []
-var _castle_markers: Array = []
+var _struct_nodes: Array = []
+var _struct_markers: Array = []
 var _hover_ghosts: Dictionary = {}  # tool -> ghost Node3D (blue placement preview)
 var _prop_ry := 0.0  # next prop's yaw, rolled up-front so the ghost matches
 var _prop_scale := 1.0  # scroll scales props up/down
 var _tower_h := 8.0  # scroll sets tower height while the tool is armed
 var _lift := 0.0     # scroll offset on the placement height
 # Click-select: with no tool armed, clicking an element highlights it for
-# editing (castles: live height + punched holes) or deletion.
+# editing or deletion. A parametric structure highlights as an inverse hull
+# with its measurements drawn as grabbable lines (Items/parametric/handle_rig);
+# everything else still gets the sphere.
 var _selected: Dictionary = {}
+# Which parameter the scroll wheel is on for the selected structure. Handles
+# cover the ones that are distances in space; this covers the rest.
+var _param_i := 0
 var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
@@ -136,6 +150,13 @@ func _input(event: InputEvent) -> void:
 		elif visible and not _selected.is_empty() and event.keycode == KEY_ESCAPE:
 			_select({})
 			get_viewport().set_input_as_handled()
+		elif visible and _tool == "" and event.keycode == KEY_F \
+				and str(_selected.get("kind", "")) == "structure":
+			var pn := _struct_params().size()
+			if pn > 0:
+				_param_i = (_param_i + 1) % pn
+				_status.text = _struct_status()
+			get_viewport().set_input_as_handled()
 	# Scroll: brush size for the terrain tools, placement height for the rest
 	if visible and _tool != "" and event is InputEventMouseButton and event.pressed:
 		var dir := 0
@@ -165,7 +186,23 @@ func _input(event: InputEvent) -> void:
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
 			else:
 				_lift += LIFT_STEP * dir
-	# Scroll with NOTHING armed: live height on a selected wall/tower
+	# Scroll with NOTHING armed: the selected structure's current parameter.
+	# Handles cover the parameters that ARE distances in space; the wheel
+	# reaches the ones that are not, one step of the spec at a time.
+	if visible and _tool == "" and str(_selected.get("kind", "")) == "structure" \
+			and event is InputEventMouseButton and event.pressed:
+		var pd := 0
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			pd = 1
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			pd = -1
+		var pspec := _struct_params()
+		var pmn: Node = _parametrics()
+		if pd != 0 and pmn and not pspec.is_empty():
+			pmn.nudge(str(_selected["id"]),
+				str((pspec[_param_i % pspec.size()] as Dictionary)["key"]), float(pd))
+			_status.text = _struct_status()
+	# Legacy castle walls (pre-parametric records) keep their height on scroll
 	if visible and _tool == "" and str(_selected.get("kind", "")) == "castle wall" \
 			and event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -179,7 +216,11 @@ func _input(event: InputEvent) -> void:
 
 
 func _chaining() -> bool:
-	return _tool in ["castle", "gate", "channel"]
+	return _tool == "channel" or (STRUCT_TYPES.has(_tool) and _tool != "tower")
+
+
+func _parametrics() -> Node:
+	return get_tree().get_first_node_in_group("world_parametrics")
 
 
 func _carving() -> bool:
@@ -364,11 +405,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			})
 			_status.text = "generator  [E - drag]"
 		elif _tool == "tower":
-			Net.emit_event("placeCastle", {
-				"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
-				"kind": "tower", "h": _tower_h,
-				"nodes": [{"x": pos.x, "y": pos.y, "z": pos.z}],
-			})
+			_place_parametric("tower", [pos])
 			_status.text = "tower  H %d" % int(_tower_h)
 		elif _tool == "turret":
 			Net.emit_event("placeTurret", {
@@ -382,10 +419,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				"kind": _tool, "x": pos.x, "y": pos.y, "z": pos.z,
 			})
 			_status.text = _tool
-		elif _tool == "castle" or _tool == "gate":
-			_castle_nodes.append(pos)
-			_castle_markers.append(_channel_marker(pos))
-			_status.text = "%d pts  [Enter - done]" % _castle_nodes.size()
+		elif STRUCT_TYPES.has(_tool):
+			_struct_nodes.append(pos)
+			_struct_markers.append(_channel_marker(pos))
+			_status.text = "%d pts  [Enter - done]" % _struct_nodes.size()
 		elif _tool == "channel":
 			_channel_nodes.append(pos)
 			_channel_markers.append(_channel_marker(pos))
@@ -437,21 +474,39 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # --- Selection ---------------------------------------------------------------
 
-## No tool armed: clicking an element selects it. A selected wall/tower takes
-## live edits — scroll changes its height, clicking it again punches a hole
-## through that spot, Del removes it. Anything else selected: Del removes.
+## No tool armed: clicking an element selects it. A selected structure takes
+## live edits — drag its measurements, scroll the rest, click it again to punch
+## a penetration, Del to remove. Anything else selected: Del removes.
 func _selection_click(event: InputEvent) -> void:
-	if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
+	if not (event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT):
+		return
+	var pm: Node = _parametrics()
+	# A handle gets first refusal on the click. The same button selects, punches
+	# and drags, so something has to arbitrate, and the thing you are already
+	# pointing at wins.
+	if pm and pm.click(event.pressed):
+		get_viewport().set_input_as_handled()
+		return
+	if not event.pressed:
 		return
 	var hit := _mouse_ray(event.position)
 	if hit.is_empty():
 		_select({})
 		return
+	# Exact: whichever structure the ray actually landed on, no radius guess.
+	var pid: String = pm.id_for_collider(hit.get("collider")) if pm else ""
+	if pid != "":
+		if str(_selected.get("id", "")) == pid:
+			pm.punch(pid, hit["position"])   # second click punches, where you aimed
+			return
+		_select({"id": pid, "kind": "structure", "event": "removeParametric",
+			"pos": hit["position"], "dist": 0.0})
+		return
 	var target := _find_delete_target(hit["position"])
 	if not target.is_empty() and not _selected.is_empty() \
 			and str(_selected.get("kind", "")) == "castle wall" \
 			and str(target.get("id", "")) == str(_selected.get("id", "")):
-		# Second click on the selected wall: punch a penetration right there
+		# Second click on a legacy castle wall: punch a penetration right there
 		var p: Vector3 = hit["position"]
 		Net.emit_event("updateCastle", {"id": target["id"], "hole": {"x": p.x, "y": p.y, "z": p.z}})
 		return
@@ -460,11 +515,27 @@ func _selection_click(event: InputEvent) -> void:
 
 func _select(target: Dictionary) -> void:
 	_selected = target
+	_param_i = 0
+	var kind := str(target.get("kind", ""))
+	var pm: Node = _parametrics()
+	if pm:
+		# The drone hangs right in front of the camera and would catch every
+		# node drag; the structure under edit would catch the rest.
+		pm.extra_exclude = [_drone.get_rid()] if _drone else []
+		pm.select(str(target.get("id", "")) if kind == "structure" else "")
 	if target.is_empty():
 		if _select_marker:
 			_select_marker.visible = false
 		if _status:
 			_status.text = ""
+		return
+	if kind == "structure":
+		# The inverse hull IS the highlight, and it traces the real silhouette
+		# including the holes punched through it. A sphere would only ever say
+		# "something here".
+		if _select_marker:
+			_select_marker.visible = false
+		_status.text = _struct_status()
 		return
 	if _select_marker == null:
 		_select_marker = MeshInstance3D.new()
@@ -481,11 +552,32 @@ func _select(target: Dictionary) -> void:
 		_player.get_parent().add_child(_select_marker)
 	_select_marker.visible = true
 	_select_marker.global_position = target["pos"]
-	var kind := str(target.get("kind", ""))
 	if kind == "castle wall":
 		_status.text = "WALL  [Scroll - Height]  [Click - Hole]  [Del - Delete]"
 	else:
 		_status.text = "%s  [Del - Delete]" % kind.to_upper()
+
+
+## Every parameter the selected structure declares. The models own their own
+## lists, so this needs no per-type knowledge at all.
+func _struct_params() -> Array:
+	var pm: Node = _parametrics()
+	if pm == null or str(_selected.get("kind", "")) != "structure":
+		return []
+	return Registry.spec(str(pm.record(str(_selected["id"])).get("type", "")))
+
+
+## One line: which parameter the wheel is on, and what it currently reads.
+func _struct_status() -> String:
+	var spec := _struct_params()
+	var pm: Node = _parametrics()
+	if pm == null or spec.is_empty():
+		return "STRUCTURE  [Del]"
+	var e: Dictionary = spec[_param_i % spec.size()]
+	var rec: Dictionary = pm.record(str(_selected.get("id", "")))
+	var v := float((rec.get("params", {}) as Dictionary).get(str(e["key"]), e["default"]))
+	var shown := "%d" % int(roundf(v)) if str(e["unit"]) == "" else "%.2f" % v
+	return "%s %s  [F - next]  [Scroll]  [Click - Hole]  [Del]" % [e["label"], shown]
 
 
 ## Terrain sculpting (god-mode dig/fill): carve at the cursor while the
@@ -618,7 +710,7 @@ func _update_brush_marker() -> void:
 ## Multi-point tools draw the thing they'd actually build, running through
 ## every point clicked so far plus the cursor, rebuilt as you move.
 func _update_chain_preview() -> void:
-	var pts: Array = _castle_nodes if _tool in ["castle", "gate"] else _channel_nodes
+	var pts: Array = _channel_nodes if _tool == "channel" else _struct_nodes
 	if not visible or not _chaining() or pts.is_empty():
 		if _chain_preview:
 			_chain_preview.queue_free()
@@ -638,8 +730,9 @@ func _update_chain_preview() -> void:
 	if _tool == "channel":
 		_chain_preview = _polyline_preview(chain)
 	else:
-		var castles: Node = get_tree().get_first_node_in_group("world_castles")
-		_chain_preview = castles.make_preview(chain, _tool == "gate") if castles else null
+		var pm: Node = _parametrics()
+		_chain_preview = pm.make_preview(str(STRUCT_TYPES[_tool]), chain,
+			_place_params(_tool)) if pm else null
 
 
 ## Channels are a route, not a solid — preview them as the line they carve.
@@ -930,6 +1023,11 @@ func _find_delete_target(pos: Vector3) -> Dictionary:
 		var cw: Dictionary = castles.nearest_deletable(pos)
 		if not cw.is_empty():
 			candidates.append(cw.merged({"event": "removeCastle", "kind": "castle wall"}))
+	var pm: Node = _parametrics()
+	if pm:
+		var ps: Dictionary = pm.nearest_deletable(pos)
+		if not ps.is_empty():
+			candidates.append(ps.merged({"event": "removeParametric", "kind": "structure"}))
 	var vehicles: Node = get_tree().get_first_node_in_group("world_vehicles")
 	if vehicles:
 		var vh: Dictionary = vehicles.nearest_deletable(pos)
@@ -989,28 +1087,46 @@ func _finish_channel() -> void:
 	_channel_nodes.clear()
 
 
-## Castle walls chain through every clicked point, channel-style.
-func _finish_castle(arch: bool) -> void:
-	if _castle_nodes.size() >= 2:
-		var nodes: Array = []
-		for p in _castle_nodes:
-			nodes.append({"x": p.x, "y": p.y, "z": p.z})
-		Net.emit_event("placeCastle", {
-			"id": "%d-%d" % [Time.get_ticks_msec(), randi() % 10000],
-			"nodes": nodes, "arch": arch,
-		})
-		_status.text = "wall placed"
-	for m in _castle_markers:
+## Chained structure tools -- wall, gate, bridge, path -- run through every
+## clicked point. What goes over the wire is a RECORD, never geometry: the
+## server stores the numbers and every client sweeps the same mesh from them.
+func _finish_struct(tool_name: String) -> void:
+	var type := str(STRUCT_TYPES.get(tool_name, ""))
+	if type != "" and _struct_nodes.size() >= Registry.min_nodes(type):
+		_place_parametric(tool_name, _struct_nodes)
+		_status.text = "%s placed" % tool_name
+	for m in _struct_markers:
 		m.queue_free()
-	_castle_markers.clear()
-	_castle_nodes.clear()
+	_struct_markers.clear()
+	_struct_nodes.clear()
+
+
+## The parameters a tool places with: the model's own defaults, plus whatever
+## the menu is currently holding for it.
+func _place_params(tool_name: String) -> Dictionary:
+	var type := str(STRUCT_TYPES.get(tool_name, ""))
+	var params: Dictionary = Registry.defaults(type)
+	if type == "tower":
+		params["height"] = _tower_h
+	if tool_name == "gate":
+		params["gate"] = 1.0
+	return params
+
+
+func _place_parametric(tool_name: String, pts: Array) -> void:
+	var type := str(STRUCT_TYPES.get(tool_name, ""))
+	if type == "":
+		return
+	Net.emit_event("placeParametric", {
+		"type": type, "nodes": Registry.to_wire(pts), "params": _place_params(tool_name),
+	})
 
 
 func _set_tool(tool_name: String) -> void:
 	if _tool == "channel" and tool_name != "channel":
 		_finish_channel()
-	if (_tool == "castle" or _tool == "gate") and tool_name != _tool:
-		_finish_castle(_tool == "gate")
+	if _chaining() and _tool != "channel" and tool_name != _tool:
+		_finish_struct(_tool)
 	_select({})  # arming a tool drops any selection
 	_tool = tool_name
 	_lift = 0.0

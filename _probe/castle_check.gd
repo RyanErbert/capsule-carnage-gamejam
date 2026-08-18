@@ -51,6 +51,13 @@ func _shoot() -> void:
 	env.environment = e
 	add_child(env)
 	var shot := OS.get_environment("PROBE_SHOT")
+	# Headless never draws, so frame_post_draw never fires and awaiting it hangs
+	# the probe forever -- with no output, which reads as a wedged engine.
+	if DisplayServer.get_name() == "headless":
+		if _log:
+			_log.close()
+		get_tree().quit()
+		return
 	for i in 5:
 		await RenderingServer.frame_post_draw
 	if shot != "":

@@ -100,7 +100,9 @@ static func _openings(frames: Array, total: float, gate: bool, holes: Array,
 		var d := float(pr["d"])
 		if d < GATE_W * 0.5 + 0.5 or d > total - GATE_W * 0.5 - 0.5:
 			continue
-		if float(pr["off"]) > half * 3.2:
+		# Lateral, not 3D: a hole is aimed AT the face, and the face is metres
+		# above the rail it was swept from.
+		if float(pr["lat"]) > half * 3.2:
 			continue
 		# A penetration is punched AT a height. Ignoring that is what turned
 		# every window into a gateway: the hole was cut from the ground up

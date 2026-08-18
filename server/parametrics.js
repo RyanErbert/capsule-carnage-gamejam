@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 
 const MAX_NODES = 24;
+const MAX_HOLES = 24;
 const MAX_STRUCTURES = 400;
 const MAX_SEGMENT = 64;      // metres between consecutive nodes
 const WORLD_LIMIT = 4096;    // absolute coordinate clamp
@@ -114,6 +115,24 @@ function sanitizeNodes(raw) {
 }
 
 
+// A punched penetration is a POINT, not a node: it is where somebody aimed,
+// and the model decides what a hole at that spot means. Holes therefore skip
+// the run-length pull-in that nodes get -- there is no run to pull along.
+function sanitizeHoles(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const n of raw.slice(0, MAX_HOLES)) {
+    if (!n || typeof n !== 'object') continue;
+    out.push({
+      x: clampNum(n.x, -WORLD_LIMIT, WORLD_LIMIT, 0),
+      y: clampNum(n.y, -WORLD_LIMIT, WORLD_LIMIT, 0),
+      z: clampNum(n.z, -WORLD_LIMIT, WORLD_LIMIT, 0),
+    });
+  }
+  return out;
+}
+
+
 function minNodes(type) {
   return type === 'tower' ? 1 : 2;
 }
@@ -178,6 +197,7 @@ function adopt(rec) {
     type: rec.type,
     owner: typeof rec.owner === 'string' ? rec.owner.slice(0, 32) : '',
     nodes,
+    holes: sanitizeHoles(rec.holes),
     params: sanitizeParams(rec.type, rec.params),
   };
 }
@@ -207,6 +227,12 @@ function update(msg) {
     const nodes = sanitizeNodes(msg.nodes);
     if (nodes.length >= minNodes(rec.type)) rec.nodes = nodes;
   }
+  // `hole` punches one more; `holes` replaces the set, which is how you clear
+  // them. Both go through the same clamp.
+  if (msg.hole && typeof msg.hole === 'object' && rec.holes.length < MAX_HOLES) {
+    rec.holes.push(...sanitizeHoles([msg.hole]));
+  }
+  if (Array.isArray(msg.holes)) rec.holes = sanitizeHoles(msg.holes);
   save();
   return rec;
 }
@@ -286,9 +312,9 @@ function loadArchive(name) {
 
 
 module.exports = {
-  SPECS, TYPES, MAX_STRUCTURES, MAX_NODES, MAX_SEGMENT,
+  SPECS, TYPES, MAX_STRUCTURES, MAX_NODES, MAX_HOLES, MAX_SEGMENT,
   active, load, save, saveNow, clear,
   archive, listArchive, loadArchive,
   place, update, remove,
-  sanitizeParams, sanitizeNodes,
+  sanitizeParams, sanitizeNodes, sanitizeHoles,
 };

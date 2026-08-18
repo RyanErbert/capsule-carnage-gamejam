@@ -561,6 +561,11 @@ func _spawn_gameplay() -> void:
 	castles.set_script(load("res://Items/castle.gd"))
 	add_child(castles)
 
+	var parametrics := Node3D.new()
+	parametrics.name = "WorldParametrics"
+	parametrics.set_script(load("res://Items/parametrics.gd"))
+	add_child(parametrics)
+
 	var vehicles := Node3D.new()
 	vehicles.name = "WorldVehicles"
 	vehicles.set_script(load("res://Vehicles/world_vehicles.gd"))
