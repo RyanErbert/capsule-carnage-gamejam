@@ -274,6 +274,10 @@ func die_slayer(respawn_secs: float, died_at := Vector3.INF,
 	# whoever did it, climbs, and comes down here as the countdown ends.
 	if camera_rig and camera_rig.has_method("begin_death"):
 		camera_rig.begin_death(fell_at, killer_at, global_position, respawn_secs)
+	# The picture comes apart for as long as the camera is out there.
+	var fx: Node = get_tree().get_first_node_in_group("screen_fx")
+	if fx and fx.has_method("death"):
+		fx.death(respawn_secs)
 
 
 func _dead_tick(delta: float) -> void:
@@ -281,6 +285,9 @@ func _dead_tick(delta: float) -> void:
 	if dead_timer <= 0.0:
 		if camera_rig and camera_rig.has_method("end_death"):
 			camera_rig.end_death()
+		var fx: Node = get_tree().get_first_node_in_group("screen_fx")
+		if fx and fx.has_method("clear_death"):
+			fx.clear_death()
 		dead = false
 		visible = true
 		if capsuleCollider:
