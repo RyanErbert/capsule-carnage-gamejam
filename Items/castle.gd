@@ -9,18 +9,22 @@ extends Node3D
 ##    set by scroll while placing (and live after, like walls).
 ## Everything rebuilds from its record on 'castleUpdated'.
 
+const Ops := preload("res://Items/parametric/ops.gd")
+const Profiles := preload("res://Items/parametric/profiles.gd")
+
 const WALL_H := 6.0     # default body height above the base
 const SKIRT := 8.0      # buried below it, so sloping ground never shows a gap
 const THICK := 2.0      # full wall thickness
 const TOOTH_H := 1.1
 const TOOTH_W := 0.5    # merlon depth along each top edge
 const TOOTH_L := 1.6    # merlon length + same-size gap, alternating
-const POST := 3.0       # square post at each path node
 const GATE_W := 4.0
 const GATE_H := 4.5
 const TOWER_R := 3.2
 const MAX_LEN := 64.0   # per-segment clamp
 const MAX_NODES := 16
+const BATTER := 0.22    # how much wider the foot is than the head
+const COPING := 0.9     # depth of the band that oversails the head
 
 var _castles: Dictionary = {}   # id -> {root, points: Array[Vector3], data}
 
@@ -100,16 +104,21 @@ func _add_castle(c: Dictionary) -> void:
 	if pts.size() < 2:
 		root.queue_free()
 		return
+	# Per-segment reach cap, pulled in along the run rather than truncating the
+	# drawn wall and leaving the node behind it stranded.
+	for i in range(1, pts.size()):
+		var prev: Vector3 = pts[i - 1]
+		var step: Vector3 = (pts[i] as Vector3) - prev
+		if step.length() > MAX_LEN:
+			pts[i] = prev + step.normalized() * MAX_LEN
+	_build_run(root, pts, arch, mat, h, holes)
+	# Sample along the run so select/delete clicks land anywhere on it
 	var mids: Array = []
 	for i in pts.size() - 1:
-		_build_segment(root, pts[i], pts[i + 1], arch, mat, h, holes)
-		# Sample along the run so select/delete clicks land anywhere on it
 		var seg := (pts[i + 1] as Vector3) - (pts[i] as Vector3)
 		var steps := maxi(1, int(seg.length() / 4.0))
 		for s in steps:
 			mids.append((pts[i] as Vector3) + seg * ((s + 0.5) / steps))
-	for p in pts:
-		_post(root, p, mat, h)
 	_castles[id] = {"root": root, "points": pts + mids, "data": c}
 
 
@@ -124,143 +133,108 @@ static func stone_material() -> StandardMaterial3D:
 	return mat
 
 
-## Square post at every node: seals corners so bends have no gaps.
-func _post(root: Node3D, p: Vector3, mat: StandardMaterial3D, h := WALL_H, collide := true) -> void:
-	_solid_box(root,
-		Vector3(p.x, p.y + (h + 1.2 - SKIRT) / 2.0, p.z),
-		Vector3(POST, h + 1.2 + SKIRT, POST), Basis(), mat, collide)
-
-
 ## The wall a click-chain would build, as an unlit blue ghost. Caller owns
 ## the node and frees it when the cursor moves.
 func make_preview(pts: Array, arch: bool, h := WALL_H) -> Node3D:
 	var root := Node3D.new()
 	add_child(root)
+	if pts.size() >= 2:
+		_build_run(root, pts, arch, _ghost_material(), h, [], false)
+	return root
+
+
+static func _ghost_material() -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_color = Color(0.3, 0.6, 1.0, 0.35)
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	for i in maxi(0, pts.size() - 1):
-		_build_segment(root, pts[i], pts[i + 1], arch, mat, h, [], false)
-	for p in pts:
-		_post(root, p, mat, h, false)
-	return root
+	return mat
 
 
-## Cylindrical tower: body, crenellated rim, done. Height is parametric.
-func _build_tower(root: Node3D, p: Vector3, h: float, mat: StandardMaterial3D, collide := true) -> void:
-	if collide:
-		var col := CollisionShape3D.new()
-		var shape := CylinderShape3D.new()
-		shape.radius = TOWER_R
-		shape.height = h + SKIRT
-		col.shape = shape
-		root.add_child(col)
-		col.global_position = Vector3(p.x, p.y + (h - SKIRT) / 2.0, p.z)
-	var body := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius = TOWER_R
-	cyl.bottom_radius = TOWER_R + 0.4
-	cyl.height = h + SKIRT
-	cyl.radial_segments = 14
-	cyl.material = mat
-	body.mesh = cyl
-	root.add_child(body)
-	body.global_position = Vector3(p.x, p.y + (h - SKIRT) / 2.0, p.z)
-	# Merlons around the rim
-	var n := 9
-	for i in n:
-		var ang := TAU * i / n
-		var tp := Vector3(p.x + cos(ang) * (TOWER_R - TOOTH_W / 2.0), p.y + h + TOOTH_H / 2.0, p.z + sin(ang) * (TOWER_R - TOOTH_W / 2.0))
-		_solid_box(root, tp, Vector3(TOOTH_W, TOOTH_H, TOOTH_L * 0.8),
-			Basis(Vector3.UP, -ang), mat, collide)
+## A tower is the same wall bent onto a circle: one ring rail, the tower
+## profile swept around it, merlons repeated on the head. Height is parametric.
+func _build_tower(root: Node3D, p: Vector3, h: float, mat: Material, collide := true) -> void:
+	var frames := Ops.ring_frames(p, TOWER_R, 14)
+	var st := Ops.surface()
+	var hulls: Array = []
+	Ops.sweep(st, frames, Profiles.tower(TOWER_R, h, SKIRT, 0.35, COPING),
+		hulls, {"closed": true})
+	# Reopen the ring into a rail that covers the full circle, so a merlon can
+	# be sliced off the seam like any other stretch of head.
+	var head := Ops.lift(frames, h)
+	head.append(head[0])
+	_crenellate(st, hulls, head, Profiles.rect(-TOOTH_W, 0.1, 0.0, TOOTH_H))
+	Ops.attach(root, st, hulls, mat, collide)
 
 
 ## A tower the size the scroll picked, as a ghost (god menu preview).
 func make_tower_preview(h: float) -> Node3D:
 	var root := Node3D.new()
 	add_child(root)
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.3, 0.6, 1.0, 0.35)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_build_tower(root, Vector3.ZERO, h, mat, false)
+	_build_tower(root, Vector3.ZERO, h, _ghost_material(), false)
 	return root
 
 
-func _build_segment(root: Node3D, a: Vector3, b: Vector3, arch: bool, mat: StandardMaterial3D, h: float, holes: Array, collide := true) -> void:
-	var flat := Vector3(b.x - a.x, 0.0, b.z - a.z)
-	var length := minf(flat.length(), MAX_LEN)
-	if length < 1.0:
+## The whole run in one sweep: the wall profile carried along a mitred rail, so
+## a corner closes itself without a post and a slope is a ramp instead of a
+## stack of steps. Openings break the rail into stretches, each opening takes a
+## lintel over it, and the merlons ride the head.
+func _build_run(root: Node3D, pts: Array, arch: bool, mat: Material,
+		h: float, holes: Array, collide := true) -> void:
+	var frames := Ops.mitre_frames(pts)
+	if frames.size() < 2:
 		return
-	var dir := flat.normalized()
-	var right := Vector3(-dir.z, 0.0, dir.x)
-	var base_y := minf(a.y, b.y)
-	var basis := Basis.looking_at(dir, Vector3.UP)
-	var a_flat := Vector3(a.x, 0, a.z)
+	var total := Ops.rail_length(frames)
+	if total < 1.0:
+		return
+	var st := Ops.surface()
+	var hulls: Array = []
+	var body := Profiles.wall(THICK * 0.5, h, SKIRT, BATTER, COPING)
 
-	# Openings along this segment: the gate arch (middle) plus every punched
-	# hole whose point projects onto it. Sorted, non-overlapping-ish.
+	# Openings as distances along the whole run: the gate arch at the middle,
+	# plus every punched hole that lands near enough to the line to count.
 	var opens: Array = []
-	if arch and length > GATE_W + 2.0:
-		opens.append(length / 2.0)
+	if arch and total > GATE_W + 2.0:
+		opens.append(total * 0.5)
 	for hp in holes:
-		var t: float = (Vector3(hp.x, 0, hp.z) - a_flat).dot(dir)
-		if t < GATE_W / 2.0 + 0.5 or t > length - GATE_W / 2.0 - 0.5:
+		var pr := Ops.project(frames, hp)
+		var d := float(pr["d"])
+		if d < GATE_W * 0.5 + 0.5 or d > total - GATE_W * 0.5 - 0.5:
 			continue
-		var perp: float = (Vector3(hp.x, 0, hp.z) - a_flat - dir * t).length()
-		if perp > THICK * 1.6:
+		if float(pr["off"]) > THICK * 1.6:
 			continue
-		opens.append(t)
+		opens.append(d)
 	opens.sort()
 
 	var gate_h := minf(GATE_H, h - 0.8)
-	# Solid stretches between openings, each reaching SKIRT below the base
+	var lintel := Profiles.rect(-THICK * 0.5, THICK * 0.5, gate_h, h)
 	var cursor := 0.0
-	for t_v in opens + [length + GATE_W / 2.0]:
-		var t := float(t_v)
-		var start: float = cursor
-		var stop: float = minf(t - GATE_W / 2.0, length)
-		if stop - start > 0.05:
-			var mid := a_flat + dir * ((start + stop) / 2.0)
-			_solid_box(root, Vector3(mid.x, base_y + (h - SKIRT) / 2.0, mid.z),
-				Vector3(THICK, h + SKIRT, stop - start), basis, mat, collide)
-		cursor = maxf(cursor, t + GATE_W / 2.0)
-	# Lintels over every opening
+	for t_v in opens + [total + GATE_W * 0.5]:
+		var stop: float = minf(float(t_v) - GATE_W * 0.5, total)
+		if stop - cursor > 0.05:
+			Ops.sweep(st, Ops.slice(frames, cursor, stop), body, hulls, {"caps": true})
+		cursor = maxf(cursor, float(t_v) + GATE_W * 0.5)
 	for t_v in opens:
-		var t := float(t_v)
-		var omid := a_flat + dir * t
-		_solid_box(root, Vector3(omid.x, base_y + gate_h + (h - gate_h) / 2.0, omid.z),
-			Vector3(THICK, h - gate_h, GATE_W), basis, mat, collide)
+		Ops.sweep(st, Ops.slice(frames, float(t_v) - GATE_W * 0.5,
+			float(t_v) + GATE_W * 0.5), lintel, hulls, {"caps": true})
 
-	# Teeth: alternating merlons along both top edges (visual + collision)
-	var n := int(length / TOOTH_L)
-	for i in n:
-		if i % 2 == 1:
+	var head := Ops.lift(frames, h)
+	for side: float in [-1.0, 1.0]:
+		_crenellate(st, hulls, head, Profiles.merlon(THICK * 0.5, side, TOOTH_W, TOOTH_H))
+	Ops.attach(root, st, hulls, mat, collide)
+
+
+## Alternating teeth along a head rail. Each one is sliced off the real rail
+## rather than dropped on as a box, so a merlon that straddles a corner mitres
+## with it instead of shearing through.
+func _crenellate(st: SurfaceTool, hulls: Array, head: Array, tooth: PackedVector2Array) -> void:
+	if tooth.is_empty():
+		return
+	var i := 0
+	for d in Ops.repeat_distances(head, TOOTH_L):
+		i += 1
+		if i % 2 == 0:
 			continue
-		var along := (i + 0.5) * TOOTH_L
-		for side: float in [-1.0, 1.0]:
-			var tp: Vector3 = a_flat + dir * along + right * side * ((THICK - TOOTH_W) / 2.0)
-			_solid_box(root, Vector3(tp.x, base_y + h + TOOTH_H / 2.0, tp.z),
-				Vector3(TOOTH_W, TOOTH_H, TOOTH_L * 0.9), basis, mat, collide)
-
-
-func _solid_box(root: Node3D, center: Vector3, size: Vector3, basis: Basis, mat: StandardMaterial3D, collide := true) -> void:
-	if collide:
-		var col := CollisionShape3D.new()
-		var shape := BoxShape3D.new()
-		shape.size = size
-		col.shape = shape
-		root.add_child(col)
-		col.global_position = center
-		col.global_basis = basis
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = size
-	bm.material = mat
-	mi.mesh = bm
-	root.add_child(mi)
-	mi.global_position = center
-	mi.global_basis = basis
+		Ops.sweep(st, Ops.slice(head, float(d) - TOOTH_L * 0.45,
+			float(d) + TOOTH_L * 0.45), tooth, hulls, {"caps": true})

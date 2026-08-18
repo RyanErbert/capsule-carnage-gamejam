@@ -72,6 +72,14 @@ func aim_dir() -> Vector3:
 
 
 func _ready() -> void:
+	# See build_controller._ready: a probe scene parents this to a bare
+	# CharacterBody3D, and reading player.godmode off it errors every frame.
+	if not player.has_method("set_godmode"):
+		set_process(false)
+		set_physics_process(false)
+		set_process_unhandled_input(false)
+		set_process_input(false)
+		return
 	Net.event_received.connect(_on_net_event)
 	# Lobby starting weapon (web menu: none/machinegun/rocket/mines/grapple)
 	var weapon: String = Settings.starting_weapon

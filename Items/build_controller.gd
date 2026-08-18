@@ -37,6 +37,15 @@ var _drag_mouse_accum := 0.0
 
 
 func _ready() -> void:
+	# Probe scenes hang these controllers off a bare CharacterBody3D with no
+	# player script on it. Every property read then fails, once per frame per
+	# access, and a headless probe left running overnight writes tens of
+	# gigabytes of identical stack traces. Sit the whole node out instead.
+	if not player.has_method("set_godmode"):
+		set_process(false)
+		set_process_unhandled_input(false)
+		set_process_input(false)
+		return
 	_ghost_mat = StandardMaterial3D.new()
 	_ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
