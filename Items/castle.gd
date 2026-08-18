@@ -9,8 +9,7 @@ extends Node3D
 ##    set by scroll while placing (and live after, like walls).
 ## Everything rebuilds from its record on 'castleUpdated'.
 
-const Ops := preload("res://Items/parametric/ops.gd")
-const Profiles := preload("res://Items/parametric/profiles.gd")
+const Registry := preload("res://Items/parametric/registry.gd")
 
 const WALL_H := 6.0     # default body height above the base
 const SKIRT := 8.0      # buried below it, so sloping ground never shows a gap
@@ -92,17 +91,16 @@ func _add_castle(c: Dictionary) -> void:
 		if hd is Dictionary:
 			holes.append(Vector3(hd.get("x", 0.0), hd.get("y", 0.0), hd.get("z", 0.0)))
 
-	var root := StaticBody3D.new()
-	add_child(root)
-	var mat := stone_material()
-
-	if str(c.get("kind", "wall")) == "tower":
-		_build_tower(root, pts[0], h, mat)
-		_castles[id] = {"root": root, "points": [pts[0], pts[0] + Vector3(0, h, 0)], "data": c}
+	var kind := str(c.get("kind", "wall"))
+	if kind == "tower":
+		var tower := _make(pts, "tower", false, h, [], stone_material(), true)
+		if tower == null:
+			return
+		add_child(tower)
+		_castles[id] = {"root": tower, "points": [pts[0], pts[0] + Vector3(0, h, 0)], "data": c}
 		return
 
 	if pts.size() < 2:
-		root.queue_free()
 		return
 	# Per-segment reach cap, pulled in along the run rather than truncating the
 	# drawn wall and leaving the node behind it stranded.
@@ -111,7 +109,10 @@ func _add_castle(c: Dictionary) -> void:
 		var step: Vector3 = (pts[i] as Vector3) - prev
 		if step.length() > MAX_LEN:
 			pts[i] = prev + step.normalized() * MAX_LEN
-	_build_run(root, pts, arch, mat, h, holes)
+	var root := _make(pts, "wall", arch, h, holes, stone_material(), true)
+	if root == null:
+		return
+	add_child(root)
 	# Sample along the run so select/delete clicks land anywhere on it
 	var mids: Array = []
 	for i in pts.size() - 1:
@@ -136,10 +137,19 @@ static func stone_material() -> StandardMaterial3D:
 ## The wall a click-chain would build, as an unlit blue ghost. Caller owns
 ## the node and frees it when the cursor moves.
 func make_preview(pts: Array, arch: bool, h := WALL_H) -> Node3D:
-	var root := Node3D.new()
+	var root := _make(pts, "wall", arch, h, [], _ghost_material(), false) 		if pts.size() >= 2 else null
+	if root == null:
+		root = Node3D.new()
 	add_child(root)
-	if pts.size() >= 2:
-		_build_run(root, pts, arch, _ghost_material(), h, [], false)
+	return root
+
+
+## A tower the size the scroll picked, as a ghost (god menu preview).
+func make_tower_preview(h: float) -> Node3D:
+	var root := _make([Vector3.ZERO], "tower", false, h, [], _ghost_material(), false)
+	if root == null:
+		root = Node3D.new()
+	add_child(root)
 	return root
 
 
@@ -152,89 +162,28 @@ static func _ghost_material() -> StandardMaterial3D:
 	return mat
 
 
-## A tower is the same wall bent onto a circle: one ring rail, the tower
-## profile swept around it, merlons repeated on the head. Height is parametric.
-func _build_tower(root: Node3D, p: Vector3, h: float, mat: Material, collide := true) -> void:
-	var frames := Ops.ring_frames(p, TOWER_R, 14)
-	var st := Ops.surface()
-	var hulls: Array = []
-	Ops.sweep(st, frames, Profiles.tower(TOWER_R, h, SKIRT, 0.35, COPING),
-		hulls, {"closed": true})
-	# Reopen the ring into a rail that covers the full circle, so a merlon can
-	# be sliced off the seam like any other stretch of head.
-	var head := Ops.lift(frames, h)
-	head.append(head[0])
-	_crenellate(st, hulls, head, Profiles.rect(-TOOTH_W, 0.1, 0.0, TOOTH_H))
-	Ops.attach(root, st, hulls, mat, collide)
+## Castles are the legacy protocol on top of the parametric models: this node
+## still speaks castlePlaced/castleUpdated, but the geometry comes from
+## Items/parametric/models the same as anything else. One implementation, and
+## a wall placed the old way is the same object as one placed the new way.
+func _record(pts: Array, kind: String, arch: bool, h: float, holes: Array) -> Dictionary:
+	if kind == "tower":
+		return {
+			"type": "tower",
+			"nodes": Registry.to_wire([pts[0]]),
+			"params": {"height": h, "radius": TOWER_R, "coping": COPING, "tooth": TOOTH_H},
+		}
+	return {
+		"type": "wall",
+		"nodes": Registry.to_wire(pts),
+		"holes": Registry.to_wire(holes),
+		"params": {
+			"height": h, "thickness": THICK, "batter": BATTER,
+			"coping": COPING, "tooth": TOOTH_H, "gate": 1.0 if arch else 0.0,
+		},
+	}
 
 
-## A tower the size the scroll picked, as a ghost (god menu preview).
-func make_tower_preview(h: float) -> Node3D:
-	var root := Node3D.new()
-	add_child(root)
-	_build_tower(root, Vector3.ZERO, h, _ghost_material(), false)
-	return root
-
-
-## The whole run in one sweep: the wall profile carried along a mitred rail, so
-## a corner closes itself without a post and a slope is a ramp instead of a
-## stack of steps. Openings break the rail into stretches, each opening takes a
-## lintel over it, and the merlons ride the head.
-func _build_run(root: Node3D, pts: Array, arch: bool, mat: Material,
-		h: float, holes: Array, collide := true) -> void:
-	var frames := Ops.mitre_frames(pts)
-	if frames.size() < 2:
-		return
-	var total := Ops.rail_length(frames)
-	if total < 1.0:
-		return
-	var st := Ops.surface()
-	var hulls: Array = []
-	var body := Profiles.wall(THICK * 0.5, h, SKIRT, BATTER, COPING)
-
-	# Openings as distances along the whole run: the gate arch at the middle,
-	# plus every punched hole that lands near enough to the line to count.
-	var opens: Array = []
-	if arch and total > GATE_W + 2.0:
-		opens.append(total * 0.5)
-	for hp in holes:
-		var pr := Ops.project(frames, hp)
-		var d := float(pr["d"])
-		if d < GATE_W * 0.5 + 0.5 or d > total - GATE_W * 0.5 - 0.5:
-			continue
-		if float(pr["off"]) > THICK * 1.6:
-			continue
-		opens.append(d)
-	opens.sort()
-
-	var gate_h := minf(GATE_H, h - 0.8)
-	var lintel := Profiles.rect(-THICK * 0.5, THICK * 0.5, gate_h, h)
-	var cursor := 0.0
-	for t_v in opens + [total + GATE_W * 0.5]:
-		var stop: float = minf(float(t_v) - GATE_W * 0.5, total)
-		if stop - cursor > 0.05:
-			Ops.sweep(st, Ops.slice(frames, cursor, stop), body, hulls, {"caps": true})
-		cursor = maxf(cursor, float(t_v) + GATE_W * 0.5)
-	for t_v in opens:
-		Ops.sweep(st, Ops.slice(frames, float(t_v) - GATE_W * 0.5,
-			float(t_v) + GATE_W * 0.5), lintel, hulls, {"caps": true})
-
-	var head := Ops.lift(frames, h)
-	for side: float in [-1.0, 1.0]:
-		_crenellate(st, hulls, head, Profiles.merlon(THICK * 0.5, side, TOOTH_W, TOOTH_H))
-	Ops.attach(root, st, hulls, mat, collide)
-
-
-## Alternating teeth along a head rail. Each one is sliced off the real rail
-## rather than dropped on as a box, so a merlon that straddles a corner mitres
-## with it instead of shearing through.
-func _crenellate(st: SurfaceTool, hulls: Array, head: Array, tooth: PackedVector2Array) -> void:
-	if tooth.is_empty():
-		return
-	var i := 0
-	for d in Ops.repeat_distances(head, TOOTH_L):
-		i += 1
-		if i % 2 == 0:
-			continue
-		Ops.sweep(st, Ops.slice(head, float(d) - TOOTH_L * 0.45,
-			float(d) + TOOTH_L * 0.45), tooth, hulls, {"caps": true})
+func _make(pts: Array, kind: String, arch: bool, h: float, holes: Array,
+		mat: Material, collide: bool) -> Node3D:
+	return Registry.build(_record(pts, kind, arch, h, holes), mat, collide)

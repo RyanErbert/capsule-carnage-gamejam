@@ -237,6 +237,15 @@ static func slice(frames: Array, from_d: float, to_d: float) -> Array:
 	return out
 
 
+## One interpolated frame at a distance along the rail. Handles hang off this:
+## asking slice() for a hair-thin stretch instead loses the width to floating
+## point once the rail is a few tens of metres long, and the handle vanishes.
+static func frame_at(frames: Array, dist: float) -> Dictionary:
+	if frames.size() < 2:
+		return {}
+	return _at_distance(frames, _runs(frames), dist)
+
+
 ## Move a whole rail along its own up vector: the head of a wall is its rail
 ## lifted by the wall height, which is where the merlons ride.
 static func lift(frames: Array, amount: float) -> Array:

@@ -24,8 +24,9 @@ func _ready() -> void:
 	_check("hairpin", node, [Vector3(6, 0, -14), Vector3(24, 0, -14), Vector3(7, 0, -11)], false, [])
 	var body := StaticBody3D.new()
 	node.add_child(body)
-	node.call("_build_tower", body, Vector3(-16, 0, -16), 9.0, Castle.stone_material(), true)
-	_report("tower", body)
+	var t: Node3D = node.call("_make", [Vector3(-16, 0, -16)], "tower", false, 9.0, [], Castle.stone_material(), true)
+	node.add_child(t)
+	_report("tower", t)
 	_say("done")
 	_shoot()
 
@@ -69,11 +70,11 @@ func _say(msg: String) -> void:
 func _check(label: String, node: Node3D, pts: Array, arch: bool, holes: Array) -> void:
 	var body := StaticBody3D.new()
 	node.add_child(body)
-	node.call("_build_run", body, pts, arch, Castle.stone_material(), 6.0, holes, true)
-	_report(label, body)
+	var built: Node3D = node.call("_make", pts, "wall", arch, 6.0, holes, Castle.stone_material(), true)
+	_report(label, built if built else body)
 
 
-func _report(label: String, body: StaticBody3D) -> void:
+func _report(label: String, body: Node3D) -> void:
 	var mi: MeshInstance3D = null
 	var shapes := 0
 	for c in body.get_children():
