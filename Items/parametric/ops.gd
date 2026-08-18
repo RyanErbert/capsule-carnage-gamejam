@@ -144,24 +144,34 @@ static func ring_frames(center: Vector3, radius: float, segments := 16) -> Array
 ## Run `profile` along `frames`, writing triangles into `st` and one convex
 ## hull per span into `hulls`. Hulls rather than a trimesh because a trimesh is
 ## a shell with no interior, and the player physics needs to know what is solid.
+##
+## `opts.profiles` gives a DIFFERENT section at every frame -- one array entry
+## per frame, all with the same vertex count so the quads still pair up. That is
+## what turns a flat lintel into an arch: the opening's head is a different
+## height at every station across the span, and the section is the only thing
+## that changes. Anything that varies smoothly along a run is this.
 static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 		hulls: Array, opts := {}) -> void:
 	if frames.size() < 2 or profile.size() < 3:
 		return
-	var loop := _ccw(profile)
 	var closed := bool(opts.get("closed", false))
 	var caps := bool(opts.get("caps", true)) and not closed
 	var hull := bool(opts.get("hulls", true))
+	var loops := _loops_for(frames, profile, opts.get("profiles", []))
+	if loops.is_empty():
+		return
 
 	var rings: Array = []
-	for f in frames:
-		rings.append(_ring(f, loop))
+	for i in frames.size():
+		rings.append(_ring(frames[i], loops[i]))
 	if closed:
 		rings.append(rings[0])
+		loops.append(loops[0])
 
 	for i in rings.size() - 1:
 		var a: PackedVector3Array = rings[i]
 		var b: PackedVector3Array = rings[i + 1]
+		var loop: PackedVector2Array = loops[i]
 		for j in loop.size():
 			var j2 := (j + 1) % loop.size()
 			var e := loop[j2] - loop[j]
@@ -179,8 +189,30 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 			hulls.append(pts)
 
 	if caps:
-		_cap(st, frames[0], loop, rings[0], true)
-		_cap(st, frames[frames.size() - 1], loop, rings[rings.size() - 1], false)
+		_cap(st, frames[0], loops[0], rings[0], true)
+		var last := frames.size() - 1
+		_cap(st, frames[last], loops[last], rings[last], false)
+
+
+## One wound loop per frame: the same section repeated, or the per-frame list
+## when one was given. A varying section whose vertex count wanders would leave
+## the quads unpaired, so that is refused rather than half-built.
+static func _loops_for(frames: Array, profile: PackedVector2Array, varying: Variant) -> Array:
+	var out: Array = []
+	if varying is Array and (varying as Array).size() == frames.size():
+		var want := -1
+		for p in varying:
+			var loop := _ccw(p)
+			if want == -1:
+				want = loop.size()
+			if loop.size() != want or loop.size() < 3:
+				return []
+			out.append(loop)
+		return out
+	var one := _ccw(profile)
+	for i in frames.size():
+		out.append(one)
+	return out
 
 
 ## Evenly spaced transforms along a rail: merlons on a parapet, piers under a
@@ -234,6 +266,22 @@ static func slice(frames: Array, from_d: float, to_d: float) -> Array:
 		if acc > from_d + 0.02 and acc < to_d - 0.02:
 			out.append(frames[i + 1])
 	out.append(_at_distance(frames, runs, to_d))
+	return out
+
+
+## The same rail as `n` evenly spaced frames. A section that varies along a run
+## needs stations to vary AT, and a straight stretch between two nodes has only
+## its two ends -- an arch drawn on those is a triangle.
+static func resample(frames: Array, n: int) -> Array:
+	if frames.size() < 2 or n < 2:
+		return frames
+	var runs := _runs(frames)
+	var total := 0.0
+	for r in runs:
+		total += float(r)
+	var out: Array = []
+	for i in n:
+		out.append(_at_distance(frames, runs, total * float(i) / float(n - 1)))
 	return out
 
 

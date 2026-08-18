@@ -76,6 +76,29 @@ static func to_points(raw: Variant) -> Array:
 	return out
 
 
+## How a structure looks, kept here rather than in each caller: the god menu,
+## the world node and the probes were all making their own copy of the same
+## material, which is three chances to drift and no batching.
+static func stone() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = load("res://Terrain/textures/rock.jpg")
+	mat.albedo_color = Color(0.78, 0.76, 0.72)
+	mat.uv1_triplanar = true
+	mat.uv1_scale = Vector3(0.22, 0.22, 0.22)
+	mat.roughness = 1.0
+	return mat
+
+
+## A placement preview: what you are about to build, before you build it.
+static func ghost() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(0.3, 0.6, 1.0, 0.35)
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return mat
+
+
 static func to_wire(points: Array) -> Array:
 	var out: Array = []
 	for p in points:

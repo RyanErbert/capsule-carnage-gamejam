@@ -12,17 +12,68 @@ extends RefCounted
 const MIN_V := 0.05   ## nothing thinner than this survives the sweep anyway
 
 
+## Cut every outward corner off a section. One function rather than a chamfered
+## variant of each profile, because an arris belongs to the CORNER, not to the
+## wall it happens to be on -- and because a chamfer in the section is a real
+## change of silhouette, where a shader that only bends the normal still reads
+## as a sharp edge exactly where you look for one.
+##
+## Corners at or below `above` keep their point: the foot of a wall is buried
+## metres deep and cutting it would only cost triangles nobody sees.
+static func chamfer(loop: PackedVector2Array, amount: float, above := 0.0) -> PackedVector2Array:
+	var a := maxf(amount, 0.0)
+	var n := loop.size()
+	if a < 0.01 or n < 3:
+		return loop
+	# Winding decides which way a corner has to turn to be convex, and these
+	# sections are not all wound the same way once a model mirrors one.
+	var area := 0.0
+	for i in n:
+		var p := loop[i]
+		var q := loop[(i + 1) % n]
+		area += p.x * q.y - q.x * p.y
+	var wind := 1.0 if area >= 0.0 else -1.0
+	var out := PackedVector2Array()
+	for i in n:
+		var p := loop[i]
+		var e0 := p - loop[(i - 1 + n) % n]
+		var e1 := loop[(i + 1) % n] - p
+		var l0 := e0.length()
+		var l1 := e1.length()
+		if p.y <= above or l0 < 0.01 or l1 < 0.01 or e0.cross(e1) * wind <= 0.0:
+			out.append(p)
+			continue
+		# Never eat more than half an edge, or two neighbouring chamfers meet
+		# in the middle and the section folds through itself.
+		out.append(p - e0 / l0 * minf(a, l0 * 0.45))
+		out.append(p + e1 / l1 * minf(a, l1 * 0.45))
+	return out
+
+
 ## Battered wall: widest at the ground, tapering as it rises, with a coping
 ## that oversails the head. `skirt` runs below zero so sloping terrain never
 ## opens a gap under the run.
 static func wall(half := 1.0, height := 6.0, skirt := 8.0, batter := 0.22,
-		coping := 0.9) -> PackedVector2Array:
+		coping := 0.9, cham := 0.0) -> PackedVector2Array:
 	var h := maxf(height, 1.0)
 	var c := clampf(coping, 0.0, h * 0.4)
 	var b := maxf(batter, 0.0)
 	var o := 0.26                      # how far the coping stands proud
 	var cb := maxf(c * 0.45, MIN_V)    # depth of the coping band itself
-	return PackedVector2Array([
+	# No coping means no coping. Drawing the band anyway at zero depth folds the
+	# outline back through itself -- the lip runs out to `o`, up by the band's
+	# floor thickness and back in to a point already on the top edge -- and a
+	# section that touches itself sweeps into a solid with holes in it.
+	if c < MIN_V:
+		return chamfer(PackedVector2Array([
+			Vector2(-(half + b), -skirt),
+			Vector2(half + b, -skirt),
+			Vector2(half + b, 0.0),
+			Vector2(half, h),
+			Vector2(-half, h),
+			Vector2(-(half + b), 0.0),
+		]), cham)
+	return chamfer(PackedVector2Array([
 		Vector2(-(half + b), -skirt),
 		Vector2(half + b, -skirt),
 		Vector2(half + b, 0.0),
@@ -35,7 +86,7 @@ static func wall(half := 1.0, height := 6.0, skirt := 8.0, batter := 0.22,
 		Vector2(-(half + o), h - c),
 		Vector2(-half, h - c),
 		Vector2(-(half + b), 0.0),
-	])
+	]), cham)
 
 
 ## The same wall face, but closed off at the axis instead of mirrored: swept
@@ -43,14 +94,22 @@ static func wall(half := 1.0, height := 6.0, skirt := 8.0, batter := 0.22,
 ## coping included. The inner edge collapses onto the axis and its degenerate
 ## triangles are dropped by the sweep.
 static func tower(radius := 3.2, height := 9.0, skirt := 8.0, batter := 0.3,
-		coping := 0.9) -> PackedVector2Array:
+		coping := 0.9, cham := 0.0) -> PackedVector2Array:
 	var h := maxf(height, 1.0)
 	var c := clampf(coping, 0.0, h * 0.4)
 	var b := maxf(batter, 0.0)
 	var r := -maxf(radius, 0.5)
 	var o := 0.26
 	var cb := maxf(c * 0.45, MIN_V)
-	return PackedVector2Array([
+	if c < MIN_V:
+		return chamfer(PackedVector2Array([
+			Vector2(r, -skirt),
+			Vector2(b, -skirt),
+			Vector2(b, 0.0),
+			Vector2(0.0, h),
+			Vector2(r, h),
+		]), cham)
+	return chamfer(PackedVector2Array([
 		Vector2(r, -skirt),
 		Vector2(b, -skirt),
 		Vector2(b, 0.0),
@@ -59,7 +118,7 @@ static func tower(radius := 3.2, height := 9.0, skirt := 8.0, batter := 0.3,
 		Vector2(o, h - c + cb),
 		Vector2(0.1, h),
 		Vector2(r, h),
-	])
+	]), cham)
 
 
 ## Plain rectangle between two u values and two v values. Merlons, kerbs,

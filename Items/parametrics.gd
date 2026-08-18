@@ -37,8 +37,8 @@ var extra_exclude: Array = []
 
 func _ready() -> void:
 	add_to_group("world_parametrics")
-	_stone = _stone_material()
-	_ghost = _ghost_material()
+	_stone = Registry.stone()
+	_ghost = Registry.ghost()
 	_rig = HandleRig.new()
 	_rig.name = "HandleRig"
 	_rig.self_input = false     # the build drone arbitrates the click
@@ -333,21 +333,3 @@ func make_preview(type: String, nodes: Array, params: Dictionary) -> Node3D:
 	return root
 
 
-## Tiled stone, triplanar so every sweep is textured without UV work.
-static func _stone_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = load("res://Terrain/textures/rock.jpg")
-	mat.albedo_color = Color(0.78, 0.76, 0.72)
-	mat.uv1_triplanar = true
-	mat.uv1_scale = Vector3(0.22, 0.22, 0.22)
-	mat.roughness = 1.0
-	return mat
-
-
-static func _ghost_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.3, 0.6, 1.0, 0.35)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	return mat

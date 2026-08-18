@@ -31,7 +31,9 @@ const SPECS = {
     batter:    [0, 1.2, 0.22],
     coping:    [0, 2.5, 0.9],
     tooth:     [0, 3, 1.1],     // merlon height; 0 means no crenellation
-    gate:      [0, 1, 0],       // bool as 0/1: arch at the middle
+    chamfer:   [0, 0.8, 0.14],  // arris cut on every outward corner
+    arch:      [0, 1, 0.7],     // opening head: 0 flat lintel, 1 full semicircle
+    gate:      [0, 1, 0],       // bool as 0/1: opening at the middle
   },
   tower: {
     height:    [3, 40, 9],
@@ -39,6 +41,7 @@ const SPECS = {
     batter:    [0, 1.5, 0.35],
     coping:    [0, 2.5, 0.9],
     tooth:     [0, 3, 1.1],
+    chamfer:   [0, 0.8, 0.14],
     sides:     [5, 32, 14],
   },
   bridge: {

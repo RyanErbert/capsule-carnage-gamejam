@@ -124,15 +124,8 @@ func _add_castle(c: Dictionary) -> void:
 	_castles[id] = {"root": root, "points": pts + mids, "data": c}
 
 
-## Tiled stone, triplanar so every box is textured without UV work.
 static func stone_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = load("res://Terrain/textures/rock.jpg")
-	mat.albedo_color = Color(0.78, 0.76, 0.72)
-	mat.uv1_triplanar = true
-	mat.uv1_scale = Vector3(0.22, 0.22, 0.22)
-	mat.roughness = 1.0
-	return mat
+	return Registry.stone()
 
 
 ## Castles are the legacy protocol on top of the parametric models: this node

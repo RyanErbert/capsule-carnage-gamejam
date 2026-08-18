@@ -17,6 +17,8 @@ const GATE_H := 4.5
 const TOOTH_L := 1.6      # merlon length, and the same again for the gap
 const WINDOW_H := 3.0     # vertical extent of a punched penetration
 const SILL_MIN := 0.4     # thinner than this and the sill is not worth keeping
+const ARCH_STEPS := 13    # stations across an opening; an arc needs somewhere to bend
+const ARCH_HEAD := 0.25   # solid left over the crown before the arch stops rising
 
 
 static func spec() -> Array:
@@ -26,6 +28,8 @@ static func spec() -> Array:
 		Spec.param("batter", "BATTER", 0.0, 1.2, 0.22, 0.02),
 		Spec.param("coping", "COPING", 0.0, 2.5, 0.9, 0.05),
 		Spec.param("tooth", "TEETH", 0.0, 3.0, 1.1, 0.1),
+		Spec.param("chamfer", "CHAMFER", 0.0, 0.8, 0.14, 0.02),
+		Spec.param("arch", "ARCH", 0.0, 1.0, 0.7, 0.05, ""),
 		Spec.param("gate", "GATE", 0.0, 1.0, 0.0, 1.0, ""),
 	]
 
@@ -50,10 +54,12 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 	var batter := Spec.value(s, params, "batter")
 	var coping := Spec.value(s, params, "coping")
 	var tooth := Spec.value(s, params, "tooth")
+	var cham := Spec.value(s, params, "chamfer")
+	var arch := Spec.value(s, params, "arch")
 
 	var st := Ops.surface()
 	var hulls: Array = []
-	var face := Profiles.wall(half, h, SKIRT, batter, coping)
+	var face := Profiles.wall(half, h, SKIRT, batter, coping, cham)
 
 	var opens := _openings(frames, total, Spec.flag(s, params, "gate"), holes, half, h)
 	var cursor := 0.0
@@ -74,7 +80,7 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 		else:
 			Ops.sweep(st, span, Profiles.rect(-half, half, -SKIRT, 0.0), hulls, {"caps": true})
 		if y1 < h - 0.05:
-			Ops.sweep(st, span, Profiles.rect(-half, half, y1, h), hulls, {"caps": true})
+			_head(st, hulls, span, half, y1, h, arch)
 		cursor = d + GATE_W * 0.5
 	if total - cursor > 0.05:
 		Ops.sweep(st, Ops.slice(frames, cursor, total), face, hulls, {"caps": true})
@@ -82,10 +88,31 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 	if tooth > 0.05:
 		var head := Ops.lift(frames, h)
 		for side: float in [-1.0, 1.0]:
-			crenellate(st, hulls, head, Profiles.merlon(half, side, 0.5, tooth), TOOTH_L)
+			crenellate(st, hulls, head,
+				Profiles.chamfer(Profiles.merlon(half, side, 0.5, tooth), cham), TOOTH_L)
 
 	Ops.attach(body, st, hulls, mat, collide)
 	return body
+
+
+## What sits over an opening. Flat, that is one lintel; arched, the head is an
+## arc and so the section's underside is at a different height at every station
+## across the span -- which is a varying profile, not a shape the sweep could
+## otherwise make. The arc is a segment of a circle on the opening's own width,
+## scaled by `arch`: 0 is a flat lintel and 1 a full semicircle.
+static func _head(st: SurfaceTool, hulls: Array, span: Array,
+		half: float, y1: float, h: float, arch: float) -> void:
+	var rise := minf(arch * GATE_W * 0.5, h - y1 - ARCH_HEAD)
+	if rise < 0.05:
+		Ops.sweep(st, span, Profiles.rect(-half, half, y1, h), hulls, {"caps": true})
+		return
+	var arc := Ops.resample(span, ARCH_STEPS)
+	var profs: Array = []
+	for i in arc.size():
+		var t := float(i) / float(arc.size() - 1)
+		var soffit := y1 + rise * sqrt(maxf(0.0, 1.0 - pow(2.0 * t - 1.0, 2.0)))
+		profs.append(Profiles.rect(-half, half, soffit, h))
+	Ops.sweep(st, arc, profs[0], hulls, {"caps": true, "profiles": profs})
 
 
 ## Distances along the run where the wall is open: the gate at the middle, plus
