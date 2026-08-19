@@ -12,6 +12,15 @@ var target_position := Vector3.ZERO
 var target_quat := Quaternion.IDENTITY
 var is_godmode := false
 
+# Position packets arrive at 20 Hz. Easing toward the last one and stopping
+# there means the ghost decelerates for 50 ms and then lurches when the next
+# lands -- centimetres at a walk, most of a metre at a sprint, which is the
+# rubberbanding. Carry their speed between packets instead of stalling.
+var _vel := Vector3.ZERO
+var _since_packet := 0.0
+const EXTRAPOLATE_MAX := 0.3   # stop guessing if they go quiet: a dropped
+                               # connection should stall, not fly off
+
 @onready var _mesh: MeshInstance3D = $Mesh
 @onready var _name_label: Label3D = $NameLabel
 
@@ -48,7 +57,14 @@ func setup(id: String, data: Dictionary) -> void:
 
 
 func apply_move(d: Dictionary) -> void:
-	target_position = Vector3(d.get("x", 0.0), d.get("y", 0.0), d.get("z", 0.0))
+	var to := Vector3(d.get("x", 0.0), d.get("y", 0.0), d.get("z", 0.0))
+	# Speed from the gap between packets, smoothed: one late packet should not
+	# be read as a sprint, and one early one as a stop.
+	if _since_packet > 0.004 and target_position != Vector3.ZERO:
+		var sample := (to - target_position) / _since_packet
+		_vel = sample if _vel == Vector3.ZERO else _vel.lerp(sample, 0.45)
+	_since_packet = 0.0
+	target_position = to
 	target_quat = Quaternion(d.get("qx", 0.0), d.get("qy", 0.0), d.get("qz", 0.0), d.get("qw", 1.0)).normalized()
 	if _cube and d.has("smoothing"):
 		_cube.set_smoothing(float(d.get("smoothing", 0.25)))
@@ -173,7 +189,14 @@ func set_holder(holder: bool) -> void:
 func _process(delta: float) -> void:
 	var t := 1.0 - pow(0.7, delta * 60.0)  # web: lerp factor 0.3 per 60fps frame
 	var was := global_position
-	global_position = global_position.lerp(target_position, t)
+	_since_packet += delta
+	# Aim where they will be, not where they last were. target_position stays
+	# the authoritative reading -- other code reads it -- so the guess lives
+	# here and is thrown away the moment a real one lands.
+	var aim := target_position + _vel * minf(_since_packet, EXTRAPOLATE_MAX)
+	if _since_packet > EXTRAPOLATE_MAX:
+		_vel = _vel.lerp(Vector3.ZERO, minf(1.0, delta * 5.0))
+	global_position = global_position.lerp(aim, t)
 	# Their marble rolls at whatever speed the interpolation is carrying them
 	if _shell and delta > 0.0:
 		_shell.roll((global_position - was) / delta, delta)
