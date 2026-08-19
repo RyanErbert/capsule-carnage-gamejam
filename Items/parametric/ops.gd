@@ -469,8 +469,16 @@ static func _cap(st: SurfaceTool, f: Dictionary, loop: PackedVector2Array,
 	var n: Vector3 = -(f["t"] as Vector3) if start else (f["t"] as Vector3)
 	var i := 0
 	while i + 2 < idx.size():
-		_tri(st, cr[idx[i]], cr[idx[i + 1]], cr[idx[i + 2]], n,
-			cg[idx[i]], cg[idx[i + 1]], cg[idx[i + 2]])
+		# The two caps face OPPOSITE ways, so they cannot share a winding.
+		# triangulate_polygon returns one order for both ends and _tri, unlike
+		# _quad, takes the normal only for shading -- so the start cap came out
+		# facing into the solid on every capped piece in the game. Backface
+		# culling then ate it, which is the seeing-through-walls Ryan kept
+		# reporting while the open-edge count called everything watertight.
+		var b := i + 2 if start else i + 1
+		var c := i + 1 if start else i + 2
+		_tri(st, cr[idx[i]], cr[idx[b]], cr[idx[c]], n,
+			cg[idx[i]], cg[idx[b]], cg[idx[c]])
 		i += 3
 
 

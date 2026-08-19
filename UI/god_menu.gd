@@ -63,6 +63,11 @@ var _selected: Dictionary = {}
 # Which parameter the scroll wheel is on for the selected structure. Handles
 # cover the ones that are distances in space; this covers the rest.
 var _param_i := 0
+# The wheel does nothing to a selected structure until F has actually picked a
+# parameter. Selecting a wall and scrolling used to silently move whatever the
+# cycle happened to be sitting on, which is an edit you did not ask for on a
+# thing you were only looking at.
+var _param_armed := false
 var _select_marker: MeshInstance3D
 var _chain_preview: Node3D  # live castle/channel ghost while clicking points
 var _chain_at := Vector3(1e9, 0, 0)
@@ -154,7 +159,11 @@ func _input(event: InputEvent) -> void:
 				and str(_selected.get("kind", "")) == "structure":
 			var pn := _struct_params().size()
 			if pn > 0:
-				_param_i = (_param_i + 1) % pn
+				# First F arms the wheel on the parameter already showing rather
+				# than skipping past it.
+				if _param_armed:
+					_param_i = (_param_i + 1) % pn
+				_param_armed = true
 				_status.text = _struct_status()
 			get_viewport().set_input_as_handled()
 	# Scroll: brush size for the terrain tools, placement height for the rest
@@ -184,8 +193,9 @@ func _input(event: InputEvent) -> void:
 			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
-			else:
+			elif _lifts():
 				_lift += LIFT_STEP * dir
+				_status.text = "%s  %+.1f" % [_tool.to_upper(), _lift]
 	# Scroll with NOTHING armed: the selected structure's current parameter.
 	# Handles cover the parameters that ARE distances in space; the wheel
 	# reaches the ones that are not, one step of the spec at a time.
@@ -198,7 +208,10 @@ func _input(event: InputEvent) -> void:
 			pd = -1
 		var pspec := _struct_params()
 		var pmn: Node = _parametrics()
-		if pd != 0 and pmn and not pspec.is_empty():
+		if pd != 0 and not _param_armed:
+			# Say why nothing moved, rather than eating the scroll in silence.
+			_status.text = _struct_status()
+		elif pd != 0 and pmn and not pspec.is_empty():
 			pmn.nudge(str(_selected["id"]),
 				str((pspec[_param_i % pspec.size()] as Dictionary)["key"]), float(pd))
 			_status.text = _struct_status()
@@ -225,6 +238,14 @@ func _parametrics() -> Node:
 
 func _carving() -> bool:
 	return _tool in ["dig", "fill", "smooth"]
+
+
+## Whether the wheel should move the placement height. Reserved for tools that
+## put something down at a point -- the grid builds snap to their own lattice
+## and the chained structures take their height from the ground they are drawn
+## on, so a lift offset on those was a number that went nowhere.
+func _lifts() -> bool:
+	return _tool != "" and not _tool.begins_with("build:") and _tool != "delete" 
 
 
 func toggle() -> void:
@@ -516,6 +537,7 @@ func _selection_click(event: InputEvent) -> void:
 func _select(target: Dictionary) -> void:
 	_selected = target
 	_param_i = 0
+	_param_armed = false
 	var kind := str(target.get("kind", ""))
 	var pm: Node = _parametrics()
 	if pm:
@@ -577,6 +599,8 @@ func _struct_status() -> String:
 	var rec: Dictionary = pm.record(str(_selected.get("id", "")))
 	var v := float((rec.get("params", {}) as Dictionary).get(str(e["key"]), e["default"]))
 	var shown := "%d" % int(roundf(v)) if str(e["unit"]) == "" else "%.2f" % v
+	if not _param_armed:
+		return "STRUCTURE  [F - pick]  [Click - Hole]  [Del]"
 	return "%s %s  [F - next]  [Scroll]  [Click - Hole]  [Del]" % [e["label"], shown]
 
 
