@@ -95,6 +95,21 @@ func _chamfer() -> void:
 	var oe := _open_edges(_wall(0.7, 0.3))
 	_check(oe == 0, "and is still watertight (%d open)" % oe)
 
+	# Overlapping punches. Each opening claims GATE_W of rail either side of
+	# where it was aimed, so holes closer together than that used to be swept as
+	# separate openings on top of each other -- a row of arch soffits chewed
+	# into one hole, and every face across the overlap drawn twice.
+	var spread := _holed([Vector3(-14, 7, 0), Vector3(0, 7, 0), Vector3(14, 7, 0)])
+	var tight := _holed([Vector3(-3, 7, 0), Vector3(-1, 7, 0), Vector3(1, 7, 0), Vector3(3, 7, 0)])
+	_check(_dupes(spread) == 0, "openings far apart stay separate: %d faces drawn twice" % _dupes(spread))
+	_check(_dupes(tight) == 0, "and holes 2 m apart become ONE: %d faces drawn twice" % _dupes(tight))
+	_check(_open_edges(tight) == 0, "the merged opening is watertight (%d open)" % _open_edges(tight))
+	# One wide opening has less geometry than four narrow ones stacked, which is
+	# the cheapest way to say the arches are no longer duplicated.
+	_check(_tri_count(tight) < _tri_count(spread),
+		"one wide opening is fewer triangles than three separate ones (%d vs %d)" % [
+			_tri_count(tight), _tri_count(spread)])
+
 
 # --- Fixtures ----------------------------------------------------------------
 
@@ -109,7 +124,48 @@ func _wall(arch: float, cham := 0.14) -> Node3D:
 	}, null, false)
 
 
+## The same wall with penetrations punched at the given points and no gate.
+func _holed(holes: Array) -> Node3D:
+	return Registry.build({
+		"type": "wall",
+		"nodes": Registry.to_wire([Vector3(-20, 0, 0), Vector3(20, 0, 0)]),
+		"holes": Registry.to_wire(holes),
+		"params": {"height": H, "thickness": 2.0, "batter": 0.0, "coping": 0.9,
+			"tooth": 0.0, "chamfer": 0.14, "arch": 0.7, "gate": 0.0},
+	}, null, false)
+
+
 # --- Measuring ---------------------------------------------------------------
+
+
+## Triangles landing on exactly the same three corners: two sweeps over one
+## stretch of rail, which is what an unmerged overlap produces.
+func _dupes(body: Node3D) -> int:
+	var mesh := _mesh(body)
+	if mesh == null:
+		return -1
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	var seen := {}
+	var dupes := 0
+	var i := 0
+	while i + 2 < idx.size():
+		var key: Array = []
+		for k in 3:
+			key.append(_key(verts[idx[i + k]]))
+		key.sort()
+		var sk := str(key)
+		if seen.has(sk):
+			dupes += 1
+		seen[sk] = true
+		i += 3
+	return dupes
+
+
+func _tri_count(body: Node3D) -> int:
+	var mesh := _mesh(body)
+	return 0 if mesh == null else mesh.get_faces().size() / 3
 
 ## The underside of the opening at each station across it: in a thin slice of x,
 ## the lowest vertex clear of the sill is the soffit there.

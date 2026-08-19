@@ -64,15 +64,16 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 	var opens := _openings(frames, total, Spec.flag(s, params, "gate"), holes, half, h)
 	var cursor := 0.0
 	for op in opens:
-		var d := float(op["d"])
-		if d - GATE_W * 0.5 - cursor > 0.05:
-			Ops.sweep(st, Ops.slice(frames, cursor, d - GATE_W * 0.5), face, hulls, {"caps": true})
+		var d0 := float(op["d0"])
+		var d1 := float(op["d1"])
+		if d0 - cursor > 0.05:
+			Ops.sweep(st, Ops.slice(frames, cursor, d0), face, hulls, {"caps": true})
 		# The opening's own stretch is not a void: it is the wall MINUS a slot,
 		# so it keeps a sill under the hole and a lintel over it. A gate has its
 		# sill at ground level and so gets none; a window punched at head height
 		# gets both, which is the whole difference between a window and a hole
 		# torn to the floor.
-		var span := Ops.slice(frames, d - GATE_W * 0.5, d + GATE_W * 0.5)
+		var span := Ops.slice(frames, d0, d1)
 		var y0 := float(op["y0"])
 		var y1 := float(op["y1"])
 		if y0 > SILL_MIN:
@@ -80,8 +81,8 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 		else:
 			Ops.sweep(st, span, Profiles.rect(-half, half, -SKIRT, 0.0), hulls, {"caps": true})
 		if y1 < h - 0.05:
-			_head(st, hulls, span, half, y1, h, arch)
-		cursor = d + GATE_W * 0.5
+			_head(st, hulls, span, half, y1, h, arch, d1 - d0)
+		cursor = d1
 	if total - cursor > 0.05:
 		Ops.sweep(st, Ops.slice(frames, cursor, total), face, hulls, {"caps": true})
 
@@ -101,8 +102,10 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 ## otherwise make. The arc is a segment of a circle on the opening's own width,
 ## scaled by `arch`: 0 is a flat lintel and 1 a full semicircle.
 static func _head(st: SurfaceTool, hulls: Array, span: Array,
-		half: float, y1: float, h: float, arch: float) -> void:
-	var rise := minf(arch * GATE_W * 0.5, h - y1 - ARCH_HEAD)
+		half: float, y1: float, h: float, arch: float, width := GATE_W) -> void:
+	# The rise follows the opening's OWN width, so a wide one gets a wide arch
+	# rather than the same small hump a single punch would have made.
+	var rise := minf(arch * width * 0.5, h - y1 - ARCH_HEAD)
 	if rise < 0.05:
 		Ops.sweep(st, span, Profiles.rect(-half, half, y1, h), hulls, {"caps": true})
 		return
@@ -140,7 +143,36 @@ static func _openings(frames: Array, total: float, gate: bool, holes: Array,
 		var y1 := minf(h, maxf(y0 + 1.0, mid + WINDOW_H * 0.5))
 		opens.append({"d": d, "y0": y0, "y1": y1})
 	opens.sort_custom(func(a, b): return float(a["d"]) < float(b["d"]))
-	return opens
+	return _merge(opens, total)
+
+
+## Each opening claims GATE_W of rail either side of where it was aimed, so two
+## punched a metre apart claim overlapping stretches -- and swept separately
+## that is two arches hung in the same hole, which is the row of teeth chewed
+## out of the opening in Ryan's screenshot, plus fifty faces drawn twice.
+##
+## Overlapping openings are ONE opening. Punching a row of holes to make a wide
+## doorway is a reasonable thing to do, so it should build a wide doorway.
+static func _merge(opens: Array, total: float) -> Array:
+	var out: Array = []
+	for op in opens:
+		var d := float(op["d"])
+		var span := {
+			"d0": maxf(0.0, d - GATE_W * 0.5),
+			"d1": minf(total, d + GATE_W * 0.5),
+			"y0": float(op["y0"]), "y1": float(op["y1"]),
+		}
+		if out.is_empty() or float(span["d0"]) > float(out[out.size() - 1]["d1"]) + 0.05:
+			out.append(span)
+			continue
+		# Swallowed: the merged opening takes the lowest sill and the highest
+		# head of everything in it, so a window beside a gateway opens to the
+		# ground rather than leaving a sill hanging across the doorway.
+		var prev: Dictionary = out[out.size() - 1]
+		prev["d1"] = maxf(float(prev["d1"]), float(span["d1"]))
+		prev["y0"] = minf(float(prev["y0"]), float(span["y0"]))
+		prev["y1"] = maxf(float(prev["y1"]), float(span["y1"]))
+	return out
 
 
 ## Alternating teeth along a head rail, each sliced off the real rail rather
