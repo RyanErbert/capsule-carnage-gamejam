@@ -182,20 +182,14 @@ func _input(event: InputEvent) -> void:
 			elif _tool == "tower":
 				_tower_h = clampf(_tower_h + dir, 3.0, 20.0)
 				_status.text = "H %d" % int(_tower_h)
-			elif _tool.begins_with("build:part:"):
-				# Scroll cycles the palette, skipping anything that would not mate
-				# with the piece the cursor is up against.
-				var ring: Array = Array(WfcTiles.PART_KINDS)
-				if not _fit_kinds.is_empty():
-					ring = _fit_kinds
-				var at := maxi(0, ring.find(_tool.substr(11)))
-				_set_tool("build:part:" + str(ring[wrapi(at + dir, 0, ring.size())]))
 			elif _carving():
 				_carve_size = clampi(_carve_size + dir, 0, CARVE_SIZES.size() - 1)
 				_status.text = "%s  r%d" % [_tool.to_upper(), int(CARVE_SIZES[_carve_size])]
 			elif _lifts():
-				_lift += LIFT_STEP * dir
-				_status.text = "%s  %+.1f" % [_tool.to_upper(), _lift]
+				# One notch is one step of whatever grid the tool lands on, so a
+				# tile goes up a floor rather than a fraction of one.
+				_lift = maxf(0.0, _lift + _lift_step() * dir)
+				_status.text = "%s  +%.1f" % [_tool.to_upper(), _lift]
 	# Scroll with NOTHING armed: the selected structure's current parameter.
 	# Handles cover the parameters that ARE distances in space; the wheel
 	# reaches the ones that are not, one step of the spec at a time.
@@ -240,12 +234,22 @@ func _carving() -> bool:
 	return _tool in ["dig", "fill", "smooth"]
 
 
-## Whether the wheel should move the placement height. Reserved for tools that
-## put something down at a point -- the grid builds snap to their own lattice
-## and the chained structures take their height from the ground they are drawn
-## on, so a lift offset on those was a number that went nowhere.
+## Whether the wheel should move the placement height. Everything that puts a
+## thing down at a point, which is everything except the delete tool and the
+## terrain brushes -- those have their own use for the wheel.
 func _lifts() -> bool:
-	return _tool != "" and not _tool.begins_with("build:") and _tool != "delete" 
+	return _tool != "" and _tool != "delete" and not _carving() \
+		and not _tool.begins_with("prop:")
+
+
+## Grid step for the armed tool: a tileset part rises one floor at a time, a
+## block one cell, and anything free-standing a half metre.
+func _lift_step() -> float:
+	if _tool.begins_with("build:part:"):
+		return WfcTiles.LEVEL
+	if _tool.begins_with("build:"):
+		return 4.0
+	return LIFT_STEP
 
 
 func toggle() -> void:
@@ -407,7 +411,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _slope_gated() and float(hit["normal"].y) < PLACE_MAX_SLOPE:
 			_status.text = "too steep"
 			return
-		var lift := 0.0 if _tool.begins_with("prop:") else _lift
+		var lift := 0.0 if _tool.begins_with("prop:") else maxf(0.0, _lift)
 		var pos: Vector3 = hit["position"] + Vector3(0, lift, 0)
 		if _tool == "delete":
 			var target := _find_delete_target(pos)
@@ -661,18 +665,22 @@ func _process(delta: float) -> void:
 		target = cam.project_ray_origin(mpos) + cam.project_ray_normal(mpos) * 24.0
 	else:
 		target = hit["position"] + hit["normal"] * 0.1
-	var fx := floorf(target.x / 4.0) * 4.0 + 2.0
-	var fy := floorf(target.y / 4.0) * 4.0 + 2.0
-	var fz := floorf(target.z / 4.0) * 4.0 + 2.0
+	# The wheel raises the placement, and only ever upward: dropping a piece
+	# below the surface you are pointing at buries it where nobody can reach it
+	# and nothing can be built on it.
+	var lifted := target + Vector3(0, maxf(0.0, _lift), 0)
+	var fx := floorf(lifted.x / 4.0) * 4.0 + 2.0
+	var fy := floorf(lifted.y / 4.0) * 4.0 + 2.0
+	var fz := floorf(lifted.z / 4.0) * 4.0 + 2.0
 	var type := _tool.substr(6)
 	var ry := _build_rot * ROT_STEP
 	if type.begins_with("part:"):
 		# The tileset has its own grid — 6 m cells, 3 m floors, quarter turns.
 		# Snapping parts to the 4 m block grid would leave them unable to mate
 		# with each other or with the compounds already on the map.
-		fx = floorf(target.x / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
-		fz = floorf(target.z / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
-		fy = roundf(target.y / WfcTiles.LEVEL) * WfcTiles.LEVEL
+		fx = floorf(lifted.x / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
+		fz = floorf(lifted.z / WfcTiles.CELL) * WfcTiles.CELL + WfcTiles.CELL * 0.5
+		fy = roundf(lifted.y / WfcTiles.LEVEL) * WfcTiles.LEVEL
 		ry = float(_build_rot / 2) * PI * 0.5
 		var armed := _refresh_fit(Vector3(fx, fy, fz), _build_rot / 2, type.substr(5))
 		if armed != type.substr(5):
@@ -744,7 +752,7 @@ func _update_chain_preview() -> void:
 	var hit := _mouse_ray(get_viewport().get_mouse_position())
 	if hit.is_empty():
 		return
-	var cursor: Vector3 = hit["position"] + Vector3(0, _lift, 0)
+	var cursor: Vector3 = hit["position"] + Vector3(0, maxf(0.0, _lift), 0)
 	if cursor.distance_to(_chain_at) < 0.3:
 		return
 	_chain_at = cursor
@@ -795,7 +803,7 @@ func _update_hover_preview() -> void:
 	# Too-steep surface: the ghost goes red and the click will refuse
 	var blocked := _slope_gated() and float(hit["normal"].y) < PLACE_MAX_SLOPE
 	_ghost_all_meshes(ghost, _bad_ghost_material() if blocked else _ghost_material())
-	ghost.global_position = hit["position"] 		+ Vector3(0, 0.0 if _tool.begins_with("prop:") else _lift, 0)
+	ghost.global_position = hit["position"] 		+ Vector3(0, 0.0 if _tool.begins_with("prop:") else maxf(0.0, _lift), 0)
 	# Props place with a random yaw (R nudges it) and the scrolled scale;
 	# the ghost shows exactly what's coming
 	ghost.rotation.y = _prop_ry if _tool.begins_with("prop:") else 0.0

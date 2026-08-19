@@ -136,6 +136,9 @@ static func ring_frames(center: Vector3, radius: float, segments := 16) -> Array
 			# A polygon inscribed on the circle sits inside it; widening each
 			# frame by 1/cos(half step) puts the flat mid-span back on radius.
 			"k": 1.0 / cos(PI / float(n)),
+			# How far the centre is, so a section point cannot be widened
+			# straight through it.
+			"ring": radius,
 		})
 	return frames
 
@@ -435,9 +438,18 @@ static func _ring(f: Dictionary, loop: PackedVector2Array) -> PackedVector3Array
 	var r: Vector3 = f["r"]
 	var u: Vector3 = f["u"]
 	var k := float(f.get("k", 1.0))
+	# The mitre scale widens a section to keep its thickness around a corner,
+	# but on a ring it must not push a point THROUGH the centre. A tower's inner
+	# edge sits exactly on the axis; scaled by 1/cos(half step) it overshot by
+	# eight centimetres, and fourteen overshoots pointing fourteen different
+	# ways make a tiny inside-out polygon around the tower's core.
+	var ring := float(f.get("ring", 0.0))
 	var out := PackedVector3Array()
 	for pt in loop:
-		out.append(p + r * (pt.x * k) + u * pt.y)
+		var off := pt.x * k
+		if ring > 0.0:
+			off = maxf(off, -ring)
+		out.append(p + r * off + u * pt.y)
 	return out
 
 

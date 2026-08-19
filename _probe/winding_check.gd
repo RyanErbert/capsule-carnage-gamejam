@@ -21,6 +21,10 @@ const CASES := {
 	"path": [Vector3(-20, 0, 6), Vector3(-6, 0, 10), Vector3(10, 1, 7), Vector3(22, 0, 10)],
 }
 
+## Models made of several solids butted together, where coincident faces at
+## the joints repeat directed edges by construction.
+const ASSEMBLIES := ["wall"]
+
 var _fails := 0
 
 
@@ -79,11 +83,17 @@ func _check(type: String, body: Node3D) -> void:
 		var c: Vector3 = v[idx[i + 2]]
 		vol += a.dot(b.cross(c)) / 6.0
 		i += 3
-	if clash > 0:
+	# A model built from several closed solids repeats directed edges wherever
+	# two of them butt: a sill's cap and the wall stretch's cap are coincident
+	# and oppositely wound, which is correct but still lands the same directed
+	# edge twice. Per-sweep orientation is what actually matters, and that is
+	# _probe/winding_iso -- this number is information, and only a model that
+	# should be ONE solid failing it is damage.
+	if clash > 0 and not ASSEMBLIES.has(type):
 		_fails += 1
 	print("  [%s] %d faces, %d directed-edge clashes, signed volume %+.1f%s" % [
 		idx.size() / 3, clash, vol, ""] if false else "  [%s] %d faces, %d clashes, volume %+.1f  %s" % [
-		type, idx.size() / 3, clash, vol, "INSIDE OUT" if clash > 0 else "ok"])
+		type, idx.size() / 3, clash, vol, ("butt joints" if ASSEMBLIES.has(type) else "INSIDE OUT") if clash > 0 else "ok"])
 
 
 static func _key(p: Vector3) -> String:
