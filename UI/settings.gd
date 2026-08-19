@@ -27,6 +27,13 @@ var camera_zoom := 4.5         # chain length, local only (camera_rig.gd)
 ## appearing or vanishing glides instead of snapping. Local only.
 var camera_mode := "spring"
 var level := "creative"        # "creative" (default) | "testworld"
+## How the window opens. "maximized" fills the screen but keeps its border and
+## title bar, which is what you want while building something and reading a
+## second window beside it; "fullscreen" takes the display exclusively.
+var window_mode := "maximized"   # "maximized" | "windowed" | "fullscreen"
+const WINDOW_MODES := ["maximized", "windowed", "fullscreen"]
+## Below this the HUD columns start overlapping the scoreboard.
+const MIN_WINDOW := Vector2i(1024, 768)
 
 ## Who you are, kept between launches so the lobby opens on the name and colour
 ## you already picked instead of a fresh random one.
@@ -42,6 +49,26 @@ func _ready() -> void:
 		model = "cube"
 	if OS.get_environment("FRIENDSLOP_LEVEL") != "":
 		level = OS.get_environment("FRIENDSLOP_LEVEL")
+	apply_window()
+
+
+## Enforce the floor and open at the saved size. Headless has no window to set,
+## and a probe that tries gets an error per call.
+func apply_window() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	DisplayServer.window_set_min_size(MIN_WINDOW)
+	match window_mode:
+		"fullscreen":
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		"windowed":
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			var got := DisplayServer.window_get_size()
+			DisplayServer.window_set_size(Vector2i(maxi(got.x, MIN_WINDOW.x),
+				maxi(got.y, MIN_WINDOW.y)))
+		_:
+			# Maximized, not fullscreen: the whole screen, border kept.
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
 
 
 func _load_profile() -> void:
@@ -57,6 +84,9 @@ func _load_profile() -> void:
 	camera_mode = "legacy" \
 		if str(cfg.get_value("player", "camera", "spring")) == "legacy" else "spring"
 	camera_zoom = clampf(float(cfg.get_value("player", "zoom", 4.5)), 2.0, 20.0)
+	var saved_win := str(cfg.get_value("player", "window", "maximized"))
+	if saved_win in WINDOW_MODES:
+		window_mode = saved_win
 	var saved_model := str(cfg.get_value("player", "model", ""))
 	if saved_model == "bear" or saved_model == "cube":
 		model = saved_model
@@ -69,6 +99,7 @@ func save_profile() -> void:
 	cfg.set_value("player", "model", model)
 	cfg.set_value("player", "camera", camera_mode)
 	cfg.set_value("player", "zoom", camera_zoom)
+	cfg.set_value("player", "window", window_mode)
 	cfg.save(PROFILE_PATH)
 
 

@@ -117,6 +117,19 @@ func _ready() -> void:
 		Settings.save_profile())
 	add_child(cam_btn)
 
+	# How the window opens. Maximized keeps the border, which is the difference
+	# between filling the screen and taking it over.
+	var win_btn := OptionButton.new()
+	win_btn.focus_mode = Control.FOCUS_NONE
+	for m in Settings.WINDOW_MODES:
+		win_btn.add_item("window: " + m)
+	win_btn.select(maxi(0, Settings.WINDOW_MODES.find(Settings.window_mode)))
+	win_btn.item_selected.connect(func(i: int):
+		Settings.window_mode = str(Settings.WINDOW_MODES[i])
+		Settings.apply_window()
+		Settings.save_profile())
+	add_child(win_btn)
+
 	Net.event_received.connect(_on_net_event)
 	apply(Net.game_settings)
 
