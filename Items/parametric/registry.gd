@@ -76,21 +76,101 @@ static func to_points(raw: Variant) -> Array:
 	return out
 
 
+## Structure stone, and the join where it meets the ground.
+##
+## Every sweep bakes how far above its own ground line each vertex sits into
+## COLOR.r (Ops.sweep). That is all this needs: near the line it fades to the
+## TERRAIN's own sand and rock, using the same textures the ground does, so the
+## join reads as earth piled against a wall rather than a brown gradient painted
+## on one. The line wanders with world-space noise, because a straight band at a
+## fixed height is the one thing that would give it away.
+##
+## The alternative was doing it in the terrain instead -- deforming the field up
+## to meet each structure -- which is real geometry, costs a remesh on every
+## handle drag, and fights the 8 m skirt that already closes the actual gap.
+##
+## KNOWN LIMIT: the band is measured from the RAIL, not from the ground. The
+## rail runs straight between clicked nodes while the ground curves under it, so
+## on a long span over a dip the join floats above the earth it is meant to meet.
+## Nodes a few metres apart hide it; the fix, if it ever matters, is to hand the
+## sweep a ground probe the way bridge piers already get one.
+const STRUCTURE_SHADER := "
+shader_type spatial;
+uniform sampler2D rock_tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D sand_tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_tex : filter_linear, repeat_enable;
+uniform vec3 stone_tint = vec3(0.78, 0.76, 0.72);
+uniform float blend_on = 1.0;
+varying vec3 wpos;
+varying vec3 wnrm;
+varying float vground;
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	wnrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	vground = COLOR.r;
+}
+vec3 triplanar(sampler2D tex, vec3 p, vec3 w, float s) {
+	return texture(tex, p.zy * s).rgb * w.x
+	     + texture(tex, p.xz * s).rgb * w.y
+	     + texture(tex, p.xy * s).rgb * w.z;
+}
+void fragment() {
+	// Swept normals are exact, so the projection weights come straight off them
+	// -- no need for the screen-space derivative trick the terrain needs.
+	vec3 w = pow(abs(wnrm), vec3(4.0));
+	w /= (w.x + w.y + w.z);
+	vec3 stone = triplanar(rock_tex, wpos, w, 0.22) * stone_tint;
+	// The ground's own mix, at the ground's own scales.
+	vec3 sand = triplanar(sand_tex, wpos, w, 0.09) * vec3(1.12, 0.98, 0.82);
+	vec3 rock = triplanar(rock_tex, wpos, w, 0.06) * vec3(1.05, 0.95, 0.88);
+	vec3 ground = mix(sand, rock, 0.42);
+	// Two planes of noise, not one. Sampled on xz alone every point in a
+	// vertical column reads the same value, and the join comes out as stripes
+	// running UP the wall instead of a ragged line across it.
+	float n = texture(noise_tex, wpos.xz * 0.42).r * 0.55
+	        + texture(noise_tex, (wpos.xy + wpos.zy) * 0.23).r * 0.45;
+	// The noise wanders the ENDS of the band, and the top end stays below 1.
+	// Jittering the value instead leaves a permanent offset once vground has
+	// clamped, so the columns that drew a low number never resolve to stone and
+	// the join runs up the whole wall as a stain.
+	float lo = 0.02 + n * 0.20;
+	float hi = 0.50 + n * 0.30;
+	float k = mix(1.0, smoothstep(lo, hi, vground), blend_on);
+	vec3 col = mix(ground, stone, k);
+	// Contact shade: the last hand-width against the earth sits in its own dark.
+	col *= mix(0.76, 1.0, smoothstep(0.0, 0.35, vground));
+	ALBEDO = col;
+	ROUGHNESS = 0.97;
+	SPECULAR = 0.2;
+}
+"
+
+
 ## How a structure looks, kept here rather than in each caller: the god menu,
 ## the world node and the probes were all making their own copy of the same
 ## material, which is three chances to drift and no batching.
-static func stone() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = load("res://Terrain/textures/rock.jpg")
-	mat.albedo_color = Color(0.78, 0.76, 0.72)
-	mat.uv1_triplanar = true
-	mat.uv1_scale = Vector3(0.22, 0.22, 0.22)
-	mat.roughness = 1.0
+static func stone() -> Material:
+	var shader := Shader.new()
+	shader.code = STRUCTURE_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise.frequency = 0.03
+	noise.fractal_octaves = 4
+	var ntex := NoiseTexture2D.new()
+	ntex.noise = noise
+	ntex.seamless = true
+	ntex.width = 256
+	ntex.height = 256
+	mat.set_shader_parameter("noise_tex", ntex)
+	mat.set_shader_parameter("sand_tex", load("res://Terrain/textures/sand.jpg"))
+	mat.set_shader_parameter("rock_tex", load("res://Terrain/textures/rock.jpg"))
 	return mat
 
 
 ## A placement preview: what you are about to build, before you build it.
-static func ghost() -> StandardMaterial3D:
+static func ghost() -> Material:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA

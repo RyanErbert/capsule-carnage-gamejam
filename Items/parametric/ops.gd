@@ -25,6 +25,7 @@ extends RefCounted
 
 const MIN_MITRE := 0.30   ## a corner sharper than ~145 degrees stops widening
 const CURVE_SUBDIV := 12  ## Catmull-Rom samples per anchor span
+const GROUND_BLEND := 1.5 ## metres over which the ground gives way to the wall
 
 
 # --- Rails -------------------------------------------------------------------
@@ -160,6 +161,16 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 	var loops := _loops_for(frames, profile, opts.get("profiles", []))
 	if loops.is_empty():
 		return
+	# How far above the model's own ground line each section point sits, as
+	# 0..1. Baked per vertex so the structure shader can grow the terrain up out
+	# of the earth without knowing anything about where the terrain is. A sweep
+	# that does not stand on the ground -- a bridge deck, a path -- says so and
+	# gets 1 everywhere; one riding a lifted rail says how far it was lifted.
+	var gs: Array = []
+	for loop in loops:
+		gs.append(_ground_factors(loop,
+			float(opts.get("blend_h", GROUND_BLEND)) if bool(opts.get("ground", true)) else -1.0,
+			float(opts.get("v_base", 0.0))))
 
 	var rings: Array = []
 	for i in frames.size():
@@ -167,11 +178,14 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 	if closed:
 		rings.append(rings[0])
 		loops.append(loops[0])
+		gs.append(gs[0])
 
 	for i in rings.size() - 1:
 		var a: PackedVector3Array = rings[i]
 		var b: PackedVector3Array = rings[i + 1]
 		var loop: PackedVector2Array = loops[i]
+		var ga: PackedFloat32Array = gs[i]
+		var gb: PackedFloat32Array = gs[i + 1]
 		for j in loop.size():
 			var j2 := (j + 1) % loop.size()
 			var e := loop[j2] - loop[j]
@@ -182,16 +196,16 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 			var no := Vector2(e.y, -e.x).normalized()
 			var f: Dictionary = frames[i]
 			var n: Vector3 = ((f["r"] as Vector3) * no.x + (f["u"] as Vector3) * no.y).normalized()
-			_quad(st, a[j], a[j2], b[j2], b[j], n)
+			_quad(st, a[j], a[j2], b[j2], b[j], n, ga[j], ga[j2], gb[j2], gb[j])
 		if hull:
 			var pts := PackedVector3Array(a)
 			pts.append_array(b)
 			hulls.append(pts)
 
 	if caps:
-		_cap(st, frames[0], loops[0], rings[0], true)
+		_cap(st, frames[0], loops[0], rings[0], gs[0], true)
 		var last := frames.size() - 1
-		_cap(st, frames[last], loops[last], rings[last], false)
+		_cap(st, frames[last], loops[last], rings[last], gs[last], false)
 
 
 ## One wound loop per frame: the same section repeated, or the per-frame list
@@ -412,15 +426,28 @@ static func _ring(f: Dictionary, loop: PackedVector2Array) -> PackedVector3Array
 
 
 static func _cap(st: SurfaceTool, f: Dictionary, loop: PackedVector2Array,
-		ring: PackedVector3Array, start: bool) -> void:
+		ring: PackedVector3Array, g: PackedFloat32Array, start: bool) -> void:
 	var idx := Geometry2D.triangulate_polygon(loop)
 	if idx.is_empty():
 		return
 	var n: Vector3 = -(f["t"] as Vector3) if start else (f["t"] as Vector3)
 	var i := 0
 	while i + 2 < idx.size():
-		_tri(st, ring[idx[i]], ring[idx[i + 1]], ring[idx[i + 2]], n)
+		_tri(st, ring[idx[i]], ring[idx[i + 1]], ring[idx[i + 2]], n,
+			g[idx[i]], g[idx[i + 1]], g[idx[i + 2]])
 		i += 3
+
+
+## Per section point: 0 at the ground line and anywhere below it, 1 once clear
+## of the blend band. `base` is how far the rail itself was lifted off the
+## ground -- merlons ride a rail raised by the wall height, and without it every
+## crenellation would come out buried in dirt.
+static func _ground_factors(loop: PackedVector2Array, blend: float,
+		base := 0.0) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for p in loop:
+		out.append(1.0 if blend <= 0.0 else clampf((p.y + base) / blend, 0.0, 1.0))
+	return out
 
 
 static func _right_of(dir: Vector3) -> Vector3:
@@ -432,21 +459,32 @@ static func _right_of(dir: Vector3) -> Vector3:
 ## diagonal when the winding disagrees with the normal it was handed, which is
 ## what keeps a swept surface from turning inside out at a corner.
 static func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3,
-		d: Vector3, n: Vector3) -> void:
+		d: Vector3, n: Vector3, ga := 1.0, gb := 1.0, gc := 1.0, gd := 1.0) -> void:
 	if (b - a).cross(c - a).dot(n) < 0.0:
 		var t := b
 		b = d
 		d = t
-	_tri(st, a, b, c, n)
-	_tri(st, a, c, d, n)
+		var tg := gb
+		gb = gd
+		gd = tg
+	_tri(st, a, b, c, n, ga, gb, gc)
+	_tri(st, a, c, d, n, ga, gc, gd)
 
 
-static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3) -> void:
+## Ground factor rides in COLOR.r, per vertex. Nothing else reads vertex colour
+## off these meshes, and a StandardMaterial ignores it unless told not to, so
+## this is free for every caller that does not care.
+static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3,
+		ga := 1.0, gb := 1.0, gc := 1.0) -> void:
 	if (b - a).cross(c - a).length_squared() < 1e-10:
 		return
 	st.set_normal(n)
-	for v in [a, c, b]:
-		st.add_vertex(v)
+	st.set_color(Color(ga, 0.0, 0.0))
+	st.add_vertex(a)
+	st.set_color(Color(gc, 0.0, 0.0))
+	st.add_vertex(c)
+	st.set_color(Color(gb, 0.0, 0.0))
+	st.add_vertex(b)
 
 
 ## Shoelace: a negative area means the loop was wound clockwise, and every

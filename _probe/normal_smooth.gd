@@ -2,11 +2,15 @@ extends SceneTree
 
 ## How much does the surface normal TURN between two points a marble-step apart?
 ##
-## The mesh's normals come from the snapped lattice gradient, which is constant
-## across a whole 2 m cell and then jumps at the boundary -- that jump is the
-## facet a rolling marble feels. surface_normal() interpolates instead. Walking
-## a line across a slope and measuring the turn per step shows the difference
-## without needing physics to have stepped.
+## The snapped lattice gradient is constant across a whole 2 m cell and then
+## jumps at the boundary -- that jump is the facet a rolling marble feels and
+## the eye sees. surface_normal() interpolates instead. Walking a line across a
+## slope and measuring the turn per step shows the difference without needing
+## physics to have stepped, or a frame to have been drawn.
+##
+## The snapped version lives HERE now, not in the terrain: nothing in the game
+## uses it any more (the mesh and the player both take the field normal), and
+## the baseline a measurement compares against belongs to the measurement.
 
 const VoxelTerrain := preload("res://Terrain/voxel_terrain.gd")
 const STEP := 0.25
@@ -31,8 +35,8 @@ func _initialize() -> void:
 	var snapped := _walk(t, false)
 	var interp := _walk(t, true)
 	print("samples on the surface: %d" % int(snapped[2]))
-	print("snapped gradient (what the mesh used)  worst %6.2f deg  mean %5.2f" % [snapped[0], snapped[1]])
-	print("field normal    (what physics now gets) worst %6.2f deg  mean %5.2f" % [interp[0], interp[1]])
+	print("snapped gradient (what the mesh used to) worst %6.2f deg  mean %5.2f" % [snapped[0], snapped[1]])
+	print("field normal    (what mesh AND physics get) worst %6.2f deg  mean %5.2f" % [interp[0], interp[1]])
 	print("worst-case jolt reduced %.1fx, average %.1fx" % [
 		snapped[0] / maxf(interp[0], 0.001), snapped[1] / maxf(interp[1], 0.001)])
 	quit()
@@ -51,7 +55,7 @@ func _walk(t: Node3D, interpolated: bool) -> Array:
 		if p == Vector3.ZERO:
 			prev = Vector3.ZERO
 			continue
-		var nv: Vector3 = t.surface_normal(p) if interpolated else t.call("_gradient", p)
+		var nv: Vector3 = t.surface_normal(p) if interpolated else _snapped(t, p)
 		if prev != Vector3.ZERO:
 			var turn := rad_to_deg(prev.angle_to(nv))
 			worst = maxf(worst, turn)
@@ -59,6 +63,21 @@ func _walk(t: Node3D, interpolated: bool) -> Array:
 			n += 1
 		prev = nv
 	return [worst, total / maxf(float(n), 1.0), float(n)]
+
+
+## The gradient read off the nearest lattice point: what the mesh was shaded
+## with, and what physics used, before either asked the field.
+func _snapped(t: Node3D, p: Vector3) -> Vector3:
+	var g: Vector3 = (p - t.ORIGIN) / t.VOXEL
+	var x := clampi(roundi(g.x), 1, int(t.NX) - 1)
+	var y := clampi(roundi(g.y), 1, int(t.NY) - 1)
+	var z := clampi(roundi(g.z), 1, int(t.NZ) - 1)
+	var n := Vector3(
+		float(t.call("_d", x - 1, y, z)) - float(t.call("_d", x + 1, y, z)),
+		float(t.call("_d", x, y - 1, z)) - float(t.call("_d", x, y + 1, z)),
+		float(t.call("_d", x, y, z - 1)) - float(t.call("_d", x, y, z + 1)),
+	)
+	return n.normalized() if n.length() > 0.0001 else Vector3.UP
 
 
 func _surface_y(t: Node3D, x: float, z: float) -> Vector3:

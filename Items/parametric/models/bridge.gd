@@ -38,8 +38,10 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 	var thick := Spec.value(s, params, "thick")
 	var st := Ops.surface()
 	var hulls: Array = []
+	# A deck is in the air, and its piers meet the ground at their own feet
+	# rather than at the rail, so neither takes the ground blend.
 	Ops.sweep(st, frames, Profiles.deck(half, thick,
-		Spec.value(s, params, "kerb")), hulls, {"caps": true})
+		Spec.value(s, params, "kerb")), hulls, {"caps": true, "ground": false})
 
 	if Spec.flag(s, params, "pier"):
 		var drop := _ground_finder(body)
@@ -63,7 +65,7 @@ static func _pier(st: SurfaceTool, hulls: Array, span: Array, thick: float,
 	if depth < 0.4:
 		return
 	Ops.sweep(st, span, Profiles.rect(-PIER_W * 0.5, PIER_W * 0.5,
-		-thick - depth, -thick + 0.05), hulls, {"caps": true})
+		-thick - depth, -thick + 0.05), hulls, {"caps": true, "ground": false})
 
 
 static func _ground_finder(body: Node3D) -> Callable:

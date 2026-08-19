@@ -30,10 +30,12 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 		return body
 	var st := Ops.surface()
 	var hulls: Array = []
+	# A path lies ON the ground rather than standing out of it, so its whole
+	# section is inside the blend band -- it would come out as a strip of dirt.
 	Ops.sweep(st, frames, Profiles.path(
 		Spec.value(s, params, "width") * 0.5,
 		Spec.value(s, params, "thick"),
-		Spec.value(s, params, "crown")), hulls, {"caps": true})
+		Spec.value(s, params, "crown")), hulls, {"caps": true, "ground": false})
 	Ops.attach(body, st, hulls, mat, collide)
 	return body
 

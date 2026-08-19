@@ -89,7 +89,7 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 		var head := Ops.lift(frames, h)
 		for side: float in [-1.0, 1.0]:
 			crenellate(st, hulls, head,
-				Profiles.chamfer(Profiles.merlon(half, side, 0.5, tooth), cham), TOOTH_L)
+				Profiles.chamfer(Profiles.merlon(half, side, 0.5, tooth), cham), TOOTH_L, h)
 
 	Ops.attach(body, st, hulls, mat, collide)
 	return body
@@ -145,8 +145,10 @@ static func _openings(frames: Array, total: float, gate: bool, holes: Array,
 
 ## Alternating teeth along a head rail, each sliced off the real rail rather
 ## than dropped on as a box.
+## `base` is how high the head rail was lifted, so a merlon knows it is at the
+## top of a wall and not sitting in the dirt.
 static func crenellate(st: SurfaceTool, hulls: Array, head: Array,
-		tooth: PackedVector2Array, spacing: float) -> void:
+		tooth: PackedVector2Array, spacing: float, base := 0.0) -> void:
 	if tooth.is_empty():
 		return
 	var i := 0
@@ -155,7 +157,7 @@ static func crenellate(st: SurfaceTool, hulls: Array, head: Array,
 		if i % 2 == 0:
 			continue
 		Ops.sweep(st, Ops.slice(head, float(d) - spacing * 0.45,
-			float(d) + spacing * 0.45), tooth, hulls, {"caps": true})
+			float(d) + spacing * 0.45), tooth, hulls, {"caps": true, "v_base": base})
 
 
 ## Where you grab it: every node on the ground, height up off the middle of the

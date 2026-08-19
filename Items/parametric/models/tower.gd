@@ -57,7 +57,7 @@ static func build(nodes: Array, params: Dictionary, mat: Material,
 		head.append(head[0])
 		var spacing := maxf(TAU * r / maxf(float(sides), 4.0), 0.6)
 		Wall.crenellate(st, hulls, head,
-			Profiles.chamfer(Profiles.rect(-0.5, 0.1, 0.0, tooth), cham), spacing)
+			Profiles.chamfer(Profiles.rect(-0.5, 0.1, 0.0, tooth), cham), spacing, h)
 
 	Ops.attach(body, st, hulls, mat, collide)
 	return body

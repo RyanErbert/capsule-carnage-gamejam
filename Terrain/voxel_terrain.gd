@@ -534,27 +534,18 @@ func _sample(p: Vector3) -> float:
 ## that jumps, and you feel every facet no matter how smooth the terrain looks.
 ## The density field underneath is smooth by construction, and its gradient is
 ## the true normal, continuous everywhere. Costs six trilinear samples and not
-## one extra vertex: the mesh is untouched, only what the player is told about
-## it changes.
+## one extra vertex: the mesh is untouched, only the normal on it changes.
+##
+## Read by the player for contact normals AND by the mesher for shading. Doing
+## it for physics alone was half the job -- the ground rolled smooth but still
+## LOOKED faceted, because the snapped gradient it was shaded with is constant
+## across a whole two metre cell and then steps.
 func surface_normal(pos: Vector3) -> Vector3:
 	var e := VOXEL * 0.5
 	var n := Vector3(
 		_sample(pos - Vector3(e, 0, 0)) - _sample(pos + Vector3(e, 0, 0)),
 		_sample(pos - Vector3(0, e, 0)) - _sample(pos + Vector3(0, e, 0)),
 		_sample(pos - Vector3(0, 0, e)) - _sample(pos + Vector3(0, 0, e)),
-	)
-	return n.normalized() if n.length() > 0.0001 else Vector3.UP
-
-
-func _gradient(p: Vector3) -> Vector3:
-	var g := (p - ORIGIN) / VOXEL
-	var x := clampi(roundi(g.x), 1, NX - 1)
-	var y := clampi(roundi(g.y), 1, NY - 1)
-	var z := clampi(roundi(g.z), 1, NZ - 1)
-	var n := Vector3(
-		_d(x - 1, y, z) - _d(x + 1, y, z),
-		_d(x, y - 1, z) - _d(x, y + 1, z),
-		_d(x, y, z - 1) - _d(x, y, z + 1),
 	)
 	return n.normalized() if n.length() > 0.0001 else Vector3.UP
 
@@ -576,6 +567,11 @@ func _remesh_chunk(key: Vector2i) -> void:
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var cache := {}
+	# One normal per surface vertex, not one per triangle corner. Each vertex is
+	# a corner of about six quads and every one of them was recomputing it, so
+	# caching more than pays for the trilinear sample being eight reads instead
+	# of one.
+	var nrm_cache := {}
 
 	# For every lattice edge owned by this chunk (base point inside the cell
 	# range), a sign change emits a quad between the 4 cells around the edge.
@@ -611,8 +607,11 @@ func _remesh_chunk(key: Vector2i) -> void:
 						vs.reverse()
 					for tri in [[0, 1, 2], [0, 2, 3]]:
 						for i in tri:
-							verts.append(vs[i])
-							normals.append(_gradient(vs[i]))
+							var v: Vector3 = vs[i]
+							verts.append(v)
+							if not nrm_cache.has(v):
+								nrm_cache[v] = surface_normal(v)
+							normals.append(nrm_cache[v])
 
 	# Swap in the rebuilt chunk
 	if _chunks.has(key):

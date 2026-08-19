@@ -124,7 +124,7 @@ func _add_castle(c: Dictionary) -> void:
 	_castles[id] = {"root": root, "points": pts + mids, "data": c}
 
 
-static func stone_material() -> StandardMaterial3D:
+static func stone_material() -> Material:
 	return Registry.stone()
 
 

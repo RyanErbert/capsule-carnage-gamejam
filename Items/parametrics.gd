@@ -28,8 +28,8 @@ var _rig: Node3D
 var _selected := ""
 var _dirty := false             # local record has moved ahead of the server
 var _send_cd := 0.0
-var _stone: StandardMaterial3D
-var _ghost: StandardMaterial3D
+var _stone: Material
+var _ghost: Material
 ## Bodies the owner is flying that must not catch a node drag -- the build
 ## drone sits right in front of the camera and would eat every one of them.
 var extra_exclude: Array = []
