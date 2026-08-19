@@ -27,7 +27,7 @@ function once(sock, ev, ms = 4000) {
   a.emit('placeParametric', {
     type: 'wall',
     nodes: [{ x: 0, y: 0, z: 0 }, { x: 14, y: 0, z: 0 }, { x: 14, y: 0, z: 9 }],
-    params: { height: 7, thickness: 2.4, gate: 1 },
+    params: { height: 7, thickness: 2.4, opening: 4 },
   });
   const rec = await heard;
   ok('peer sees the placement', rec && rec.type === 'wall');

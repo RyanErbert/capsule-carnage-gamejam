@@ -172,6 +172,17 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 			float(opts.get("blend_h", GROUND_BLEND)) if bool(opts.get("ground", true)) else -1.0,
 			float(opts.get("v_base", 0.0))))
 
+	# A ConvexPolygonShape3D takes the CONVEX HULL of whatever points it is
+	# handed, so a U-shaped section given over whole comes back as a filled
+	# slab -- a bridge whose kerbs you can see but walk along the top of, and a
+	# wall whose coping lip has solid air underneath it. Split the section into
+	# convex pieces ONCE and hull each piece instead. A section that is already
+	# convex decomposes to itself, so nothing simple pays for this.
+	var parts: Array = []
+	if hull:
+		for loop in loops:
+			parts.append(_convex_parts(loop))
+
 	var rings: Array = []
 	for i in frames.size():
 		rings.append(_ring(frames[i], loops[i]))
@@ -179,6 +190,8 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 		rings.append(rings[0])
 		loops.append(loops[0])
 		gs.append(gs[0])
+		if hull:
+			parts.append(parts[0])
 
 	for i in rings.size() - 1:
 		var a: PackedVector3Array = rings[i]
@@ -198,9 +211,12 @@ static func sweep(st: SurfaceTool, frames: Array, profile: PackedVector2Array,
 			var n: Vector3 = ((f["r"] as Vector3) * no.x + (f["u"] as Vector3) * no.y).normalized()
 			_quad(st, a[j], a[j2], b[j2], b[j], n, ga[j], ga[j2], gb[j2], gb[j])
 		if hull:
-			var pts := PackedVector3Array(a)
-			pts.append_array(b)
-			hulls.append(pts)
+			# A closed rail wraps: rings carries the extra copy, frames does not.
+			var nxt: Dictionary = frames[(i + 1) % frames.size()]
+			for part: PackedVector2Array in parts[i]:
+				var pts := _ring(frames[i % frames.size()], part)
+				pts.append_array(_ring(nxt, part))
+				hulls.append(pts)
 
 	if caps:
 		_cap(st, frames[0], loops[0], rings[0], gs[0], true)
@@ -427,14 +443,34 @@ static func _ring(f: Dictionary, loop: PackedVector2Array) -> PackedVector3Array
 
 static func _cap(st: SurfaceTool, f: Dictionary, loop: PackedVector2Array,
 		ring: PackedVector3Array, g: PackedFloat32Array, start: bool) -> void:
-	var idx := Geometry2D.triangulate_polygon(loop)
+	# A varying sweep pads its sections with repeated vertices to keep vertex j
+	# of one station paired with vertex j of the next (Profiles.floor_at).
+	# triangulate_polygon refuses a polygon with a repeated point, and a cap
+	# that fails to build is a hole in the end of the piece -- so the cap works
+	# from a tidied copy while the side walls keep the padding they need.
+	var cl := PackedVector2Array()
+	var cr := PackedVector3Array()
+	var cg := PackedFloat32Array()
+	for i in loop.size():
+		if not cl.is_empty() and cl[cl.size() - 1].distance_squared_to(loop[i]) < 1e-10:
+			continue
+		cl.append(loop[i])
+		cr.append(ring[i])
+		cg.append(g[i])
+	while cl.size() >= 2 and cl[0].distance_squared_to(cl[cl.size() - 1]) < 1e-10:
+		cl.resize(cl.size() - 1)
+		cr.resize(cr.size() - 1)
+		cg.resize(cg.size() - 1)
+	if cl.size() < 3:
+		return
+	var idx := Geometry2D.triangulate_polygon(cl)
 	if idx.is_empty():
 		return
 	var n: Vector3 = -(f["t"] as Vector3) if start else (f["t"] as Vector3)
 	var i := 0
 	while i + 2 < idx.size():
-		_tri(st, ring[idx[i]], ring[idx[i + 1]], ring[idx[i + 2]], n,
-			g[idx[i]], g[idx[i + 1]], g[idx[i + 2]])
+		_tri(st, cr[idx[i]], cr[idx[i + 1]], cr[idx[i + 2]], n,
+			cg[idx[i]], cg[idx[i + 1]], cg[idx[i + 2]])
 		i += 3
 
 
@@ -448,6 +484,22 @@ static func _ground_factors(loop: PackedVector2Array, blend: float,
 	for p in loop:
 		out.append(1.0 if blend <= 0.0 else clampf((p.y + base) / blend, 0.0, 1.0))
 	return out
+
+
+static func _convex_parts(loop: PackedVector2Array) -> Array:
+	# The decomposer refuses a polygon with repeated points, and a varying sweep
+	# pads its sections with them on purpose (Profiles.floor_at). Tidy first, or
+	# every arch station prints a failure and falls back to one fat hull.
+	var tidy := PackedVector2Array()
+	for p in loop:
+		if tidy.is_empty() or tidy[tidy.size() - 1].distance_squared_to(p) > 1e-10:
+			tidy.append(p)
+	while tidy.size() >= 2 and tidy[0].distance_squared_to(tidy[tidy.size() - 1]) < 1e-10:
+		tidy.resize(tidy.size() - 1)
+	if tidy.size() < 3:
+		return []
+	var out := Geometry2D.decompose_polygon_in_convex(tidy)
+	return out if not out.is_empty() else [tidy]
 
 
 static func _right_of(dir: Vector3) -> Vector3:

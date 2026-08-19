@@ -111,9 +111,13 @@ static func _open(verts: PackedVector3Array, idx: PackedInt32Array) -> int:
 			var k: String = (ka + "|" + kb) if ka < kb else (kb + "|" + ka)
 			seen[k] = int(seen.get(k, 0)) + 1
 		i += 3
+	# An edge used ONCE is a hole. An edge used FOUR times is two closed solids
+	# sharing a face -- a sill butting against the wall stretch beside it, a
+	# buried foot against the buried foot of its own gateway -- which walls do
+	# all the time. Counting != 2 reports those as damage and cries wolf.
 	var open := 0
 	for k in seen:
-		if int(seen[k]) != 2:
+		if int(seen[k]) == 1:
 			open += 1
 	return open
 

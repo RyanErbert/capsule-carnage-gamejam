@@ -135,6 +135,98 @@ static func rect(u0: float, u1: float, v0: float, v1: float) -> PackedVector2Arr
 	])
 
 
+## A section cut to a horizontal band.
+##
+## Openings used to sweep a bare rectangle, which threw away the batter, the
+## coping and the chamfer: the wall's face stepped in at every jamb, and its top
+## course stopped dead at the arch and started again after it. Clipping the REAL
+## section keeps all three running through the opening.
+static func clip(loop: PackedVector2Array, lo: float, hi: float) -> PackedVector2Array:
+	# A corner sitting exactly ON the cut line is emitted twice -- once as a
+	# vertex that survives, once as the crossing point -- and a section with a
+	# repeated point will not triangulate, so its cap silently fails to build
+	# and the piece comes out with a hole where its end should be.
+	var out := _tidy(_clip_half(_clip_half(loop, lo, true), hi, false))
+	return out if out.size() >= 3 else PackedVector2Array()
+
+
+## Consecutive duplicates dropped, including the wrap from last back to first.
+static func _tidy(loop: PackedVector2Array) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for p in loop:
+		if out.is_empty() or out[out.size() - 1].distance_squared_to(p) > 1e-10:
+			out.append(p)
+	while out.size() >= 2 and out[0].distance_squared_to(out[out.size() - 1]) < 1e-10:
+		out.resize(out.size() - 1)
+	return out
+
+
+## Sutherland-Hodgman against one horizontal line.
+static func _clip_half(loop: PackedVector2Array, y: float, keep_above: bool) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	var n := loop.size()
+	if n < 3:
+		return out
+	for i in n:
+		var a := loop[i]
+		var b := loop[(i + 1) % n]
+		var a_in := (a.y >= y) if keep_above else (a.y <= y)
+		var b_in := (b.y >= y) if keep_above else (b.y <= y)
+		if a_in:
+			out.append(a)
+		if a_in != b_in:
+			out.append(_cross_y(a, b, y))
+	return out
+
+
+## The same section with its floor raised to `y`: everything below collapses
+## onto the outline where it crosses that height.
+##
+## This is what an arch needs, and clip() cannot do it. A varying sweep pairs
+## vertex j of one station with vertex j of the next, so every station must have
+## the SAME vertex count -- and a clip's count changes with which edges the line
+## happens to cross. Collapsing instead keeps the count and the indices exactly,
+## at the cost of some zero-length edges, which the sweep already drops.
+static func floor_at(loop: PackedVector2Array, y: float) -> PackedVector2Array:
+	var n := loop.size()
+	if n < 3:
+		return loop
+	var below := 0
+	for p in loop:
+		if p.y < y:
+			below += 1
+	if below == 0:
+		return loop
+	if below == n:
+		return PackedVector2Array()
+	# The below-y vertices are one contiguous run around the loop for any
+	# section that is a single upright outline, but the run wraps, so find where
+	# it starts rather than assuming index 0.
+	var start := -1
+	for i in n:
+		if loop[i].y < y and loop[(i - 1 + n) % n].y >= y:
+			start = i
+			break
+	if start < 0:
+		return loop
+	var last := start
+	while loop[(last + 1) % n].y < y:
+		last = (last + 1) % n
+	var enter := _cross_y(loop[(start - 1 + n) % n], loop[start], y)
+	var leave := _cross_y(loop[last], loop[(last + 1) % n], y)
+	var out := loop.duplicate()
+	for k in below:
+		out[(start + k) % n] = enter if k * 2 < below else leave
+	return out
+
+
+static func _cross_y(a: Vector2, b: Vector2, y: float) -> Vector2:
+	var dy := b.y - a.y
+	if absf(dy) < 1e-9:
+		return Vector2(a.x, y)
+	return Vector2(a.x + (b.x - a.x) * ((y - a.y) / dy), y)
+
+
 ## One merlon course, sitting on the head of a wall of half-width `half`.
 ## `side` is -1 or 1; the walkway is the gap left between the two.
 static func merlon(half: float, side: float, depth := 0.5, height := 1.1) -> PackedVector2Array:

@@ -78,7 +78,7 @@ func _build(mat: Material) -> Node3D:
 		"nodes": Registry.to_wire(pts),
 		"holes": Registry.to_wire([Vector3(-8, _h(-8, 0) + 5.0, 0)]),
 		"params": {"height": 8.0, "thickness": 2.4, "batter": 0.22, "coping": 0.9,
-			"tooth": 1.1, "chamfer": 0.18, "arch": 0.7, "gate": 1.0},
+			"tooth": 1.1, "chamfer": 0.18, "arch": 0.7},
 	}, mat, false)
 
 

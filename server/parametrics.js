@@ -26,14 +26,15 @@ const WORLD_LIMIT = 4096;    // absolute coordinate clamp
 // key: [min, max, default]
 const SPECS = {
   wall: {
-    height:    [2, 24, 6],
+    height:    [4, 24, 6],
     thickness: [0.6, 6, 2],
     batter:    [0, 1.2, 0.22],
     coping:    [0, 2.5, 0.9],
     tooth:     [0, 3, 1.1],     // merlon height; 0 means no crenellation
     chamfer:   [0, 0.8, 0.14],  // arris cut on every outward corner
     arch:      [0, 1, 0.7],     // opening head: 0 flat lintel, 1 full semicircle
-    gate:      [0, 1, 0],       // bool as 0/1: opening at the middle
+    opening:   [0.8, 8, 4],     // width of a punched hole
+    head:      [1, 12, 4.5],    // and how tall it is; aim it low for a gateway
   },
   tower: {
     height:    [3, 40, 9],

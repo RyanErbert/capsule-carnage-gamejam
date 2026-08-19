@@ -25,7 +25,7 @@ func _initialize() -> void:
 			"params": Registry.defaults(type),
 		}
 		if type == "wall":
-			rec["params"]["gate"] = 1.0
+			rec["holes"] = Registry.to_wire([Vector3(0, 2.2, 0)])
 			rec["holes"] = [{"x": -12.0, "y": 2.0, "z": -6.0}]
 		var body: Node3D = Registry.build(rec, mat, true)
 		_report(type, body)
@@ -94,9 +94,13 @@ static func _open(verts: PackedVector3Array, idx: PackedInt32Array) -> int:
 			var k: String = (ka + "|" + kb) if ka < kb else (kb + "|" + ka)
 			seen[k] = int(seen.get(k, 0)) + 1
 		i += 3
+	# An edge used ONCE is a hole. An edge used FOUR times is two closed solids
+	# sharing a face -- a sill butting against the wall stretch beside it, a
+	# buried foot against the buried foot of its own gateway -- which walls do
+	# all the time. Counting != 2 reports those as damage and cries wolf.
 	var open := 0
 	for k in seen:
-		if int(seen[k]) != 2:
+		if int(seen[k]) == 1:
 			open += 1
 	return open
 

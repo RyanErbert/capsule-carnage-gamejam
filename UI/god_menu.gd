@@ -12,13 +12,13 @@ const GIVE_ITEMS := [
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
 const MARKER_TOOLS := [["spawn", "#7dedb0"], ["generator", "#6affc2"]]
-const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"], ["gate", "#d8c9a3"],
+const STRUCT_TOOLS := [["channel", "#66ccff"], ["castle", "#d8c9a3"],
 	["tower", "#d8c9a3"], ["bridge", "#c2b393"], ["path", "#b9ac95"]]
-## Which parametric model each structure tool places. A gate is a wall with its
+## Which parametric model each structure tool places. A gateway is a wall with a
 ## arch parameter turned on -- same model, one number moved -- which is the
 ## whole point of the models declaring their parameters.
 const STRUCT_TYPES := {
-	"castle": "wall", "gate": "wall", "tower": "tower",
+	"castle": "wall", "tower": "tower",
 	"bridge": "bridge", "path": "path",
 }
 const Registry := preload("res://Items/parametric/registry.gd")
@@ -1108,8 +1108,6 @@ func _place_params(tool_name: String) -> Dictionary:
 	var params: Dictionary = Registry.defaults(type)
 	if type == "tower":
 		params["height"] = _tower_h
-	if tool_name == "gate":
-		params["gate"] = 1.0
 	return params
 
 

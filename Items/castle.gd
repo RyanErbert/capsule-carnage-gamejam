@@ -139,13 +139,20 @@ func _record(pts: Array, kind: String, arch: bool, h: float, holes: Array) -> Di
 			"nodes": Registry.to_wire([pts[0]]),
 			"params": {"height": h, "radius": TOWER_R, "coping": COPING, "tooth": TOOTH_H},
 		}
+	# The old protocol had a `gate` flag. There is no such flag now -- a gateway
+	# is a hole aimed low -- so an arched legacy wall gets one punched at the
+	# middle of its run, which is exactly where the flag used to put it.
+	var punched: Array = holes.duplicate()
+	if arch and pts.size() >= 2:
+		var mid: Vector3 = (pts[0] as Vector3).lerp(pts[pts.size() - 1], 0.5)
+		punched.append(mid + Vector3(0, 2.2, 0))
 	return {
 		"type": "wall",
 		"nodes": Registry.to_wire(pts),
-		"holes": Registry.to_wire(holes),
+		"holes": Registry.to_wire(punched),
 		"params": {
 			"height": h, "thickness": THICK, "batter": BATTER,
-			"coping": COPING, "tooth": TOOTH_H, "gate": 1.0 if arch else 0.0,
+			"coping": COPING, "tooth": TOOTH_H,
 		},
 	}
 

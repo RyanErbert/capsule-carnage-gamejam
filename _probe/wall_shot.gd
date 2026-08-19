@@ -17,6 +17,9 @@ func _ready() -> void:
 	_shoot()
 
 
+var _height := 16.0
+
+
 func _record() -> Dictionary:
 	# Four holes at head height, two metres apart. Each carves a GATE_W (4 m)
 	# stretch, so every one of them overlaps its neighbours.
@@ -27,8 +30,8 @@ func _record() -> Dictionary:
 		"type": "wall",
 		"nodes": Registry.to_wire([Vector3(-22, 0, 0), Vector3(22, 0, 0)]),
 		"holes": Registry.to_wire(holes),
-		"params": {"height": 16.0, "thickness": 2.4, "batter": 0.22, "coping": 0.9,
-			"tooth": 1.1, "chamfer": 0.18, "arch": 0.7, "gate": 0.0},
+		"params": {"height": _height, "thickness": 2.4, "batter": 0.22, "coping": 0.9,
+			"tooth": 1.1, "chamfer": 0.18, "arch": 0.7, "opening": 4.0, "head": 4.5},
 	}
 
 
@@ -65,15 +68,22 @@ func _report() -> void:
 
 func _shoot() -> void:
 	var base := OS.get_environment("PROBE_SHOT")
-	_wall = Registry.build(_record(), Registry.stone(), false)
-	add_child(_wall)
 	if DisplayServer.get_name() == "headless":
 		get_tree().quit()
 		return
-	for i in 8:
-		await RenderingServer.frame_post_draw
-	if base != "":
-		get_viewport().get_texture().get_image().save_png(base)
+	# Tall and short, same opening. A short wall used to squash the arc into
+	# whatever headroom was left; now it narrows the hole and keeps the shape.
+	for pass_name: Array in [["tall", 16.0], ["short", 6.0]]:
+		_height = float(pass_name[1])
+		if _wall:
+			_wall.queue_free()
+		_wall = Registry.build(_record(), Registry.stone(), false)
+		add_child(_wall)
+		for i in 8:
+			await RenderingServer.frame_post_draw
+		if base != "":
+			get_viewport().get_texture().get_image().save_png(
+				base.replace(".png", "_%s.png" % pass_name[0]))
 	get_tree().quit()
 
 

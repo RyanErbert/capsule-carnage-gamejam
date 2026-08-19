@@ -101,9 +101,16 @@ func _chamfer() -> void:
 	# into one hole, and every face across the overlap drawn twice.
 	var spread := _holed([Vector3(-14, 7, 0), Vector3(0, 7, 0), Vector3(14, 7, 0)])
 	var tight := _holed([Vector3(-3, 7, 0), Vector3(-1, 7, 0), Vector3(1, 7, 0), Vector3(3, 7, 0)])
-	_check(_dupes(spread) == 0, "openings far apart stay separate: %d faces drawn twice" % _dupes(spread))
-	_check(_dupes(tight) == 0, "and holes 2 m apart become ONE: %d faces drawn twice" % _dupes(tight))
+	_check(_open_edges(spread) == 0, "openings far apart stay separate (%d open)" % _open_edges(spread))
 	_check(_open_edges(tight) == 0, "the merged opening is watertight (%d open)" % _open_edges(tight))
+	# Four stacked arches gave four crowns chewed into one hole. One opening has
+	# one: the soffit rises once and falls once, with nothing in between going
+	# the wrong way. Counting coincident faces measured butt joints instead,
+	# which two closed solids standing against each other always have.
+	# Sample the whole merged span, not one gate's width, or the extra crowns
+	# sit outside the window and the check passes on a wall that is still wrong.
+	_check(_crowns(tight, 10.0) == 1,
+		"and holes 2 m apart become ONE arch, not four (%d crowns)" % _crowns(tight, 10.0))
 	# One wide opening has less geometry than four narrow ones stacked, which is
 	# the cheapest way to say the arches are no longer duplicated.
 	_check(_tri_count(tight) < _tri_count(spread),
@@ -113,14 +120,15 @@ func _chamfer() -> void:
 
 # --- Fixtures ----------------------------------------------------------------
 
-## A straight run through the origin with a gate at its middle, so the opening
-## sits at x = 0 and can be sliced across without any rail maths.
+## A straight run through the origin with a hole punched low at its middle, so
+## the opening sits at x = 0 and can be sliced across without any rail maths.
 func _wall(arch: float, cham := 0.14) -> Node3D:
 	return Registry.build({
 		"type": "wall",
 		"nodes": Registry.to_wire([Vector3(-20, 0, 0), Vector3(20, 0, 0)]),
+		"holes": Registry.to_wire([Vector3(0, 2.2, 0)]),
 		"params": {"height": H, "thickness": 2.0, "batter": 0.0, "coping": 0.9,
-			"tooth": 0.0, "chamfer": cham, "arch": arch, "gate": 1.0},
+			"tooth": 0.0, "chamfer": cham, "arch": arch, "opening": 4.0, "head": 4.5},
 	}, null, false)
 
 
@@ -131,11 +139,27 @@ func _holed(holes: Array) -> Node3D:
 		"nodes": Registry.to_wire([Vector3(-20, 0, 0), Vector3(20, 0, 0)]),
 		"holes": Registry.to_wire(holes),
 		"params": {"height": H, "thickness": 2.0, "batter": 0.0, "coping": 0.9,
-			"tooth": 0.0, "chamfer": 0.14, "arch": 0.7, "gate": 0.0},
+			"tooth": 0.0, "chamfer": 0.14, "arch": 0.7, "opening": 4.0, "head": 4.5},
 	}, null, false)
 
 
 # --- Measuring ---------------------------------------------------------------
+
+
+## How many times the soffit turns from rising to falling across the opening:
+## one arch has one crown, four stacked in the same hole have four.
+func _crowns(body: Node3D, wide := GATE_W) -> int:
+	var ys := _soffits(body, wide)
+	var crowns := 0
+	var rising := true
+	for i in range(1, ys.size()):
+		var d := float(ys[i]) - float(ys[i - 1])
+		if absf(d) < 0.05:
+			continue
+		if rising and d < 0.0:
+			crowns += 1
+		rising = d > 0.0
+	return crowns
 
 
 ## Triangles landing on exactly the same three corners: two sweeps over one
@@ -169,7 +193,7 @@ func _tri_count(body: Node3D) -> int:
 
 ## The underside of the opening at each station across it: in a thin slice of x,
 ## the lowest vertex clear of the sill is the soffit there.
-func _soffits(body: Node3D) -> Array:
+func _soffits(body: Node3D, wide_arg := 0.0) -> Array:
 	var mesh := _mesh(body)
 	if mesh == null:
 		return []
@@ -177,8 +201,9 @@ func _soffits(body: Node3D) -> Array:
 	# Bin by x rather than sampling at guessed positions: the sweep puts its
 	# stations where it likes and a sample between two of them finds nothing.
 	var bins := 15
-	var lo := -GATE_W * 0.5 - 0.05
-	var wide := GATE_W + 0.1
+	var span := GATE_W if wide_arg <= 0.0 else wide_arg
+	var lo := -span * 0.5 - 0.05
+	var wide := span + 0.1
 	var low := []
 	for i in bins:
 		low.append(INF)
