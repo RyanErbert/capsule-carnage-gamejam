@@ -271,16 +271,16 @@ func _make_turret_node(id: String) -> Node3D:
 	skull.mesh = sk
 	skull.material_override = stone
 	skull.scale = Vector3(1.06, 1.0, 0.9)
-	skull.position.z = 0.14
+	skull.position.z = 0.42
 	pivot.add_child(skull)
 
 	# The throat, dark and tapering back, so an open mouth reads as a hole
 	# rather than a dent in the front of a rock.
 	var throat := MeshInstance3D.new()
 	var tm := CylinderMesh.new()
-	tm.top_radius = 0.29
-	tm.bottom_radius = 0.08
-	tm.height = 0.5
+	tm.top_radius = 0.24
+	tm.bottom_radius = 0.07
+	tm.height = 0.44
 	tm.radial_segments = 10
 	throat.mesh = tm
 	var dark := StandardMaterial3D.new()
@@ -288,7 +288,7 @@ func _make_turret_node(id: String) -> Node3D:
 	dark.roughness = 1.0
 	throat.material_override = dark
 	throat.rotation.x = -PI * 0.5
-	throat.position = Vector3(0, 0, 0.04)
+	throat.position = Vector3(0, 0, 0.16)
 	pivot.add_child(throat)
 
 	# Jaws hinge at the back of the mouth and swing apart. Chamfered slabs,
@@ -316,7 +316,7 @@ func _make_turret_node(id: String) -> Node3D:
 	barrels.name = "Barrels"
 	# Far enough back that the lips close in front of them: a shut mouth with
 	# six barrels poking through it is not shut.
-	barrels.position = Vector3(0, 0, 0.06)
+	barrels.position = Vector3(0, 0, -0.06)
 	pivot.add_child(barrels)
 	var barrel_mat := StandardMaterial3D.new()
 	barrel_mat.albedo_color = Color(0.14, 0.14, 0.16)
@@ -326,13 +326,13 @@ func _make_turret_node(id: String) -> Node3D:
 		var ang := TAU * i / 6.0
 		var barrel := MeshInstance3D.new()
 		var bmesh := CylinderMesh.new()
-		bmesh.top_radius = 0.045
-		bmesh.bottom_radius = 0.045
-		bmesh.height = 0.56
+		bmesh.top_radius = 0.038
+		bmesh.bottom_radius = 0.038
+		bmesh.height = 0.4
 		bmesh.material = barrel_mat
 		barrel.mesh = bmesh
 		barrel.rotation.x = -PI / 2.0
-		barrel.position = Vector3(cos(ang) * 0.11, sin(ang) * 0.11, -0.24)
+		barrel.position = Vector3(cos(ang) * 0.085, sin(ang) * 0.085, -0.1)
 		barrels.add_child(barrel)
 
 	# Attack range, outlined on the floor as a thin flat band
@@ -424,9 +424,14 @@ static func _jaw(mat: Material) -> Node3D:
 	var st := Ops.surface()
 	var hulls: Array = []
 	var rail := Ops.mitre_frames([Vector3(0, 0, 0.06), Vector3(0, 0, -0.62)])
+	# The inner face SLOPES: a deep cavity at the hinge closing to the lip at
+	# the front. Flat slabs meeting on the centreline left nowhere for the
+	# gatling to be, so it sat inside the jaws and clipped through them.
+	# `above` is -1 on both so every corner chamfers and the two sections keep
+	# the same vertex count -- a varying sweep pairs vertex j with vertex j.
 	var profs: Array = [
-		Profiles.chamfer(Profiles.rect(-0.52, 0.52, 0.0, 0.32), 0.11),
-		Profiles.chamfer(Profiles.rect(-0.46, 0.46, 0.0, 0.13), 0.06),
+		Profiles.chamfer(Profiles.rect(-0.52, 0.52, 0.26, 0.52), 0.11, -1.0),
+		Profiles.chamfer(Profiles.rect(-0.46, 0.46, 0.07, 0.20), 0.06, -1.0),
 	]
 	Ops.sweep(st, rail, profs[0], hulls,
 		{"caps": true, "profiles": profs, "ground": false, "hulls": false})
@@ -445,6 +450,6 @@ static func _jaw(mat: Material) -> Node3D:
 	lip_mat.emission = Color(0.5, 0.34, 0.06)
 	lip_mat.emission_energy_multiplier = 0.5
 	lip.material_override = lip_mat
-	lip.position = Vector3(0, 0.03, -0.62)
+	lip.position = Vector3(0, 0.025, -0.62)
 	holder.add_child(lip)
 	return holder
