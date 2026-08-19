@@ -1757,7 +1757,8 @@ io.on('connection', (socket) => {
     if (!t || t.owner !== socket.id) return;
     t.ry = +d.ry || 0;
     t.rx = +d.rx || 0;  // pitch: the gun nods up/down at its target
-    socket.broadcast.emit('turretAim', { id: t.id, ry: t.ry, rx: t.rx });
+    t.f = !!(d && d.f);  // firing: drives the mouth and the barrel spin
+    socket.broadcast.emit('turretAim', { id: t.id, ry: t.ry, rx: t.rx, f: t.f });
   });
 
   socket.on('turretHit', (d) => {
