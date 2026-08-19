@@ -620,6 +620,21 @@ setInterval(() => {
   if (changed) io.emit('scores', scores);
 }, 2000);
 
+// Everyone's round trip, broadcast on its own slow tick rather than bolted to
+// the score events: a ping that updates twice a second is a ping, and scores
+// fire in nine different places for reasons that have nothing to do with this.
+function pingMap() {
+  const out = {};
+  for (const id of readyIds) {
+    if (players[id] && typeof players[id].ping === 'number') out[id] = players[id].ping;
+  }
+  return out;
+}
+setInterval(() => {
+  if (readyIds.size) io.emit('pings', pingMap());
+}, 2000);
+
+
 // --- Castle walls (parametric, brick-built) ---
 const activeCastles = [];  // { id, nodes, arch, kind, h, holes }
 
@@ -1686,6 +1701,20 @@ io.on('connection', (socket) => {
     if (rec) io.emit('parametricUpdated', rec);
   });
 
+  // Round-trip clock. Named netPing/netPong because socket.io has its own
+  // ping/pong at the transport layer and reusing those names invites confusion
+  // at best. The client times the round trip itself and sends its reading back
+  // on the NEXT tick, which is how everyone else's ping reaches the scoreboard
+  // without the server timing every client separately.
+  socket.on('netPing', (m) => {
+    const p = players[socket.id];
+    if (p) {
+      const rtt = Number(m && m.rtt);
+      p.ping = Number.isFinite(rtt) && rtt >= 0 ? Math.min(9999, Math.round(rtt)) : -1;
+    }
+    socket.emit('netPong', { t: (m && m.t) || 0 });
+  });
+
   socket.on('removeParametric', (id) => {
     if (parametrics.remove(id)) io.emit('parametricRemoved', id);
   });
@@ -2032,6 +2061,7 @@ io.on('connection', (socket) => {
     socket.emit('holderChanged', holderID);
     socket.emit('scores', scores);
     socket.emit('kills', kills);
+    socket.emit('pings', pingMap());
     socket.emit('currentPedestals', pedestals);
     socket.emit('currentTeleporters', activeTeleporters);
     socket.emit('currentMines', activeMines);

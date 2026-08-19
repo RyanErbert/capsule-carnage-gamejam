@@ -5,6 +5,7 @@ extends Node
 ## roster/movement events. Scoring, items, and the rest arrive in later phases.
 
 signal scores_changed(scores: Dictionary)
+signal pings_changed
 signal holder_changed(holder_id: String)
 
 const RemotePlayerScene := preload("res://Net/remote_player.tscn")
@@ -15,10 +16,20 @@ const TAG_DISTANCE := 1.5  # web §1.9
 
 var self_id := ""
 var scores: Dictionary = {}       # id -> int (includes self)
+var pings: Dictionary = {}        # id -> round trip ms, as the server last heard
 var holder_id := ""
 var _tag_cooldown := 0.0
 var _remotes: Dictionary = {}  # id -> RemotePlayer node
 var _send_accum := 0.0
+
+
+## Round trip for any player, milliseconds; -1 when nobody has said yet. Ours
+## comes straight off the socket rather than the server's copy of it, which is
+## one broadcast staler.
+func ping_of(id: String) -> int:
+	if id == self_id:
+		return Net.ping_ms
+	return int(pings.get(id, -1))
 
 
 func name_of(id: String) -> String:
@@ -103,6 +114,9 @@ func _on_event(event: String, data: Variant) -> void:
 		"scores":
 			scores = data
 			scores_changed.emit(scores)
+		"pings":
+			pings = data if data is Dictionary else {}
+			pings_changed.emit()
 		"holderChanged":
 			holder_id = str(data) if data != null else ""
 			for id in _remotes:

@@ -61,8 +61,15 @@ const TERRAIN_LAYER := 8
 # level with the ground layer, so the map has no rim dropoff. The fog
 # boundary (creative.gd) turns players around long before the edge.
 const STAGE_RADIUS := 640.0        # outer edge of the circular plain
-const FRAME_TOP := 0.48            # a hair under the bowl apron's ~0.5 surface
 const FRAME_SEGMENTS := 128
+# The apron levels off at this lattice row, and the plain has to meet it. Both
+# used to say so separately -- the row here, the height as a hand-guessed 0.48
+# with a comment reading "~0.5" -- and the real surface is at 1.00, so the plain
+# sat half a metre low and its edge was a vertical step you could not walk back
+# up. Derive one from the other and they cannot drift apart again.
+const BOWL_RIM_ROW := 10
+const FRAME_DROP := 0.02           # ...and sit a hair under it, never over
+var FRAME_TOP := 0.98              # set in configure(), once ORIGIN is known
 
 # Lattice points are (NX+1) x (NY+1) x (NZ+1)
 var _density := PackedFloat32Array()
@@ -163,6 +170,9 @@ func configure(w: int, h: int) -> void:
 	ORIGIN = Vector3(-half_x, -20.0, -half_z)
 	FRAME_INNER_X = half_x - 2.0
 	FRAME_INNER_Z = half_z - 2.0
+	# Surface nets puts the isosurface halfway between the last solid row and
+	# the first empty one, so that is where the apron's top face lands.
+	FRAME_TOP = ORIGIN.y + (float(BOWL_RIM_ROW) + 0.5) * VOXEL - FRAME_DROP
 	for key in _chunks:
 		_chunks[key]["body"].queue_free()
 	_chunks.clear()
@@ -225,7 +235,8 @@ func build_from_layers(layers: Array) -> void:
 					if not solid and y >= 1:
 						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, PX_W - 1)
 						var top: int = bowl_top[pz * PX_W + px_e]
-						var band := roundi(lerpf(float(top), 10.0, clampf(d / float(MARGIN), 0.0, 1.0)))
+						var band := roundi(lerpf(float(top), float(BOWL_RIM_ROW),
+							clampf(d / float(MARGIN), 0.0, 1.0)))
 						solid = y <= band
 				elif not solid and li >= 0 and li < eff.size():
 					var rows: Array = eff[li]

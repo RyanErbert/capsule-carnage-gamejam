@@ -23,7 +23,8 @@ const ARM_RADIUS := 0.35     # the arm is a ball, not a thread, so it cannot
 # zoom and speed, and so did nothing about walls at all). SpringArm3D casts and
 # clamps instantly by design; if that ever needs softening, it has to be the
 # CAST result that is smoothed, not the requested length.
-const TELEPORT_SNAP := 6.0   # a jump further than this is a respawn, not travel
+const TELEPORT_SNAP := 6.0   # a BODY jump further than this is a respawn
+const MAX_LAG := 4.0         # ...and the camera never trails further than this
 const SPEED_SMOOTH := 8.0    # contact changes speed in one frame; the chain
                              # should not
 const ACCEL_SMOOTH := 12.0   # ...and neither should the lean
@@ -60,6 +61,7 @@ var _leg_on := false
 
 
 var _smooth_speed := 0.0
+var _last_anchor := Vector3.INF   # where the body was last frame, for the jump test
 var _smooth_accel := Vector3.ZERO
 
 
@@ -128,16 +130,35 @@ func _physics_process(delta: float) -> void:
 	var anchor := target.global_position + Vector3(0, 1, 0)
 	var speed_factor := minf(1.0, _smooth_speed / 18.0)
 	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
-	# A respawn moves the body across the map. Lerping to it flies the camera
-	# through everything in between, so a jump that big is followed, not chased.
-	if global_position.distance_to(anchor) > TELEPORT_SNAP:
+	if _teleported(target.global_position):
 		global_position = anchor
 	else:
-		global_position = global_position.lerp(anchor, t)
+		global_position = _lag_follow(global_position, anchor, t)
 
 	rotation.y = yaw
 	rotation.x = -pitch
 	rotation.z = _wobble(delta, vel)
+
+
+## A respawn moves the BODY across the map in one frame. Being a long way
+## behind is not the same thing, and testing the CAMERA's distance conflated
+## them: the follow lag grows with speed, so past about 21 m/s ordinary running
+## tripped the respawn detector and hard-snapped the camera onto the body. At
+## the stock sprint top speed of 57 m/s that fired seven times a second, which
+## is the juddering you feel as rubberbanding. Sprint is not a teleport, so ask
+## the body how far IT moved.
+func _teleported(body: Vector3) -> bool:
+	var first := _last_anchor == Vector3.INF
+	var jumped := not first and _last_anchor.distance_to(body) > TELEPORT_SNAP
+	_last_anchor = body
+	return jumped
+
+
+## Follow with a lag, but never trail further than MAX_LAG: past that the camera
+## is pulled up to the limit instead of teleported onto the body, so the weight
+## stays and the jump does not. Walking settles at 2.6 m and never reaches it.
+static func _lag_follow(from: Vector3, to: Vector3, t: float) -> Vector3:
+	return to + (from.lerp(to, t) - to).limit_length(MAX_LAG)
 
 
 ## Monkey Ball leans the world under the ball, and you never see the world
@@ -289,10 +310,10 @@ func _legacy_step(delta: float, target: Node3D, vel: Vector3) -> void:
 			desired = _leg_look + dir * maxf(LEG_MIN, reach)
 	var speed_factor := minf(1.0, _smooth_speed / 18.0)
 	var t := (1.0 - exp(-POS_LERP_RATE * delta)) * (1.0 - speed_factor * 0.4)
-	if _cam.global_position.distance_to(desired) > TELEPORT_SNAP:
+	if _teleported(target.global_position):
 		_cam.global_position = desired
 	else:
-		_cam.global_position = _cam.global_position.lerp(desired, t)
+		_cam.global_position = _lag_follow(_cam.global_position, desired, t)
 	_cam.look_at(_leg_look, Vector3.UP)
 	# ...and the lean we added since, which is the one thing the web never had.
 	_cam.rotate_object_local(Vector3.FORWARD, _wobble(delta, vel))

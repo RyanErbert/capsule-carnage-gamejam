@@ -52,6 +52,9 @@ func _ready() -> void:
 	_version_label.text = "%s  %s" % [Net.version_text(), Net.git_commit()]
 	if sync_node:
 		sync_node.scores_changed.connect(_refresh)
+		# The board is event-driven, and a ping that only updates when someone
+		# scores is not a ping.
+		sync_node.pings_changed.connect(func(): _refresh(sync_node.scores))
 		sync_node.holder_changed.connect(func(_id): _refresh(sync_node.scores))
 	_chat_input.text_submitted.connect(_on_chat_submitted)
 	_chat_input.text_changed.connect(_on_chat_text_changed)
@@ -872,9 +875,18 @@ func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> vo
 	head.add_child(title)
 	var kcol := Label.new()
 	kcol.text = "KILLS" if slayer else "SCORE"
+	kcol.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	kcol.custom_minimum_size = Vector2(42, 0)
 	kcol.add_theme_font_size_override("font_size", 16)
 	kcol.add_theme_color_override("font_color", Color(1, 1, 1, 0.45))
 	head.add_child(kcol)
+	var pcol := Label.new()
+	pcol.text = "MS"
+	pcol.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	pcol.custom_minimum_size = Vector2(46, 0)
+	pcol.add_theme_font_size_override("font_size", 16)
+	pcol.add_theme_color_override("font_color", Color(1, 1, 1, 0.45))
+	head.add_child(pcol)
 	_scoreboard_rows.add_child(head)
 
 	var rows: Array = []
@@ -895,4 +907,24 @@ func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> vo
 		n.custom_minimum_size = Vector2(42, 0)
 		n.add_theme_font_size_override("font_size", 16)
 		line.add_child(n)
+		var ms := int(sync_node.ping_of(row[0]))
+		var p := Label.new()
+		p.text = "--" if ms < 0 else str(ms)
+		p.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		p.custom_minimum_size = Vector2(46, 0)
+		p.add_theme_font_size_override("font_size", 16)
+		p.add_theme_color_override("font_color", _ping_color(ms))
+		line.add_child(p)
 		_scoreboard_rows.add_child(line)
+
+
+## Green under 80, amber to 150, red past it. A number alone makes you do the
+## judging; the colour is the judgement.
+static func _ping_color(ms: int) -> Color:
+	if ms < 0:
+		return Color(1, 1, 1, 0.35)
+	if ms < 80:
+		return Color(0.45, 0.95, 0.55)
+	if ms < 150:
+		return Color(1.0, 0.82, 0.35)
+	return Color(1.0, 0.42, 0.38)

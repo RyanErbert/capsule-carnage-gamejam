@@ -239,6 +239,15 @@ func is_socket_connected() -> bool:
 ## main-thread-blocking terrain build, when the handshake may not be done.
 var _outbox: Array = []
 
+## Round trip to the server in milliseconds, -1 until the first reply lands.
+## Measured app-level rather than off engine.io's own heartbeat: that fires
+## about twice a minute, which is a number from the past by the time you look.
+var ping_ms := -1
+const PING_INTERVAL := 2.0
+const PING_SMOOTH := 0.4      # new sample's share, so one bad packet is not the reading
+var _ping_accum := 0.0
+
+
 func emit_event(event: String, data: Variant = null) -> void:
 	var payload: Array = [event]
 	if data != null:
@@ -258,10 +267,18 @@ func _process(delta: float) -> void:
 		_was_open = true
 		while _ws.get_available_packet_count() > 0:
 			_handle_frame(_ws.get_packet().get_string_from_utf8())
+		if _handshake_done:
+			_ping_accum += delta
+			if _ping_accum >= PING_INTERVAL:
+				_ping_accum = 0.0
+				# Our own reading rides along, so the server can tell everyone
+				# else what this client's connection is like without timing it.
+				emit_event("netPing", {"t": Time.get_ticks_msec(), "rtt": ping_ms})
 	elif state == WebSocketPeer.STATE_CLOSED:
 		if _was_open:
 			_was_open = false
 			_handshake_done = false
+			ping_ms = -1
 			socket_disconnected.emit()
 			print("[net] connection lost — retrying every %.0fs" % RECONNECT_DELAY)
 		# Auto-reconnect (server redeploys drop everyone; rejoin the new instance).
@@ -319,6 +336,13 @@ func _handle_frame(frame: String) -> void:
 					paint_rows = data
 				"paintCleared":
 					paint_rows = null
+				"netPong":
+					if data is Dictionary:
+						var rtt := Time.get_ticks_msec() - int((data as Dictionary).get("t", 0))
+						if ping_ms < 0:
+							ping_ms = rtt
+						else:
+							ping_ms = int(round(lerpf(float(ping_ms), float(rtt), PING_SMOOTH)))
 				"hello":
 					if data is Dictionary:
 						socket_id = str(data.get("id", ""))
