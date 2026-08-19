@@ -69,6 +69,13 @@ const FRAME_SEGMENTS := 128
 # up. Derive one from the other and they cannot drift apart again.
 const BOWL_RIM_ROW := 10
 const FRAME_DROP := 0.02           # ...and sit a hair under it, never over
+# The apron sheds the edge height over MARGIN cells, so a border painted tall
+# makes a steep one: 16 m of run for up to 24 m of fall. Capping where the
+# descent STARTS does not help -- it just moves the cliff to the inner end,
+# where the apron meets the paint it was supposed to blend from (measured 87
+# degrees at d=1). The grade is bounded by how much margin there is, and
+# widening MARGIN grows the lattice on every axis, so that is a size decision
+# rather than a tweak.
 var FRAME_TOP := 0.98              # set in configure(), once ORIGIN is known
 
 # Lattice points are (NX+1) x (NY+1) x (NZ+1)
@@ -235,8 +242,14 @@ func build_from_layers(layers: Array) -> void:
 					if not solid and y >= 1:
 						var px_e := clampi((x - MARGIN) / points_per_pixel, 0, PX_W - 1)
 						var top: int = bowl_top[pz * PX_W + px_e]
+						# Reach the rim one cell EARLY. The outermost lattice
+						# column is forced to air so surface nets can seal the
+						# field, so an apron that only levels off at d = MARGIN
+						# gets chopped while it is still a metre and a half
+						# proud -- and that leftover stands on the frame plain
+						# as the step you cannot get back up.
 						var band := roundi(lerpf(float(top), float(BOWL_RIM_ROW),
-							clampf(d / float(MARGIN), 0.0, 1.0)))
+							clampf(d / float(maxi(MARGIN - 1, 1)), 0.0, 1.0)))
 						solid = y <= band
 				elif not solid and li >= 0 and li < eff.size():
 					var rows: Array = eff[li]
