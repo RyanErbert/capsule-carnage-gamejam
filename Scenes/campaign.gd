@@ -20,8 +20,9 @@ extends Node3D
 ## and a field of crates and trees out east with the hermit's hollow beyond.
 
 ## Where the world may live, first found wins. FRIENDSLOP_WORLD overrides
-## (handy for trying an export without moving it).
-const WORLD_PATHS := ["res://Campaign/world.glb", "res://maps/campaign.glb"]
+## (handy for trying an export without moving it). Until a real campaign
+## world exists the deathmatch arena stands in for it.
+const WORLD_PATHS := ["res://Campaign/world.glb", "res://maps/deathmatch.glb"]
 const KILL_Y := -30.0
 const PlayerScene := preload("res://Player/player.tscn")
 const HudScene := preload("res://UI/game_hud.tscn")
@@ -61,7 +62,20 @@ func _ready() -> void:
 		# No Spawn empty yet: land on top of whatever is at the origin
 		_spawn = Vector3(0, _top_at(Vector3.ZERO) + 1.0, 0)
 	_spawn_gameplay()
-	_place_from_markers()
+	var has_npcs := false
+	for m in _markers:
+		if (m as Node3D).name.begins_with("NPC_"):
+			has_npcs = true
+			break
+	if has_npcs:
+		_place_from_markers()
+	else:
+		# A map with no campaign markers (the deathmatch arena, say): furnish
+		# it around the spawn once the colliders are live to be rayed against.
+		await get_tree().physics_frame
+		await get_tree().physics_frame
+		_improvise(world)
+		_place_from_markers()
 	Net.event_received.connect(_on_net_event)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -151,6 +165,56 @@ func _place_from_markers() -> void:
 			var qb := QuestBoard.new()
 			add_child(qb)
 			qb.global_transform = at
+
+
+## Campaign furniture for a map that only has arena markers: the plaza set
+## (greeter, merchant, warden, board) fans out around the spawn, every item
+## pedestal spot gets a crate, the summit checkpoint sits on the highest
+## ground in the middle and the hollow on the pedestal furthest from spawn.
+func _improvise(world: Node3D) -> void:
+	var peds: Array = []
+	for m in _markers:
+		if (m as Node3D).name.begins_with("Pedestal_"):
+			peds.append((m as Node3D).global_position)
+	var here := Vector3(_spawn.x, 0, _spawn.z)
+	var to_centre := (Vector3.ZERO - here)
+	to_centre.y = 0.0
+	var fwd := to_centre.normalized() if to_centre.length() > 0.1 else Vector3.FORWARD
+	var right := fwd.cross(Vector3.UP)
+	var set := {
+		"NPC_greeter": here + fwd * 4.0 + right * 1.5,
+		"NPC_merchant": here - right * 7.0 + fwd * 1.0,
+		"NPC_warden": here + right * 7.0 + fwd * 1.0,
+		"QuestBoard": here + right * 9.5 - fwd * 1.0,
+	}
+	for k in set:
+		var p: Vector3 = set[k]
+		_marker(world, k, Vector3(p.x, _top_at(p), p.z))
+	for i in peds.size():
+		var p: Vector3 = peds[i]
+		_marker(world, "Crate_%d" % (i + 1), Vector3(p.x, _top_at(p), p.z))
+	# Summit: the highest surface within 20 m of the map centre
+	var best := Vector3(0, -INF, 0)
+	for gx in range(-20, 21, 5):
+		for gz in range(-20, 21, 5):
+			var top := _top_at(Vector3(gx, 0, gz))
+			if top > best.y:
+				best = Vector3(gx, top, gz)
+	if best.y > -INF:
+		_marker(world, "Checkpoint_Summit", best)
+	var far := here
+	var far_d := -1.0
+	for p in peds:
+		var d: float = Vector2(p.x - here.x, p.z - here.z).length()
+		if d > far_d:
+			far_d = d
+			far = p
+	if far_d > 0.0:
+		_marker(world, "Checkpoint_Hollow", Vector3(far.x, _top_at(far), far.z))
+		var hp := far + (here - far).normalized() * 5.0
+		_marker(world, "NPC_hermit", Vector3(hp.x, _top_at(hp), hp.z))
+	_markers = []
+	_collect_markers(world)
 
 
 func _spawn_gameplay() -> void:
