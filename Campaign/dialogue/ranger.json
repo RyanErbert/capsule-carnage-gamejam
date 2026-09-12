@@ -1,0 +1,28 @@
+{
+  "name": "Bramble",
+  "color": "#7dedb0",
+  "start": "hi",
+  "nodes": {
+    "hi": {
+      "text": "Heading into the wood? It loops back on itself more than you'd think. Keep the plaza wall on your left and you won't stay lost for long.",
+      "choices": [
+        { "text": "What's in there?", "next": "inside" },
+        { "text": "Who lives at the far end?", "next": "hermit" },
+        { "text": "Thanks." }
+      ]
+    },
+    "inside": {
+      "text": "Crates, mostly in the dead ends. Somebody keeps restocking them and it isn't me. Hop a hedge if you get stuck, they're only knee high to a marble with a good jump.",
+      "choices": [
+        { "text": "Who lives at the far end?", "next": "hermit" },
+        { "text": "Good to know." }
+      ]
+    },
+    "hermit": {
+      "text": "Old Sorrel, in the ring of rocks at the bottom. Talks to anyone who makes it that far. Go in from the north side, the rest of the ring is solid.",
+      "choices": [
+        { "text": "I'll find them." }
+      ]
+    }
+  }
+}
