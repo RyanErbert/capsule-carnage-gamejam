@@ -10,7 +10,7 @@ extends Node3D
 ## so everyone sees the same gun pointed the same way.
 
 const MOUNT := Vector3(0.34, -0.04, -0.42)   # right of, and ahead of, the body
-const HELD := ["machinegun", "rocket", "grapple", "bridge_gun", "terragun"]
+const HELD := ["machinegun", "rocket", "grapple", "bridge_gun", "terragun", "vampire"]
 const TURN := 16.0    # rad/s the rig chases a new aim direction
 const MODEL_SCALE := 0.62   # guns are modelled full size, worn at bear scale
 
@@ -75,6 +75,8 @@ static func build_model(kind: String) -> Node3D:
 			return _bridge_gun()
 		"terragun":
 			return _terra_gun()
+		"vampire":
+			return _vampire_gun()
 		_:
 			return _machinegun()
 
@@ -198,6 +200,40 @@ static func _terra_gun() -> Node3D:
 		_glow(Color(0.35, 1.0, 0.55)))                                      # charge bar
 	_box(root, Vector3(0.05, 0.14, 0.07), Vector3(0, -0.13, 0.13), grip, 0.25)  # grip
 	_box(root, Vector3(0.04, 0.09, 0.05), Vector3(0, 0.11, -0.1), grip)     # sight
+	return root
+
+
+## Vampire gun: a long thin emitter with a glass vial slung under the barrel
+## and a fanged fork at the muzzle. The vial is the tell -- it glows the colour
+## of what it's drinking.
+static func _vampire_gun() -> Node3D:
+	var root := Node3D.new()
+	var steel := _steel()
+	var grip := _grip_mat()
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.16, 0.1, 0.18)
+	dark.metallic = 0.5
+	dark.roughness = 0.35
+	_box(root, Vector3(0.1, 0.13, 0.4), Vector3(0, 0, 0.02), dark)          # receiver
+	_tube(root, 0.035, 0.6, Vector3(0, 0.03, -0.46), steel)                 # barrel
+	_tube(root, 0.06, 0.06, Vector3(0, 0.03, -0.74), dark)                  # muzzle collar
+	# Two fangs, splayed off the muzzle
+	for side: float in [-1.0, 1.0]:
+		var fang := _box(root, Vector3(0.02, 0.02, 0.14), Vector3(side * 0.045, 0.03, -0.82), steel)
+		fang.rotation.y = -side * 0.18
+	_box(root, Vector3(0.03, 0.03, 0.03), Vector3(0, 0.03, -0.78), _glow(Color(1.0, 0.35, 0.5)))
+	# Vial under the barrel: glass over a red core
+	var vial := _tube(root, 0.045, 0.24, Vector3(0, -0.1, -0.2), _glow(Color(0.85, 0.12, 0.3)))
+	vial.rotation.x = PI / 2.0
+	var glass := StandardMaterial3D.new()
+	glass.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	glass.albedo_color = Color(0.9, 0.95, 1.0, 0.28)
+	glass.roughness = 0.05
+	var shell := _tube(root, 0.06, 0.26, Vector3(0, -0.1, -0.2), glass)
+	shell.rotation.x = PI / 2.0
+	_box(root, Vector3(0.06, 0.15, 0.07), Vector3(0, -0.13, 0.14), grip, 0.25)  # grip
+	_box(root, Vector3(0.07, 0.09, 0.2), Vector3(0, -0.01, 0.3), dark)      # stock
+	_box(root, Vector3(0.03, 0.06, 0.03), Vector3(0, 0.1, -0.1), grip)      # sight
 	return root
 
 

@@ -24,6 +24,7 @@ const SettingsPanel := preload("res://UI/settings_panel.gd")
 const ITEM_COLORS := {
 	"grapple": "#44ff44", "launch_pad": "#44ff44", "boost_pad": "#44ff44", "teleporter": "#44ff44",
 	"machinegun": "#ff4444", "rocket": "#ff4444", "mines": "#ff4444", "crowbot": "#ff4444",
+	"vampire": "#ff4444",
 	"block": "#ffff44", "wall": "#ffff44", "ramp": "#ffff44", "platform": "#ffff44", "bridge_gun": "#ffff44",
 	"terragun": "#ffff44",
 }
@@ -403,6 +404,14 @@ const ICON_MASKS := {
 		"...#...",
 		".#####.",
 	],
+	"flame": [
+		"...#...",
+		"..##...",
+		"..###..",
+		".##.##.",
+		"#######",
+		".#####.",
+	],
 }
 
 ## Loose 8x8 pixel glyphs for the inventory, in the same blown-up nearest
@@ -460,6 +469,11 @@ const ITEM_ICON_MASKS := {
 		"........", ".#....#.", ".#....#.", ".#....#.",
 		".######.", "...##...", "..####..", "........",
 	],
+	# Vampire gun: two fangs over a drop
+	"vampire": [
+		"#......#", "##....##", ".#....#.", ".#....#.",
+		"........", "...##...", "..####..", "...##...",
+	],
 	# Terraformer: a nozzle over a ground line pushed into a mound
 	"terragun": [
 		"..####..", "..####..", "...##...", "...##...",
@@ -506,7 +520,8 @@ func _build_meters() -> void:
 	_meters.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_meters.add_theme_constant_override("separation", 4)
 	add_child(_meters)
-	for entry in [["heart", Color("#ff5560")], ["bolt", Color("#4de08a")], ["jump", Color("#7fb2ff")]]:
+	for entry in [["heart", Color("#ff5560")], ["bolt", Color("#4de08a")], ["jump", Color("#7fb2ff")],
+			["flame", Color("#ff6a9a")]]:
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
 		row.add_child(_icon(entry[0], entry[1]))
@@ -544,6 +559,15 @@ func _update_meters() -> void:
 	else:
 		_meter_fills[2].size.x = 158.0 * (p.jump_cooldown / p.jump_cooldown_max if p.jump_cooldown_max > 0.0 else 0.0)
 		_meter_fills[2].color = Color(0.9, 0.25, 0.2)
+	# Vampire gun heat: only while it's in hand. Pink as it builds, red and
+	# draining while the gun is locked out.
+	var vamp: Node = p.get_node_or_null("VampireGun")
+	var heat_row: Control = _meter_fills[3].get_parent().get_parent()
+	heat_row.visible = vamp != null and bool(vamp.held())
+	if heat_row.visible:
+		_meter_fills[3].size.x = 158.0 * clampf(float(vamp.gauge()), 0.0, 1.0)
+		_meter_fills[3].color = Color(0.95, 0.2, 0.2) if bool(vamp.overheated) \
+			else Color("#ff6a9a").lerp(Color("#fff0f4"), float(vamp.heat))
 
 
 var _last_inventory: Array = []
@@ -585,9 +609,9 @@ func _refresh_inventory(items: Array) -> void:
 		icon.offset_bottom = -pad
 		holder.add_child(icon)
 		var ammo_text := ""
-		if item == "terragun":
-			# Not ammo: a charge cell that buys itself back with your health,
-			# so infinite-ammo doesn't apply and the number always matters.
+		if item == "terragun" or item == "vampire":
+			# Not ammo: a charge cell (or heat) that infinite-ammo has no say
+			# over, so the number always matters.
 			ammo_text = str(ammo)
 		elif bool(Net.game_settings.get("infiniteAmmo", false)):
 			ammo_text = "∞"

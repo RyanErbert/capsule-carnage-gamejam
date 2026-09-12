@@ -7,7 +7,7 @@ extends PanelContainer
 
 const GIVE_ITEMS := [
 	"grapple", "launch_pad", "boost_pad", "teleporter",
-	"machinegun", "rocket", "mines",
+	"machinegun", "rocket", "mines", "vampire",
 	"bridge_gun", "terragun",
 ]
 const PED_TOOLS := [["green", "#44ff44"], ["red", "#ff4444"], ["yellow", "#ffff44"]]
@@ -1243,7 +1243,7 @@ func _build_ui() -> void:
 		give_toggle.text = ("▾ GIVE ITEM" if grid.visible else "▸ GIVE ITEM"))
 	for item in GIVE_ITEMS:
 		var color := Color("#44ff44")
-		if item in ["machinegun", "rocket", "mines"]:
+		if item in ["machinegun", "rocket", "mines", "vampire"]:
 			color = Color("#ff4444")
 		elif item in ["bridge_gun", "terragun"]:
 			color = Color("#ffff44")

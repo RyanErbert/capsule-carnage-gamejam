@@ -238,8 +238,8 @@ func use_item() -> void:
 			})
 			pending_teleporter = null
 			_shift_inventory()
-		"terragun":
-			pass   # polled, not clicked — TerraGun watches both buttons itself
+		"terragun", "vampire":
+			pass   # polled, not clicked — the gun node watches the button itself
 		"block", "wall", "ramp", "platform":
 			var builds := get_parent().get_node_or_null("BuildController")
 			if builds:

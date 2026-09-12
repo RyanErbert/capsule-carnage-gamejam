@@ -11,6 +11,7 @@ const FILES := [
 	"res://Items/parametric/registry.gd", "res://Items/parametric/ops.gd",
 	"res://UI/main_menu.gd", "res://UI/settings_panel.gd", "res://Items/item_controller.gd",
 	"res://Items/weapon_rig.gd", "res://Net/remote_player.gd", "res://Items/generators.gd",
+	"res://Items/vampire_gun.gd", "res://Items/vampire_beam.gd", "res://UI/settings.gd",
 ]
 
 

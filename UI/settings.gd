@@ -5,7 +5,7 @@ extends Node
 ## (starting weapon / infinite ammo). Autoload: Settings.
 
 const RANDOM_NAMES := ["Blockhead", "Squarold", "Edgelord", "Hexahedron", "Rhombert", "Squaredward"]
-const WEAPONS := ["none", "machinegun", "rocket", "mines", "grapple", "terragun"]
+const WEAPONS := ["none", "machinegun", "rocket", "mines", "grapple", "terragun", "vampire"]
 # Starting-weapon ammo (web game.js:3908) — richer than pedestal pickups.
 # The terraformer isn't ammo-driven: its number is a charge cell that refills
 # itself out of your health (Items/terra_gun.gd), so it starts full.

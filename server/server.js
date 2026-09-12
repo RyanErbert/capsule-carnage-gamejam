@@ -391,6 +391,7 @@ const DEATH_LINES = {
   drill: '%s got screwed',
   terra: '%s dug their own grave',
   ghost: '%s headbutted a ghost',
+  vampire: '%s was drained dry',
   blast: '%s exploded'
 };
 const CAUSES = Object.keys(DEATH_LINES);
@@ -705,7 +706,7 @@ const spawnPoints = [];  // { id, x, y, z }
 const pedestals = [];
 const ITEMS_BY_CATEGORY = {
   green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
-  red: ['machinegun', 'rocket', 'mines', 'crowbot'],
+  red: ['machinegun', 'rocket', 'mines', 'crowbot', 'vampire'],
   yellow: ['block', 'wall', 'ramp', 'platform', 'bridge_gun', 'terragun']
 };
 
@@ -2345,6 +2346,37 @@ io.on('connection', (socket) => {
       checkDeath(targetId);
     }
     io.emit('applyImpulse', { id: targetId, dir, force: 25 });
+  });
+
+  // Vampire gun: one point of health crosses from the target to the shooter
+  // per pulse. The shooter's client decides who the beam is on (same trust as
+  // machinegunHit); the server bounds the rate and the reach.
+  const VAMPIRE_MIN_MS = 200;
+  const VAMPIRE_REACH = 48;
+  const vampireLast = {};
+  socket.on('vampireTick', (d) => {
+    const t = d && typeof d.t === 'string' ? d.t : '';
+    const me = players[socket.id], them = players[t];
+    if (!me || !them || t === socket.id || isDead(t) || isDead(socket.id)) return;
+    const now = Date.now();
+    if (now - (vampireLast[socket.id] || 0) < VAMPIRE_MIN_MS) return;
+    if (Math.hypot(them.x - me.x, them.y - me.y, them.z - me.z) > VAMPIRE_REACH) return;
+    if (!canHurt(socket.id, t) || !(scores[t] > 0)) return;
+    vampireLast[socket.id] = now;
+    scores[t] -= 1;
+    scores[socket.id] = (scores[socket.id] || 0) + 1;
+    creditHit(t, socket.id, 'vampire');
+    io.emit('scores', scores);
+    checkDeath(t);
+  });
+
+  // The beam itself, for everyone else's screen: relay only.
+  socket.on('vampireBeam', (d) => {
+    if (!d || typeof d !== 'object') return;
+    socket.broadcast.emit('vampireBeam', {
+      id: socket.id, on: !!d.on,
+      x: +d.x || 0, y: +d.y || 0, z: +d.z || 0, h: +d.h || 0, f: !!d.f
+    });
   });
 
   socket.on('fireRocket', (data) => {

@@ -111,6 +111,11 @@ func _on_event(event: String, data: Variant) -> void:
 			if _remotes.has(id):
 				_remotes[id].queue_free()
 				_remotes.erase(id)
+		"vampireBeam":
+			if data is Dictionary:
+				var vid := str(data.get("id", ""))
+				if _remotes.has(vid):
+					_remotes[vid].set_beam(data)
 		"scores":
 			scores = data
 			scores_changed.emit(scores)

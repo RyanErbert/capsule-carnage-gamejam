@@ -28,6 +28,11 @@ var _cube: Node3D = null  # roundcube visual for web-shaped players
 var _shell: Node3D = null # ...or the glass marble, for everyone else
 var _base_color := Color.WHITE
 var _rig: Node3D = null   # the weapon they're holding (Items/weapon_rig.gd)
+var _beam: Node3D = null  # their vampire beam, while it's on
+var _beam_end := Vector3.ZERO
+var _beam_heat := 0.0
+var _beam_feeding := false
+var _beam_on := false
 
 
 func setup(id: String, data: Dictionary) -> void:
@@ -173,6 +178,20 @@ var _is_holder := false
 var _strobe_t := 0.0
 
 
+## Their vampire gun, as relayed: on/off plus where the beam lands.
+func set_beam(d: Dictionary) -> void:
+	_beam_on = bool(d.get("on", false))
+	if _beam_on:
+		_beam_end = Vector3(d.get("x", 0.0), d.get("y", 0.0), d.get("z", 0.0))
+		_beam_heat = float(d.get("h", 0.0))
+		_beam_feeding = bool(d.get("f", false))
+		if _beam == null:
+			_beam = load("res://Items/vampire_beam.gd").new()
+			add_child(_beam)
+	elif _beam:
+		_beam.hide_beam()
+
+
 func set_holder(holder: bool) -> void:
 	_is_holder = holder
 	if _cube:
@@ -206,6 +225,11 @@ func _process(delta: float) -> void:
 		_cube.quaternion = _cube.quaternion.slerp(target_quat, t)
 	else:
 		_mesh.quaternion = _mesh.quaternion.slerp(target_quat, t)
+	if _beam_on and _beam:
+		var muzzle := global_position + Vector3(0, 0.25, 0)
+		if _rig and _rig.visible:
+			muzzle = _rig.global_position + _rig.global_transform.basis * Vector3(0.34, 0.11, -0.9)
+		_beam.show_beam(muzzle, _beam_end, _beam_heat, _beam_feeding)
 
 	# Holder strobes gold (web §1.9: sin(t*0.008) on ms — ~1.3 Hz)
 	if _is_holder and _shell:
