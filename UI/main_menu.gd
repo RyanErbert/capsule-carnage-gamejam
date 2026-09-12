@@ -34,6 +34,8 @@ var _name_edit: LineEdit
 var _roster: Label
 var _join_btn: Button
 var _gamemode_opt: OptionButton
+var _level_opt: OptionButton
+var _level_keys: Array = []      # Settings.level value per dropdown row
 var _w_opt: OptionButton
 var _h_opt: OptionButton
 var _scheme_boxes: Dictionary = {}   # scheme -> CheckBox
@@ -101,6 +103,7 @@ func _apply_game_settings(gs: Variant) -> void:
 		return
 	if _gamemode_opt:
 		_gamemode_opt.select(maxi(0, MODES.find(str(gs.get("mode", "slayer")))))
+	_refresh_levels(str(gs.get("mode", "slayer")))
 	if _w_opt:
 		_w_opt.select(maxi(0, GRID_SIZES.find(int(gs.get("gridW", 32)))))
 	if _h_opt:
@@ -156,6 +159,36 @@ func _refresh_status() -> void:
 	_join_btn.text = "JOIN GAME" if live else "START GAME"
 
 
+## The maps a mode can be played on. Fortwars divides the painted canyon,
+## so it is the canyon or nothing; the campaign has its own world; the rest
+## take any map, the Blender arenas included. One choice means a locked box.
+func _refresh_levels(mode: String) -> void:
+	if _level_opt == null:
+		return
+	_level_opt.clear()
+	_level_keys.clear()
+	match mode:
+		"campaign":
+			_level_keys = ["campaign"]
+			_level_opt.add_item("Campaign World")
+		"fortwars":
+			_level_keys = ["creative"]
+			_level_opt.add_item("Canyon World")
+		_:
+			_level_keys = ["creative", "testworld"]
+			_level_opt.add_item("Canyon World")
+			_level_opt.add_item("Testworld")
+			for map_name in _glb_maps():
+				_level_keys.append("glb:" + map_name)
+				_level_opt.add_item("Map: " + map_name.capitalize())
+	_level_opt.disabled = _level_keys.size() <= 1
+	var idx := _level_keys.find(str(Settings.level))
+	if idx < 0:
+		idx = 0
+		Settings.level = str(_level_keys[0])
+	_level_opt.select(idx)
+
+
 ## Every .glb in res://maps/ that isn't the campaign world, by base name.
 static func _glb_maps() -> Array:
 	var out: Array = []
@@ -183,7 +216,7 @@ func _join() -> void:
 	# The server makes the same call itself and answers with 'enterEditor' --
 	# or 'enterCampaign', which has no editor to land in.
 	var campaign := str(Net.game_settings.get("mode", "slayer")) == "campaign"
-	if (campaign or Settings.level == "creative") \
+	if (campaign or Settings.level == "campaign" or Settings.level == "creative") \
 			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		Net.emit_event("requestStart")
 		return
@@ -319,17 +352,13 @@ func _build_ui() -> void:
 	var level_row := HBoxContainer.new()
 	level_row.add_theme_constant_override("separation", 6)
 	settings_col.add_child(level_row)
-	var level_opt := OptionButton.new()
-	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var level_keys: Array = ["creative", "testworld"]
-	level_opt.add_item("Canyon World")
-	level_opt.add_item("Testworld")
-	for map_name in _glb_maps():
-		level_keys.append("glb:" + map_name)
-		level_opt.add_item("Map: " + map_name.capitalize())
-	level_opt.select(maxi(0, level_keys.find(str(Settings.level))))
-	level_opt.item_selected.connect(func(i: int): Settings.level = str(level_keys[i]))
-	level_row.add_child(level_opt)
+	_level_opt = OptionButton.new()
+	_level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_level_opt.item_selected.connect(func(i: int):
+		if i >= 0 and i < _level_keys.size():
+			Settings.level = str(_level_keys[i]))
+	level_row.add_child(_level_opt)
+	_refresh_levels(str(Net.game_settings.get("mode", "slayer")))
 	var map_gear := Button.new()
 	map_gear.text = "⚙"
 	map_gear.focus_mode = Control.FOCUS_NONE
