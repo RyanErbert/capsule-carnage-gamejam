@@ -193,7 +193,7 @@ func _publish() -> void:
 
 func _carve(at: Vector3, mode: String) -> void:
 	var terrain: Node = get_tree().get_first_node_in_group("voxel_terrain")
-	if terrain == null:
+	if terrain == null or not Net.fort_may_build(at):
 		return
 	var s := 1.0 if mode == "add" else -1.0
 	var hit: bool = terrain.smooth_brush(at, CARVE_RADIUS, CARVE_STRENGTH) if mode == "smooth" \

@@ -103,6 +103,8 @@ var _claim_own := PackedInt32Array()   # per cell: -2 edge, -1 free, else index
 var _claim_ids: Array = []
 var _claim_pos: Array = []     # [[r, c], ...] parallel to _claim_ids
 var _claim_dead: Array = []    # ...and whether each one is out of the round
+var _claim_oidx: Array = []    # which board index each snake paints (its team, in Fortwars)
+var _claim_palette: Array = [] # board colours by index, when the server dictates them
 var _claim_trail: Dictionary = {}      # cell index -> player index
 var _claim_left := 0.0         # seconds on the clock, counted down locally
 var _claim_dir := Vector2i.ZERO
@@ -299,6 +301,8 @@ func _apply_claim_state(data: Variant) -> void:
 	_claim_ids = data.get("ids", []) if data.get("ids") is Array else []
 	_claim_pos = data.get("pos", []) if data.get("pos") is Array else []
 	_claim_dead = data.get("dead", []) if data.get("dead") is Array else []
+	_claim_oidx = data.get("oidx", []) if data.get("oidx") is Array else []
+	_claim_palette = data.get("palette", []) if data.get("palette") is Array else []
 	_claim_left = float(data.get("t", 0)) / 1000.0
 	var own := str(data.get("own", ""))
 	_claim_own.resize(PX_W * PX_H)
@@ -361,8 +365,10 @@ func _update_banner() -> void:
 			_claim_banner.text = "OUT   %s" % clock
 			_claim_banner.add_theme_color_override("font_color", Color("#ff8a7d"))
 			return
-		_claim_banner.text = "CLAIM   %s   [WASD]" % clock
-		_claim_banner.add_theme_color_override("font_color", Color("#ffd54a"))
+		var team := Net.fort_team()
+		_claim_banner.text = ("%s TEAM   " % team.to_upper() if team != "" else "") + "CLAIM   %s   [WASD]" % clock
+		_claim_banner.add_theme_color_override("font_color",
+			_claim_color(_my_owner_index()) if team != "" else Color("#ffd54a"))
 	else:
 		_claim_banner.text = "EDIT   %s" % clock
 		_claim_banner.add_theme_color_override("font_color", Color("#7dedb0"))
@@ -407,15 +413,30 @@ func _my_claim_index() -> int:
 	return _claim_ids.find(Net.socket_id)
 
 
+## The board index a snake paints: itself, or its team in Fortwars.
+func _owner_of(pi: int) -> int:
+	if pi >= 0 and pi < _claim_oidx.size():
+		return int(_claim_oidx[pi])
+	return pi
+
+
+## The board index WE paint; -1 before we're counted in.
+func _my_owner_index() -> int:
+	var me := _my_claim_index()
+	return _owner_of(me) if me >= 0 else -1
+
+
 ## Do we own this pixel? Everything is communal until the land is divided.
 func _claim_mine(r: int, c: int) -> bool:
 	if _claim_phase != "edit":
 		return true
-	var me := _my_claim_index()
+	var me := _my_owner_index()
 	return me >= 0 and _claim_own.size() > r * PX_W + c and _claim_own[r * PX_W + c] == me
 
 
-static func _claim_color(idx: int) -> Color:
+func _claim_color(idx: int) -> Color:
+	if idx >= 0 and idx < _claim_palette.size():
+		return Color(str(_claim_palette[idx]))
 	return Color(CLAIM_COLORS[idx % CLAIM_COLORS.size()])
 
 
@@ -458,6 +479,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 			if not grid.is_empty() and (not _playing or not _same_layers(grid["layers"])):
 				_adopt_size(grid["gs"])
 				_start_play(grid["layers"], [], false)
+		"fortState", "fortTick":
+			_apply_fort(Net.fort_state)
 		"gameEnded":
 			# Full wipe, grid included: everyone goes back to the lobby so the
 			# next map starts from a blank canvas.
@@ -514,6 +537,7 @@ func _start_play(layers: Array, edits: Array, announce: bool) -> void:
 	if not _playing:
 		_playing = true
 		_spawn_gameplay()
+	_apply_fort(Net.fort_state)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -794,6 +818,153 @@ func _deadzone_edge(at: Vector3) -> void:
 		band.position = at + Vector3(0, 0.08, 0) \
 			+ Basis(Vector3.UP, side * PI / 2.0) * Vector3(0, 0, -h)
 		_deadzone_node.add_child(band)
+
+
+# --- Fortwars: barriers and the ball zone -----------------------------------
+
+const BARRIER_SHADER := "
+shader_type spatial;
+render_mode unshaded, cull_disabled, blend_add, depth_draw_never;
+uniform vec4 tint : source_color = vec4(0.45, 0.85, 1.0, 1.0);
+varying vec3 wpos;
+void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+void fragment() {
+	// A 2 m grid scribed into the field, fading out with height
+	vec2 g = abs(fract(wpos.xz * 0.5 + wpos.y * 0.5) - 0.5);
+	float lines = 1.0 - smoothstep(0.0, 0.06, min(g.x, g.y));
+	float body = 0.10;
+	float fade = 1.0 - smoothstep(6.0, 40.0, wpos.y);
+	ALBEDO = tint.rgb;
+	ALPHA = (body + lines * 0.35) * fade;
+}
+"
+const BARRIER_BOTTOM := -18.0
+const BARRIER_TOP := 60.0
+const BARRIER_T := 0.5
+
+var _fort_node: Node3D          # barriers, while the build phase runs
+var _fort_phase := ""
+var _zone_node: Node3D          # the ball zone ring, once the battle is on
+var _fort_banner: Label
+
+
+## Called on every fortState/fortTick and once when the world spawns.
+func _apply_fort(data: Variant) -> void:
+	var phase := str(data.get("phase", "")) if data is Dictionary else ""
+	if phase != _fort_phase:
+		_fort_phase = phase
+		if _fort_node:
+			_fort_node.queue_free()
+			_fort_node = null
+		if _zone_node:
+			_zone_node.queue_free()
+			_zone_node = null
+		if _playing and phase == "build":
+			_build_barriers(data)
+		if _playing and phase == "battle":
+			_mark_zone(data.get("zone"))
+	if _playing and phase == "battle" and _zone_node == null and data is Dictionary:
+		_mark_zone(data.get("zone"))
+
+
+## Translucent walls along every border between territories, from well below
+## the basement to well above anything you could build. Runs of collinear cell
+## edges merge into one slab each, so a 64x64 board is a few hundred bodies,
+## not ten thousand.
+func _build_barriers(data: Dictionary) -> void:
+	var own := str(data.get("own", ""))
+	var gs: Variant = data.get("gs", [PX_W, PX_H])
+	var w := int(gs[0]) if gs is Array and gs.size() == 2 else PX_W
+	var h := int(gs[1]) if gs is Array and gs.size() == 2 else PX_H
+	if own.length() < w * h:
+		return
+	_fort_node = Node3D.new()
+	_fort_node.name = "FortBarriers"
+	add_child(_fort_node)
+	var shader := Shader.new()
+	shader.code = BARRIER_SHADER
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	var hx := w * 2.0
+	var hz := h * 2.0
+	var at := func(r: int, c: int) -> int:
+		return own.unicode_at(r * w + c) - 50
+	# Edges between horizontal neighbours run along Z; merge down each column
+	for c in range(w - 1):
+		var r := 0
+		while r < h:
+			if at.call(r, c) == at.call(r, c + 1):
+				r += 1
+				continue
+			var r0 := r
+			while r < h and at.call(r, c) != at.call(r, c + 1):
+				r += 1
+			var x := -hx + (c + 1) * 4.0
+			var z0 := -hz + r0 * 4.0
+			var z1 := -hz + r * 4.0
+			_barrier_slab(Vector3(x, 0.0, (z0 + z1) * 0.5), Vector3(BARRIER_T, 0.0, z1 - z0), mat)
+	# Edges between vertical neighbours run along X; merge across each row
+	for r in range(h - 1):
+		var c := 0
+		while c < w:
+			if at.call(r, c) == at.call(r + 1, c):
+				c += 1
+				continue
+			var c0 := c
+			while c < w and at.call(r, c) != at.call(r + 1, c):
+				c += 1
+			var z := -hz + (r + 1) * 4.0
+			var x0 := -hx + c0 * 4.0
+			var x1 := -hx + c * 4.0
+			_barrier_slab(Vector3((x0 + x1) * 0.5, 0.0, z), Vector3(x1 - x0, 0.0, BARRIER_T), mat)
+
+
+func _barrier_slab(centre: Vector3, footprint: Vector3, mat: Material) -> void:
+	var body := StaticBody3D.new()
+	var size := Vector3(footprint.x, BARRIER_TOP - BARRIER_BOTTOM, footprint.z)
+	var col := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = size
+	col.shape = box
+	body.add_child(col)
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = size
+	mi.mesh = bm
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	body.add_child(mi)
+	body.position = Vector3(centre.x, (BARRIER_TOP + BARRIER_BOTTOM) * 0.5, centre.z)
+	_fort_node.add_child(body)
+
+
+## The ball zone: a glowing ring on the ground where the game ball spawns and
+## returns to.
+func _mark_zone(zone: Variant) -> void:
+	if not zone is Dictionary:
+		return
+	_zone_node = Node3D.new()
+	add_child(_zone_node)
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	var r := float(zone.get("r", 6.0))
+	torus.inner_radius = r - 0.35
+	torus.outer_radius = r
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = Color(0.35, 0.75, 1.0, 0.7)
+	m.emission_enabled = true
+	m.emission = Color(0.35, 0.75, 1.0)
+	m.emission_energy_multiplier = 1.5
+	torus.material = m
+	ring.mesh = torus
+	ring.scale = Vector3(1.0, 0.15, 1.0)
+	_zone_node.add_child(ring)
+	_zone_node.global_position = Vector3(float(zone.get("x", 0.0)),
+		float(zone.get("y", 0.0)) + 0.15, float(zone.get("z", 0.0)))
 
 
 # --- World backstops --------------------------------------------------------
@@ -1406,7 +1577,7 @@ class PixelPainter extends Control:
 		var CELL := cell
 		var phase: String = owner_scene._claim_phase
 		var own: PackedInt32Array = owner_scene._claim_own
-		var me: int = owner_scene._my_claim_index()
+		var me: int = owner_scene._my_owner_index()
 		var fogging := phase == "edit"
 		var inset := maxf(1.0, CELL * 0.22)
 		for r in owner_scene.PX_H:
@@ -1442,7 +1613,7 @@ class PixelPainter extends Control:
 					draw_rect(rect.grow(-inset), Color(LAYER_FILL[active + 1]), false,
 						maxf(1.0, CELL * 0.12))
 		if phase == "claim":
-			_draw_claim(CELL, me)
+			_draw_claim(CELL, owner_scene._my_claim_index())
 		# Spawn zones: only ever your own. Where the others chose to land is
 		# theirs to know — the fog hides it during the edit phase, and this
 		# keeps hiding it through the moment the fog lifts and the map goes up.
@@ -1473,7 +1644,7 @@ class PixelPainter extends Control:
 		var w: int = owner_scene.PX_W
 		for idx in owner_scene._claim_trail:
 			var pi: int = owner_scene._claim_trail[idx]
-			var col: Color = owner_scene._claim_color(pi)
+			var col: Color = owner_scene._claim_color(owner_scene._owner_of(pi))
 			var rect := Rect2((int(idx) % w) * CELL, (int(idx) / w) * CELL, CELL - 1, CELL - 1)
 			draw_rect(rect, col.lightened(0.25))
 			draw_rect(rect.grow(-maxf(1.0, CELL * 0.28)), Color(1, 1, 1, 0.85))
@@ -1485,5 +1656,5 @@ class PixelPainter extends Control:
 			if pi < dead.size() and bool(dead[pi]):
 				continue   # out of the round: no head on the board
 			var crect := Rect2(int(p[1]) * CELL, int(p[0]) * CELL, CELL - 1, CELL - 1)
-			draw_rect(crect, owner_scene._claim_color(pi))
+			draw_rect(crect, owner_scene._claim_color(owner_scene._owner_of(pi)))
 			draw_rect(crect, Color.WHITE if pi == me else Color(0, 0, 0, 0.75), false, 2.0)

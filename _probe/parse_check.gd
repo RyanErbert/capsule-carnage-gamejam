@@ -12,7 +12,10 @@ const FILES := [
 	"res://UI/main_menu.gd", "res://UI/settings_panel.gd", "res://Items/item_controller.gd",
 	"res://Items/weapon_rig.gd", "res://Net/remote_player.gd", "res://Items/generators.gd",
 	"res://Items/vampire_gun.gd", "res://Items/vampire_beam.gd", "res://UI/settings.gd",
-	"res://Items/aura.gd",
+	"res://Items/aura.gd", "res://Scenes/creative.gd", "res://Items/terra_gun.gd",
+	"res://Scenes/campaign.gd", "res://Campaign/interactor.gd", "res://Campaign/npc.gd",
+	"res://Campaign/dialogue_box.gd", "res://Campaign/shop_panel.gd", "res://Campaign/quest_panel.gd",
+	"res://Campaign/loot_crate.gd", "res://Campaign/checkpoint.gd", "res://Campaign/quest_board.gd",
 ]
 
 

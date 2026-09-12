@@ -7,6 +7,7 @@ const readline = require('readline');
 const mapgen = require('./mapgen');
 const parametrics = require('./parametrics');
 const fortwars = require('./fortwars');
+const campaign = require('./campaign');
 const { LAYERS, GROUND } = mapgen;
 
 const app = express();
@@ -461,6 +462,8 @@ function checkDeath(id) {
     kills[hit.by] = (kills[hit.by] || 0) + 1;
     io.emit('kills', kills);
   }
+  if (isFort()) fortwars.onDeath(id, pos, hit ? hit.by : null);
+  if (isCampaign() && hit && hit.by) campaign.onKill(hit.by);
   delete lastHit[id];
   // The death blast damages everyone nearby (chain deaths welcome).
   explosionDamage(pos, id, 'blast', id);
@@ -747,6 +750,47 @@ setInterval(() => {
 // --- Oddball state ---
 let holderID = null;
 const scores = {};
+
+// Fortwars borrows the world state it scores against
+fortwars.init({
+  io, players, scores, readyIds,
+  isDead: (id) => isDead(id),
+  setAura: (id, kind) => setAura(id, kind),
+  pixelTop, surfaceY, inDeadzone, sysMsg,
+  activeGenerators
+});
+function pushFort() { io.emit('fortState', fortwars.snapshot()); }
+function isFort() { return gameSettings.mode === 'fortwars'; }
+
+// Campaign borrows the same: it only needs to know who is who and to talk
+campaign.init({ io, players, sysMsg });
+function isCampaign() { return gameSettings.mode === 'campaign'; }
+
+// Where a placement is going, as [x, z] pairs, whatever shape the message is
+function placePoints(m) {
+  if (!m || typeof m !== 'object') return [];
+  if (Array.isArray(m.nodes)) return m.nodes.map(n => [+n.x || 0, +n.z || 0]);
+  const out = [];
+  if (typeof m.x === 'number') out.push([m.x, +m.z || 0]);
+  if (m.a && typeof m.a.x === 'number') out.push([m.a.x, +m.a.z || 0]);
+  if (m.b && typeof m.b.x === 'number') out.push([m.b.x, +m.b.z || 0]);
+  return out;
+}
+// Fortwars build phase: nothing goes down on ground your team didn't win
+function fortBlocked(id, m) {
+  if (!isFort() || fortwars.state.phase !== 'build') return false;
+  return placePoints(m).some(([x, z]) => !fortwars.mayBuild(id, x, z));
+}
+
+// Fortwars clock: the build phase runs down, the battle scores, and a team
+// that reaches the limit ends the round.
+setInterval(() => {
+  if (!isFort() || !fortwars.state.phase) return;
+  const win = fortwars.tick(gameSettings.teamLimit);
+  io.emit('fortTick', fortwars.tickPayload());
+  if (win) gameOver(`${win.toUpperCase()} TEAM WINS`, { team: win });
+}, 1000);
+
 let tagCooldownUntil = 0;
 const TAG_COOLDOWN_MS = 4000;
 
@@ -860,6 +904,8 @@ function endGame() {
   io.emit('kills', kills);
   holderID = null;
   io.emit('holderChanged', holderID);
+  fortwars.reset();
+  io.emit('fortState', null);
   readyIds.clear();
   terrainEdits = [];
   creativeLayers = null;
@@ -997,11 +1043,18 @@ function applyEditVote(kind) {
   clearStartVote();
   creativeLayers = paintLayers || defaultLayers();
   terrainEdits = [];
+  // The territory outlives the claim: Fortwars walls and scores by it
+  if (isFort() && claim) fortwars.adoptBoard(claim.owner, claim.w, claim.h);
   stopClaim();
   io.emit('creativeGrid', { layers: creativeLayers, gs: gridShape() });
   autoPlaceStructures();    // structures first: they carry the item pedestals
   autoPopulatePedestals();
   autoPlaceGenerator();
+  if (isFort()) {
+    fortwars.startBuild(gameSettings.buildMs);
+    pushFort();
+    sysMsg(`Build phase: ${Math.round(gameSettings.buildMs / 60000)} minutes behind the barriers.`);
+  }
 }
 
 // Scatter a few wave-function-collapsed compounds (Items/wfc.gd) across the
@@ -1109,6 +1162,14 @@ function claimMs(w, h) {
 
 function claimIdx(r, c) { return r * claim.w + c; }
 
+// Who a snake's ground belongs to on the board. Every mode but Fortwars: the
+// snake itself. Fortwars: its TEAM, so two teammates paint one territory.
+function ownerIdxOf(pi) {
+  if (!isFort()) return pi;
+  const id = claim.ids[pi];
+  return fortwars.TEAMS.indexOf(fortwars.teamOf(id) || fortwars.assign(id));
+}
+
 // One char per cell, '0' = edge, '1' = unclaimed, '2'+ = player index. A 96x96
 // board is 9 KB of plain text instead of a 25 KB array of numbers.
 function claimBoard() {
@@ -1126,6 +1187,9 @@ function claimSnapshot() {
     own: claimBoard(),
     pos: claim.ids.map(id => claim.pos[id] || [-1, -1]),
     dead: claim.ids.map(id => !id || !!claim.dead[id]),
+    // Which board index each snake paints (its team, in Fortwars)
+    oidx: claim.ids.map((id, pi) => id ? ownerIdxOf(pi) : -1),
+    palette: isFort() ? [fortwars.COLORS.red, fortwars.COLORS.blue] : null,
     trail: claimTrail(),
     // Milliseconds remaining, not a wall-clock deadline: client clocks drift.
     t: Math.max(0, claim.endsAt - Date.now())
@@ -1203,10 +1267,11 @@ function joinClaim(id) {
     ? [Math.sign(dr) || 1, 0] : [0, Math.sign(dc) || 1];
   claim.dead[id] = false;
   const pi = claim.ids.indexOf(id);
+  const oi = ownerIdxOf(pi);
   for (let r = best[0] - HOME_R; r <= best[0] + HOME_R; r++)
     for (let c = best[1] - HOME_R; c <= best[1] + HOME_R; c++) {
       if (r < 0 || c < 0 || r >= claim.h || c >= claim.w) continue;
-      if (claim.owner[r * claim.w + c] === FREE) claim.owner[r * claim.w + c] = pi;
+      if (claim.owner[r * claim.w + c] === FREE) claim.owner[r * claim.w + c] = oi;
     }
 }
 
@@ -1251,11 +1316,12 @@ function livingSnakes() {
 // plot and back into it enclose the ground it went around.
 function closeLoop(pi) {
   const { w, h, owner, trail } = claim;
+  const oi = ownerIdxOf(pi);
   let took = 0;
   for (let i = 0; i < trail.length; i++) {
     if (trail[i] !== pi) continue;
     trail[i] = -1;
-    owner[i] = pi;
+    owner[i] = oi;
     took++;
   }
   if (!took) return 0;
@@ -1282,7 +1348,7 @@ function closeLoop(pi) {
   }
   for (let i = 0; i < owner.length; i++) {
     if (owner[i] !== FREE || outside[i]) continue;
-    owner[i] = pi;
+    owner[i] = oi;
     took++;
   }
   return took;
@@ -1311,6 +1377,11 @@ function claimTick() {
     if (nr < 0 || nc < 0 || nr >= claim.h || nc >= claim.w) continue;
     const ni = nr * claim.w + nc;
     const hit = claim.trail[ni];
+    // A teammate's trail is not a wall: you slide over it and lay nothing.
+    if (hit >= 0 && hit !== pi && ownerIdxOf(hit) === ownerIdxOf(pi)) {
+      claim.pos[id] = [nr, nc];
+      continue;
+    }
     if (hit >= 0 && hit !== pi) {
       // Cut someone off mid-loop: they're out of the round, and the clock
       // gives you fifteen more seconds to spend on the board. Alone out there,
@@ -1325,7 +1396,7 @@ function claimTick() {
     // Only LAND YOU ALREADY OWN closes the loop. A live trail is not ground
     // yet — running back over your own is inert, and anyone else's territory
     // is a neutral crossing that leaves no trail behind.
-    if (o === pi) {
+    if (o === ownerIdxOf(pi)) {
       if (closeLoop(pi) > 0) board = true;
     } else if (o === FREE && claim.trail[ni] < 0) {
       claim.trail[ni] = pi;
@@ -1355,6 +1426,11 @@ function endClaim() {
   io.emit('spawnZones', spawnZones);
   io.emit('claimState', claimSnapshot());
   clearInterval(claimTimer);
+  if (isFort()) {
+    // No painter: the build phase is played in the world, behind barriers.
+    applyEditVote('generate');
+    return;
+  }
   claimTimer = setInterval(() => {
     if (!claim || claim.phase !== 'edit') return;
     if (Date.now() >= claim.endsAt) applyEditVote('generate');
@@ -1364,7 +1440,8 @@ function endClaim() {
 // "If a player has no tiles, a small circular region is gifted to them."
 function giftIfLandless(pi) {
   const { w, h, owner } = claim;
-  if (owner.includes(pi)) return;
+  const oi = ownerIdxOf(pi);
+  if (owner.includes(oi)) return;
   let best = null, bestScore = -1;
   for (let tries = 0; tries < 400; tries++) {
     const r = GIFT_R + 1 + Math.floor(Math.random() * Math.max(1, h - GIFT_R * 2 - 2));
@@ -1379,7 +1456,7 @@ function giftIfLandless(pi) {
   if (!best) return;
   for (let dr = -GIFT_R; dr <= GIFT_R; dr++)
     for (let dc = -GIFT_R; dc <= GIFT_R; dc++)
-      if (dr * dr + dc * dc <= GIFT_R * GIFT_R) owner[(best[0] + dr) * w + (best[1] + dc)] = pi;
+      if (dr * dr + dc * dc <= GIFT_R * GIFT_R) owner[(best[0] + dr) * w + (best[1] + dc)] = oi;
 }
 
 // A spawn inside your own land, as deep into it as the shape allows. Every
@@ -1388,15 +1465,16 @@ function giftIfLandless(pi) {
 function claimSpawnFor(id) {
   const pi = claim.ids.indexOf(id);
   if (pi < 0 || spawnZones[id]) return;
+  const oi = ownerIdxOf(pi);
   let best = null, bestScore = -1;
   for (let r = 3; r < claim.h - 3; r++) {
     for (let c = 3; c < claim.w - 3; c++) {
-      if (claim.owner[r * claim.w + c] !== pi || !zoneFree(r, c, id)) continue;
+      if (claim.owner[r * claim.w + c] !== oi || !zoneFree(r, c, id)) continue;
       // Prefer a pixel whose whole 5x5 deadzone block is on home ground
       let own = 0;
       for (let dr = -2; dr <= 2; dr++)
         for (let dc = -2; dc <= 2; dc++)
-          if (claim.owner[(r + dr) * claim.w + (c + dc)] === pi) own++;
+          if (claim.owner[(r + dr) * claim.w + (c + dc)] === oi) own++;
       if (own > bestScore) { bestScore = own; best = [r, c]; }
     }
   }
@@ -1410,7 +1488,7 @@ function claimSpawnFor(id) {
 function mayEdit(id, r, c) {
   if (!claim || claim.phase !== 'edit') return true;
   const pi = claim.ids.indexOf(id);
-  return pi >= 0 && claim.owner[r * claim.w + c] === pi;
+  return pi >= 0 && claim.owner[r * claim.w + c] === ownerIdxOf(pi);
 }
 
 // Clients send the whole canvas per stroke burst, so the guard is a diff:
@@ -1487,6 +1565,7 @@ function gameOver(text, extra = {}) {
 function canHurt(byId, targetId) {
   if (!players[targetId]) return false;
   if (byId === targetId) return true;
+  if (isCampaign()) return false;          // co-op: friends are not targets
   if (!gameSettings.pvp) return false;
   if (gameSettings.mode === 'fortwars') return fortwars.canHurt(byId, targetId);
   return true;
@@ -1545,6 +1624,7 @@ io.on('connection', (socket) => {
   }
   if (paintLayers) socket.emit('creativePaint', { layers: paintLayers, gs: gridShape() });
   if (claim) socket.emit('claimState', claimSnapshot());
+  if (isFort() && fortwars.state.phase) socket.emit('fortState', fortwars.snapshot());
   socket.emit('spawnZones', spawnZones);
   socket.emit('hello', { id: socket.id });
   socket.emit('gameSettings', gameSettings);
@@ -1563,6 +1643,7 @@ io.on('connection', (socket) => {
       return;
     }
     editors.add(socket.id);
+    if (isFort()) { fortwars.assign(socket.id); pushFort(); }
     pushPresence();
     if (startVote) pushStartVote();   // a latecomer is a vote still outstanding
     // First client to reach the creator opens the land grab, so the board is
@@ -1593,6 +1674,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('requestStart', () => {
+    // The campaign has no map to make: the world is the client's, so START is
+    // just "go there", whoever is already in it.
+    if (isCampaign()) {
+      socket.emit('enterCampaign');
+      return;
+    }
     // Something LIVE to join: a land grab, people sculpting, or a running game.
     // A finished round's leftover map is none of those — it's debris, and
     // treating it as a session to join is what used to drop the second player
@@ -1737,6 +1824,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeCastle', (c) => {
+    if (fortBlocked(socket.id, c)) return;
     if (!c || !Array.isArray(c.nodes) || c.nodes.length < 1) return;
     const kind = c.kind === 'tower' ? 'tower' : 'wall';
     if (kind === 'wall' && c.nodes.length < 2) return;
@@ -1780,11 +1868,13 @@ io.on('connection', (socket) => {
   // payload and none of them can disagree about what is standing there.
 
   socket.on('placeParametric', (msg) => {
+    if (fortBlocked(socket.id, msg)) return;
     const rec = parametrics.place(msg, nameOf(socket.id));
     if (rec) io.emit('parametricPlaced', rec);
   });
 
   socket.on('updateParametric', (msg) => {
+    if (msg && fortBlocked(socket.id, msg.nodes ? msg : parametrics.active.find(r => r.id === msg.id))) return;
     const rec = parametrics.update(msg);
     if (rec) io.emit('parametricUpdated', rec);
   });
@@ -1821,6 +1911,7 @@ io.on('connection', (socket) => {
 
   // --- NPC turrets ---
   socket.on('placeTurret', (t) => {
+    if (fortBlocked(socket.id, t)) return;
     if (!t || typeof t.x !== 'number') return;
     const turret = {
       id: (typeof t.id === 'string' && t.id) ? t.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
@@ -1855,6 +1946,7 @@ io.on('connection', (socket) => {
 
   // --- Critter flocks ---
   socket.on('placeFlock', (f) => {
+    if (fortBlocked(socket.id, f)) return;
     if (!f || typeof f.x !== 'number') return;
     const flock = {
       id: (typeof f.id === 'string' && f.id) ? f.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
@@ -1897,6 +1989,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeVehicle', (v) => {
+    if (fortBlocked(socket.id, v)) return;
     if (!v || !['ghost', 'drill', 'crowbot', 'ratbot'].includes(v.kind)) return;
     const veh = {
       id: (typeof v.id === 'string' && v.id) ? v.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
@@ -2000,6 +2093,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeSpawn', (s) => {
+    if (fortBlocked(socket.id, s)) return;
     if (!s || typeof s.x !== 'number') return;
     const sp = {
       id: (typeof s.id === 'string' && s.id) ? s.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
@@ -2084,6 +2178,7 @@ io.on('connection', (socket) => {
 
   socket.on('terrainEdit', (e) => {
     if (!e || typeof e.x !== 'number' || typeof e.y !== 'number' || typeof e.z !== 'number') return;
+    if (isFort() && !fortwars.mayBuild(socket.id, +e.x, +e.z)) return;
     const edit = {
       x: +e.x, y: +e.y, z: +e.z,
       r: Math.min(Math.abs(+e.r) || 3, 12),
@@ -2136,7 +2231,9 @@ io.on('connection', (socket) => {
       shape: data.shape || 'box',
       skinColor: color,
       skinImage: typeof data.skinImage === 'string' ? data.skinImage.slice(0, 500) : '',
-      model: typeof data.model === 'string' ? data.model : 'none'
+      model: typeof data.model === 'string' ? data.model : 'none',
+      team: isFort() ? fortwars.assign(socket.id) : null,
+      aura: ''
     };
     scores[socket.id] = startingScore();
     readyIds.add(socket.id);
@@ -2164,6 +2261,11 @@ io.on('connection', (socket) => {
     socket.emit('currentGenerators', activeGenerators);
     socket.emit('currentTurrets', activeTurrets);
     socket.emit('currentFlocks', activeFlocks);
+    if (isFort()) pushFort();
+    if (isCampaign()) {
+      campaign.pushSheet(socket.id);
+      socket.emit('campaignWorld', campaign.worldState());
+    }
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
     socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
 
@@ -2237,6 +2339,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placePedestal', (pos) => {
+    if (fortBlocked(socket.id, pos)) return;
     const id = (typeof pos.id === 'string' && pos.id) ? pos.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5));
     const ped = { ...pos, id, currentItem: null, spawnTime: 0 };
     pedestals.push(ped);
@@ -2267,11 +2370,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeTeleporter', (t) => {
+    if (fortBlocked(socket.id, t)) return;
     activeTeleporters.push(t);
     io.emit('teleporterPlaced', t);
   });
 
   socket.on('placeBuild', (b) => {
+    if (fortBlocked(socket.id, b)) return;
     const build = { ...b, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
     activeBuilds.push(build);
     io.emit('buildPlaced', build);
@@ -2286,6 +2391,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeChannel', (c) => {
+    if (fortBlocked(socket.id, c)) return;
     if (!c || !Array.isArray(c.nodes) || c.nodes.length < 2) return;
     const channel = {
       id: (typeof c.id === 'string' && c.id) ? c.id : (Date.now().toString(36) + Math.random().toString(36).substr(2)),
@@ -2305,6 +2411,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeModel', (m) => {
+    if (fortBlocked(socket.id, m)) return;
     if (!m || typeof m.model !== 'string' || !m.model.endsWith('.glb')) return;
     const model = {
       model: m.model,
@@ -2326,6 +2433,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placePad', (pad) => {
+    if (fortBlocked(socket.id, pad)) return;
     const p = { ...pad, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
     activePads.push(p);
     io.emit('padPlaced', p);
@@ -2442,6 +2550,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placeGenerator', (g) => {
+    if (fortBlocked(socket.id, g)) return;
     if (!g || typeof g.x !== 'number') return;
     const gen = {
       id: (typeof g.id === 'string' && g.id) ? g.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5)),
@@ -2488,7 +2597,7 @@ io.on('connection', (socket) => {
     if (gen.holder && gen.holder !== socket.id) return;
     if (Math.hypot(gen.x - me.x, gen.y - me.y, gen.z - me.z) > ABSORB_REACH) return;
     if (gen.game) {
-      if (gameSettings.mode === 'fortwars') fortwars.pickUp(socket.id, gen, io, players, setAura);
+      if (isFort()) fortwars.pickUp(socket.id, gen);
       return;
     }
     activeGenerators.splice(activeGenerators.indexOf(gen), 1);
@@ -2513,10 +2622,12 @@ io.on('connection', (socket) => {
     // holds it — that's the physics drop right after placement/death.
     if (!gen || (gen.holder !== socket.id && !(gen.holder == null && gen.owner === socket.id))) return;
     gen.x = +d.x || 0; gen.y = +d.y || 0; gen.z = +d.z || 0;
+    if (gen.game) fortwars.ballMoved(gen.x, gen.y, gen.z);
     socket.broadcast.emit('generatorMoved', { id: gen.id, x: gen.x, y: gen.y, z: gen.z });
   });
 
   socket.on('placeMine', (pos) => {
+    if (fortBlocked(socket.id, pos)) return;
     const mine = { ...pos, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
     activeMines.push(mine);
     io.emit('minePlaced', mine);
@@ -2551,6 +2662,8 @@ io.on('connection', (socket) => {
     if (idx !== -1) {
       const coin = activeCoins.splice(idx, 1)[0];
       scores[socket.id] = (scores[socket.id] || 0) + coin.value;
+      if (isFort()) fortwars.onCoin(socket.id, coin.value);
+      if (isCampaign()) campaign.addCoins(socket.id, coin.value);
       io.emit('coinCollected', coinId);
       io.emit('scores', scores);
     }
@@ -2562,6 +2675,27 @@ io.on('connection', (socket) => {
       pedestals.splice(idx, 1);
       io.emit('pedestalRemoved', id);
     }
+  });
+
+  // --- Campaign: crates, quests, the shop -------------------------------
+  socket.on('openCrate', (cid) => {
+    if (!isCampaign() || !players[socket.id] || isDead(socket.id)) return;
+    campaign.openCrate(socket.id, cid);
+  });
+  socket.on('questAccept', (qid) => {
+    if (!isCampaign() || !players[socket.id]) return;
+    if (campaign.accept(socket.id, String(qid))) {
+      const q = campaign.questById(String(qid));
+      sysMsg(`${nameOf(socket.id)} took on "${q ? q.title : qid}"`);
+    }
+  });
+  socket.on('questReach', (target) => {
+    if (!isCampaign() || !players[socket.id] || typeof target !== 'string') return;
+    campaign.progress(socket.id, 'reach', 1, target);
+  });
+  socket.on('shopBuy', (item) => {
+    if (!isCampaign() || !players[socket.id] || typeof item !== 'string') return;
+    if (campaign.buy(socket.id, item)) sysMsg(`${nameOf(socket.id)} bought a ${item.replace('_', ' ')}`);
   });
 
   socket.on('chat', (text) => {
@@ -2623,6 +2757,10 @@ io.on('connection', (socket) => {
     console.log(`Player disconnected: ${socket.id}`);
     const wasInGame = readyIds.has(socket.id);
     const leftName = players[socket.id] ? players[socket.id].name : null;
+    if (isFort()) {
+      const lp = players[socket.id];
+      fortwars.forget(socket.id, lp ? { x: lp.x, y: lp.y, z: lp.z } : null);
+    }
     delete players[socket.id];
     delete scores[socket.id];
     delete kills[socket.id];
@@ -2648,6 +2786,7 @@ io.on('connection', (socket) => {
     delete profiles[socket.id];
     editors.delete(socket.id);
     pushPresence();
+    if (isFort()) pushFort();
     checkStartVote();       // one fewer holdout can settle a running poll
     if (startVote) pushStartVote();
     if (claim) { leaveClaim(socket.id); io.emit('claimState', claimSnapshot()); }

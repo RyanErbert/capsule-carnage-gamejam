@@ -621,6 +621,9 @@ func _carve_at(pos: Vector3) -> void:
 	if t == null:
 		_status.text = "no terrain"
 		return
+	if not Net.fort_may_build(pos):
+		_status.text = "not your ground"
+		return
 	var radius: float = CARVE_SIZES[_carve_size]
 	var s := -1.0 if _tool == "dig" else 1.0
 	var hit: bool = t.smooth_brush(pos, radius, CARVE_STRENGTH) if _tool == "smooth" 		else t.apply_brush(pos, radius, s, CARVE_STRENGTH)

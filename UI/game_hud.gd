@@ -39,6 +39,8 @@ var _gear_btn: Button
 var _health_label: Label
 var _death_label: Label
 var _game_over := false        # the round is decided; the banner owns the label
+var _fort_bar: RichTextLabel    # Fortwars: RED 120  BUILD 9:41  BLUE 80, top centre
+var _wallet: RichTextLabel      # Campaign: coins and the quests you're on, top left
 var _last_hp := -1
 var _chat_history: Array = []   # bbcode rows, oldest first
 var _chat_scroll: PanelContainer
@@ -71,6 +73,8 @@ func _ready() -> void:
 	_build_conn_pill()
 	_build_secondary()
 	_build_slayer_hud()
+	_build_fort_bar()
+	_build_wallet()
 	_build_scrollback()
 	_build_vote_row()
 	_refresh_vote(Net.end_vote)
@@ -298,6 +302,14 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_death_label.add_theme_color_override("font_color", Color("#ffd54a"))
 				_death_label.visible = true
 				_game_over = true
+		"fortState", "fortTick":
+			_refresh_fort()
+			if sync_node:
+				_refresh(sync_node.scores)
+		"campaignSheet", "campaignWorld":
+			_refresh_wallet()
+		"campaignDenied":
+			_add_system_row("not enough coins")
 		"gameSettings":
 			# (the settings panel wires itself to this event)
 			_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
@@ -935,6 +947,9 @@ func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> vo
 		who.text = ("[IT] " if (row[0] == holder and not slayer) else "") + sync_node.name_of(row[0])
 		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		who.add_theme_font_size_override("font_size", 16)
+		var team_col := _team_color(row[0])
+		if team_col != Color.TRANSPARENT:
+			who.add_theme_color_override("font_color", team_col)
 		line.add_child(who)
 		var n := Label.new()
 		n.text = str(row[1])
@@ -951,6 +966,107 @@ func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> vo
 		p.add_theme_color_override("font_color", _ping_color(ms))
 		line.add_child(p)
 		_scoreboard_rows.add_child(line)
+
+
+## A player's Fortwars team colour, or TRANSPARENT outside Fortwars.
+static func _team_color(id: String) -> Color:
+	var fs: Variant = Net.fort_state
+	if not fs is Dictionary:
+		return Color.TRANSPARENT
+	var teams: Variant = fs.get("teams", {})
+	var colors: Variant = fs.get("colors", {})
+	if not teams is Dictionary or not colors is Dictionary or not teams.has(id):
+		return Color.TRANSPARENT
+	return Color(str(colors.get(teams[id], "#ffffff")))
+
+
+## Fortwars readout, top centre: both team scores with the phase and its clock
+## between them. Hidden in every other mode.
+func _build_fort_bar() -> void:
+	_fort_bar = RichTextLabel.new()
+	_fort_bar.bbcode_enabled = true
+	_fort_bar.fit_content = true
+	_fort_bar.scroll_active = false
+	_fort_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fort_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_fort_bar.offset_left = -220
+	_fort_bar.offset_right = 220
+	_fort_bar.offset_top = 10
+	_fort_bar.offset_bottom = 40
+	_fort_bar.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_fort_bar.add_theme_font_size_override("normal_font_size", 22)
+	_fort_bar.add_theme_font_size_override("bold_font_size", 22)
+	_fort_bar.add_theme_color_override("font_outline_color", Color.BLACK)
+	_fort_bar.add_theme_constant_override("outline_size", 8)
+	_fort_bar.visible = false
+	add_child(_fort_bar)
+	_refresh_fort()
+
+
+func _refresh_fort() -> void:
+	if _fort_bar == null:
+		return
+	var fs: Variant = Net.fort_state
+	if not fs is Dictionary or str(fs.get("phase", "")) == "":
+		_fort_bar.visible = false
+		return
+	_fort_bar.visible = true
+	var score: Dictionary = fs.get("score", {}) if fs.get("score") is Dictionary else {}
+	var colors: Dictionary = fs.get("colors", {}) if fs.get("colors") is Dictionary else {}
+	var phase := str(fs.get("phase", ""))
+	var mid := "BATTLE"
+	if phase == "build":
+		var left := int(fs.get("t", 0)) / 1000
+		mid = "BUILD  %d:%02d" % [left / 60, left % 60]
+	var mine := Net.fort_team()
+	_fort_bar.text = "[center][color=%s]RED %d[/color]    %s    [color=%s]BLUE %d[/color]%s[/center]" % [
+		str(colors.get("red", "#ff6b5e")), int(score.get("red", 0)), mid,
+		str(colors.get("blue", "#5ea8ff")), int(score.get("blue", 0)),
+		("\n[font_size=14]you are %s[/font_size]" % mine.to_upper()) if mine != "" else ""]
+
+
+## Campaign readout, under the grapple box: your coins, then every quest you
+## are on with its count. Hidden in every other mode.
+func _build_wallet() -> void:
+	_wallet = RichTextLabel.new()
+	_wallet.bbcode_enabled = true
+	_wallet.fit_content = true
+	_wallet.scroll_active = false
+	_wallet.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_wallet.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_wallet.offset_left = 12
+	_wallet.offset_top = 76
+	_wallet.offset_right = 300
+	_wallet.offset_bottom = 200
+	_wallet.add_theme_font_size_override("normal_font_size", 16)
+	_wallet.add_theme_color_override("font_outline_color", Color.BLACK)
+	_wallet.add_theme_constant_override("outline_size", 6)
+	_wallet.visible = false
+	add_child(_wallet)
+	_refresh_wallet()
+
+
+func _refresh_wallet() -> void:
+	if _wallet == null:
+		return
+	var sheet: Variant = Net.campaign_sheet
+	if str(Net.game_settings.get("mode", "")) != "campaign" or not sheet is Dictionary:
+		_wallet.visible = false
+		return
+	_wallet.visible = true
+	var lines: Array = ["[color=#ffd54a]◎ %d[/color]" % int(sheet.get("coins", 0))]
+	var world: Variant = Net.campaign_world
+	var quests: Array = world.get("quests", []) if world is Dictionary and world.get("quests") is Array else []
+	var mine: Dictionary = sheet.get("quests", {}) if sheet.get("quests") is Dictionary else {}
+	for q in quests:
+		if not q is Dictionary:
+			continue
+		var st: Variant = mine.get(str(q.get("id", "")))
+		if not st is Dictionary or bool(st.get("done", false)):
+			continue
+		lines.append("[color=#8ad4ff]%s[/color]  %d/%d" % [str(q.get("title", "")),
+			int(st.get("n", 0)), int(q.get("count", 1))])
+	_wallet.text = "\n".join(lines)
 
 
 ## Green under 80, amber to 150, red past it. A number alone makes you do the

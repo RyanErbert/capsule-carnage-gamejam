@@ -30,6 +30,14 @@ var creative_grid: Variant = null  # {layers: [4 x 32-int bitmasks]}
 var terrain_edits: Array = []
 var paint_rows: Variant = null  # in-progress editor canvas, same layered shape
 var game_settings: Dictionary = {}  # server-authoritative global settings
+## Fortwars round state (server/fortwars.js snapshot): phase, teams, scores,
+## the ball, and the territory board the barriers are built from. null
+## outside Fortwars.
+var fort_state: Variant = null
+## Campaign: my character (coins, quests) and the shared world (open crates,
+## the quest list, shop prices). null outside the campaign.
+var campaign_sheet: Variant = null
+var campaign_world: Variant = null
 var spawn_points: Array = []        # placed spawn markers ({id,x,y,z})
 var spawn_zones: Dictionary = {}    # socket id -> [r, c] claimed in the editor
 var claim_state: Variant = null     # Xonix land-grab board, if one is running
@@ -248,6 +256,31 @@ const PING_SMOOTH := 0.4      # new sample's share, so one bad packet is not the
 var _ping_accum := 0.0
 
 
+## My side in Fortwars ("red" | "blue"), or "" outside it.
+func fort_team() -> String:
+	if not fort_state is Dictionary:
+		return ""
+	var teams: Variant = fort_state.get("teams", {})
+	return str(teams.get(socket_id, "")) if teams is Dictionary else ""
+
+
+## Fortwars build phase: may I sculpt or build at this point? Anywhere, in
+## every other phase and mode; only on my team's ground behind the barriers.
+func fort_may_build(p: Vector3) -> bool:
+	if not fort_state is Dictionary or str(fort_state.get("phase", "")) != "build":
+		return true
+	var own := str(fort_state.get("own", ""))
+	var gs: Variant = fort_state.get("gs", [32, 32])
+	var w := int(gs[0]) if gs is Array and gs.size() == 2 else 32
+	var h := int(gs[1]) if gs is Array and gs.size() == 2 else 32
+	var c := int(floor((p.x + w * 2.0) / 4.0))
+	var r := int(floor((p.z + h * 2.0) / 4.0))
+	if r < 0 or c < 0 or r >= h or c >= w or r * w + c >= own.length():
+		return false
+	var mine := 0 if fort_team() == "red" else 1
+	return own.unicode_at(r * w + c) - 50 == mine
+
+
 func emit_event(event: String, data: Variant = null) -> void:
 	var payload: Array = [event]
 	if data != null:
@@ -352,8 +385,27 @@ func _handle_frame(frame: String) -> void:
 					claim_state = data
 				"gameSettings":
 					game_settings = data if data is Dictionary else {}
+				"fortState":
+					fort_state = data if data is Dictionary else null
+				"fortTick":
+					# The per-second slice: keep the board, refresh the numbers
+					if fort_state is Dictionary and data is Dictionary:
+						for k in data:
+							fort_state[k] = data[k]
+				"campaignSheet":
+					campaign_sheet = data if data is Dictionary else null
+				"campaignWorld":
+					campaign_world = data if data is Dictionary else null
+				"crateOpened":
+					if campaign_world is Dictionary and data is Dictionary:
+						var crates: Variant = campaign_world.get("crates", {})
+						if crates is Dictionary:
+							crates[str(data.get("id", ""))] = data.get("respawnMs", 120000)
 				"gameEnded":
 					# Full reset: the server wiped the field and the grid
+					fort_state = null
+					campaign_sheet = null
+					campaign_world = null
 					creative_grid = null
 					terrain_edits.clear()
 					paint_rows = null
