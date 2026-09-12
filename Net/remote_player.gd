@@ -33,6 +33,8 @@ var _beam_end := Vector3.ZERO
 var _beam_heat := 0.0
 var _beam_feeding := false
 var _beam_on := false
+var _aura: Node3D = null  # what they're wearing (Items/aura.gd)
+var _aura_kind := ""
 
 
 func setup(id: String, data: Dictionary) -> void:
@@ -59,6 +61,23 @@ func setup(id: String, data: Dictionary) -> void:
 		_shell.hold(load("res://Player/PL_bear.glb").instantiate(), 0.8)
 		add_child(_shell)
 	_name_label.text = player_name
+	_aura = load("res://Items/aura.gd").new()
+	add_child(_aura)
+	set_aura(str(data.get("aura", "")))
+
+
+## Swallowed a ball: motes and a cool cast, or the full electric-blue game
+## ball treatment with its pillar of light.
+func set_aura(kind: String) -> void:
+	_aura_kind = kind
+	if _aura:
+		_aura.set_kind(kind)
+	var Aura := load("res://Items/aura.gd")
+	var c: Color = Aura.tint_for(kind, _base_color)
+	if _cube:
+		_cube.set_color(c)
+	elif _shell and not _is_holder:
+		_shell.set_color(c)
 
 
 func apply_move(d: Dictionary) -> void:
@@ -199,7 +218,7 @@ func set_holder(holder: bool) -> void:
 		return
 	if _shell:
 		if not holder:
-			_shell.set_color(_base_color)
+			_shell.set_color(load("res://Items/aura.gd").tint_for(_aura_kind, _base_color))
 		return
 	if not holder and _mesh.material_override is StandardMaterial3D:
 		_mesh.material_override.emission_enabled = false

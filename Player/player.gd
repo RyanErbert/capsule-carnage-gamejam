@@ -144,6 +144,8 @@ var use_cube := false
 var smoothing := 1.0  # sent to the server; bear reads as a full sphere
 var _sprint_morph_t := 0.0
 var _shell: Node3D    # the glass marble, when we're not playing the cube
+var _aura: Node3D     # what we're wearing after swallowing a ball (Items/aura.gd)
+var aura_kind := ""
 
 @onready var _cube_visual: Node3D = get_node_or_null("CubeVisual")
 @onready var _capsule_logic: Node3D = get_node_or_null("CapsuleLogic")
@@ -185,6 +187,20 @@ func _ready() -> void:
 		_shell = load("res://Player/marble_shell.gd").new()
 		_shell.set_color(Settings.color)
 		_capsule_logic.add_child(_shell)
+	_aura = load("res://Items/aura.gd").new()
+	add_child(_aura)
+
+
+## Server says what we're wearing: '' | 'heal' | 'ball' (see Items/aura.gd).
+func set_aura(kind: String) -> void:
+	aura_kind = kind
+	if _aura:
+		_aura.set_kind(kind)
+	var c: Color = load("res://Items/aura.gd").tint_for(kind, Settings.color)
+	if use_cube and _cube_visual:
+		_cube_visual.set_color(c)
+	elif _shell:
+		_shell.set_color(c)
 
 
 ## Anything that takes the body out of your hands puts the world's floor back

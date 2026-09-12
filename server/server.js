@@ -464,20 +464,23 @@ function checkDeath(id) {
   delete lastHit[id];
   // The death blast damages everyone nearby (chain deaths welcome).
   explosionDamage(pos, id, 'blast', id);
-  // A tiny generator is left at the corpse (~30 energy, varying)
+  // Whatever they had swallowed is gone with them
+  if (players[id].pool) { players[id].pool = 0; setAura(id, ''); }
+  // A BALL is left at the corpse (~30 energy, varying): roll into it and its
+  // energy ticks into you as health (the 'heal' aura) until it's spent.
   const minis = activeGenerators.filter(g => g.mini);
   if (minis.length >= MAX_MINI_GENS) {
     const oldest = minis[0];
     activeGenerators.splice(activeGenerators.indexOf(oldest), 1);
     io.emit('generatorRemoved', oldest.id);
   }
-  const miniGen = {
-    id: 'gen-death-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+  const ball = {
+    id: 'ball-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
     x: pos.x, y: pos.y + 0.8, z: pos.z, holder: null, owner: id,
-    energy: 20 + Math.floor(Math.random() * 21), mini: true
+    energy: 20 + Math.floor(Math.random() * 21), mini: true, ball: true
   };
-  activeGenerators.push(miniGen);
-  io.emit('generatorPlaced', miniGen);
+  activeGenerators.push(ball);
+  io.emit('generatorPlaced', ball);
   io.emit('scores', scores);
   setTimeout(() => {
     delete deadUntil[id];
@@ -605,19 +608,35 @@ function autoPlaceGenerator() {
   io.emit('currentGenerators', activeGenerators);
 }
 
-// Heal +1 per 2 s while standing near a generator (Slayer only). Each heal
-// burns 1 energy from the generator used; an empty generator disappears.
+// What a body is wearing: '' | 'heal' (swallowed a ball, still ticking) |
+// 'ball' (carrying the Fortwars game ball). Broadcast on change, and it rides
+// on the player record so late joiners see it.
+function setAura(id, kind) {
+  if (!players[id] || (players[id].aura || '') === kind) return;
+  players[id].aura = kind;
+  io.emit('aura', { id, kind });
+}
+
+// Heal +1 per 2 s while standing near a generator, or while a swallowed
+// ball's pool still has energy in it (health modes only). Each heal burns 1
+// energy from the source; an empty generator disappears, an empty pool drops
+// the aura.
 setInterval(() => {
-  if (!gameSettings.slayer || activeGenerators.length === 0) return;
+  if (!gameSettings.slayer) return;
   let changed = false;
   const touched = new Set();
   for (const id of readyIds) {
     const p = players[id];
     if (!p || isDead(id)) continue;
-    // Overlapping rings STACK: park two cores together and heal twice as fast.
     let gained = 0;
+    if (p.pool > 0) {
+      p.pool -= 1;
+      gained += 1;
+      if (p.pool <= 0) { p.pool = 0; setAura(id, ''); }
+    }
+    // Overlapping rings STACK: park two cores together and heal twice as fast.
     for (const g of activeGenerators) {
-      if (g.energy <= 0) continue;
+      if (g.energy <= 0 || g.ball) continue;
       const dx = p.x - g.x, dy = p.y - g.y, dz = p.z - g.z;
       if (dx * dx + dy * dy + dz * dz <= GEN_HEAL_RANGE * GEN_HEAL_RANGE) {
         gained += 1;
@@ -2457,6 +2476,26 @@ io.on('connection', (socket) => {
     gen.holder = socket.id;
     gen.carry = carry;
     io.emit('generatorHolder', { id: gen.id, holder: gen.holder, carry });
+  });
+
+  // Roll into a ball and it's yours: a corpse ball's energy goes into your
+  // pool and heals you over time; the Fortwars game ball makes you its carrier.
+  const ABSORB_REACH = 3.2;
+  socket.on('absorbBall', (id) => {
+    const me = players[socket.id];
+    const gen = activeGenerators.find(g => g.id === id && g.ball);
+    if (!me || !gen || isDead(socket.id) || me.godmode) return;
+    if (gen.holder && gen.holder !== socket.id) return;
+    if (Math.hypot(gen.x - me.x, gen.y - me.y, gen.z - me.z) > ABSORB_REACH) return;
+    if (gen.game) {
+      if (gameSettings.mode === 'fortwars') fortwars.pickUp(socket.id, gen, io, players, setAura);
+      return;
+    }
+    activeGenerators.splice(activeGenerators.indexOf(gen), 1);
+    io.emit('generatorRemoved', gen.id);
+    me.pool = (me.pool || 0) + gen.energy;
+    setAura(socket.id, 'heal');
+    io.emit('absorbed', { id: socket.id, ball: gen.id, energy: gen.energy, pool: me.pool });
   });
 
   socket.on('releaseGenerator', (id) => {

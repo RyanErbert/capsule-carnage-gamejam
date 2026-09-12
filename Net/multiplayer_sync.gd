@@ -116,6 +116,14 @@ func _on_event(event: String, data: Variant) -> void:
 				var vid := str(data.get("id", ""))
 				if _remotes.has(vid):
 					_remotes[vid].set_beam(data)
+		"aura":
+			if data is Dictionary:
+				var aid := str(data.get("id", ""))
+				var kind := str(data.get("kind", ""))
+				if aid == self_id and player and player.has_method("set_aura"):
+					player.set_aura(kind)
+				elif _remotes.has(aid):
+					_remotes[aid].set_aura(kind)
 		"scores":
 			scores = data
 			scores_changed.emit(scores)

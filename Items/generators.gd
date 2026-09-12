@@ -28,6 +28,9 @@ const RELAY_INTERVAL := 0.1
 const CARRY_MOUNT := Vector3(0.0, -0.15, -2.5)   # rack point in vehicle space
 const CARRY_SNAP := 14.0      # how fast the core seats itself on the rack
 const NET_LERP := 8.0
+const ABSORB_RANGE := 1.35    # roll into a ball and it's yours
+const BALL_R := 0.45
+const GAME_BALL_R := 0.62
 const HEAL_RANGE := 4.5  # matches the server's GEN_HEAL_RANGE ring
 const LABEL_RANGE := 8.0 # energy readout only shows when you're right on it
 const HUM_DB := 0.0
@@ -149,7 +152,8 @@ func _add_gen(g: Variant) -> void:
 	if id == "" or _gens.has(id):
 		return
 	var mini := bool(g.get("mini", false))
-	var node := _make_generator_node(mini)
+	var ball := bool(g.get("ball", false))
+	var node := _make_ball_node(bool(g.get("game", false))) if ball else _make_generator_node(mini)
 	add_child(node)
 	var pos := Vector3(g.get("x", 0.0), g.get("y", 0.0), g.get("z", 0.0))
 	node.global_position = pos
@@ -163,6 +167,7 @@ func _add_gen(g: Variant) -> void:
 	lbl.outline_size = 10
 	lbl.modulate = Color(0.55, 1.0, 0.7)
 	lbl.position.y = 1.2 if mini else 1.8
+	lbl.visible = not ball
 	node.add_child(lbl)
 	_gens[id] = {
 		"node": node,
@@ -171,6 +176,9 @@ func _add_gen(g: Variant) -> void:
 		"net_pos": pos,
 		"label": lbl,
 		"ring": node.get_node("HealRing"),
+		"ball": ball,
+		"game": bool(g.get("game", false)),
+		"pending": 0.0,
 	}
 	# Fresh generators FALL: whoever placed it (or whose corpse dropped it)
 	# owns the physics drop and relays it — nobody's core hangs in the air.
@@ -216,6 +224,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	for id in _gens:
 		if _gens[id]["holder"] != "" and _gens[id]["holder"] != _self_id():
 			continue
+		if _gens[id]["ball"]:
+			continue   # balls are swallowed by touch, never roped
 		var d: float = _gens[id]["node"].global_position.distance_to(anchor.global_position)
 		if d < best_d:
 			best_d = d
@@ -339,6 +349,20 @@ func _physics_process(delta: float) -> void:
 		if _settle_t <= 0.0:
 			_finish_settle(_settle_id, true)
 
+	# Balls: roll into one and ask the server for it. Asked once, then left
+	# alone for a beat so a refused request doesn't spam.
+	if player and not player.dead and not player.godmode and player.vehicle == null:
+		for id in _gens:
+			var g: Dictionary = _gens[id]
+			if not g["ball"] or g["holder"] != "":
+				continue
+			g["pending"] = maxf(0.0, float(g["pending"]) - delta)
+			if float(g["pending"]) > 0.0:
+				continue
+			if g["node"].global_position.distance_to(player.global_position) < ABSORB_RANGE + (0.2 if g["game"] else 0.0):
+				g["pending"] = 1.0
+				Net.emit_event("absorbBall", id)
+
 	var relay_id := _held_id if _held_id != "" else _settle_id
 	if relay_id != "" and _gens.has(relay_id):
 		_relay_cd -= delta
@@ -410,7 +434,10 @@ func _update_gen_visuals() -> void:
 		var g: Dictionary = _gens[id]
 		var tethered: bool = g["holder"] != "" or id == _settle_id
 		var ring: Node3D = g["ring"]
-		ring.visible = not tethered
+		ring.visible = not tethered and not g["ball"]
+		# A carried game ball is INSIDE its carrier: the aura is what you see
+		if g["ball"]:
+			(g["node"] as Node3D).visible = g["holder"] == ""
 		# The ring is ground furniture, not part of the core: it's top-level so
 		# a rolling core can't tip it on its side.
 		ring.global_transform = Transform3D(
@@ -439,6 +466,8 @@ func _update_prompt() -> void:
 		var g: Dictionary = _gens[id]
 		if g["holder"] != "" and g["holder"] != _self_id():
 			continue
+		if g["ball"]:
+			continue
 		var node: Node3D = g["node"]
 		if node.global_position.distance_to(anchor.global_position) > (TOW_RANGE if towing else GRAB_RANGE):
 			continue
@@ -461,7 +490,7 @@ func _draw_ropes() -> void:
 	for id in _gens:
 		var g: Dictionary = _gens[id]
 		# A racked core has no rope to draw — it's sitting on the vehicle.
-		if g["holder"] == "" or g.get("carry", false):
+		if g["holder"] == "" or g.get("carry", false) or g["ball"]:
 			continue
 		var holder_pos: Vector3
 		if g["holder"] == _self_id():
@@ -552,6 +581,84 @@ func _make_generator_node(mini := false) -> RigidBody3D:
 	ring_r.top_level = true   # stays flat on the ground while the core rolls
 	root.add_child(ring_r)
 
+	return root
+
+
+## The ball: what a corpse leaves behind, and what Fortwars is played with. A
+## heavy-ish sphere with real friction, so it rolls when shoved but never gets
+## away from anyone -- nobody chases a ball down a hill. Glass over a glowing
+## core; the game ball is bigger and electric blue.
+func _make_ball_node(game := false) -> RigidBody3D:
+	var root := RigidBody3D.new()
+	var r := GAME_BALL_R if game else BALL_R
+	root.mass = MINI_MASS * (2.0 if game else 1.0)
+	root.freeze = true
+	root.linear_damp = 1.6
+	root.angular_damp = 2.2
+	var pm := PhysicsMaterial.new()
+	pm.friction = 1.0
+	pm.rough = true
+	pm.bounce = 0.08
+	root.physics_material_override = pm
+	var col := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = r
+	col.shape = shape
+	root.add_child(col)
+	var core_c := Color(0.35, 0.75, 1.0) if game else Color(0.4, 1.0, 0.6)
+	# Inner core
+	var core := MeshInstance3D.new()
+	var cs := SphereMesh.new()
+	cs.radius = r * 0.55
+	cs.height = r * 1.1
+	var cm := StandardMaterial3D.new()
+	cm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cm.albedo_color = core_c
+	cm.emission_enabled = true
+	cm.emission = core_c
+	cm.emission_energy_multiplier = 2.6 if game else 1.8
+	cs.material = cm
+	core.mesh = cs
+	root.add_child(core)
+	# Glass shell, so it reads as a ball and not a light
+	var shell := MeshInstance3D.new()
+	var ss := SphereMesh.new()
+	ss.radius = r
+	ss.height = r * 2.0
+	var sm := StandardMaterial3D.new()
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sm.albedo_color = Color(core_c.r, core_c.g, core_c.b, 0.3)
+	sm.roughness = 0.08
+	sm.metallic = 0.3
+	sm.rim_enabled = true
+	sm.rim = 0.8
+	sm.clearcoat_enabled = true
+	ss.material = sm
+	shell.mesh = ss
+	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(shell)
+	if game:
+		var light := OmniLight3D.new()
+		light.light_color = core_c
+		light.omni_range = 9.0
+		light.light_energy = 1.8
+		light.shadow_enabled = false
+		root.add_child(light)
+	var hum := AudioStreamPlayer3D.new()
+	var stream: AudioStreamOggVorbis = HumStream.duplicate()
+	stream.loop = true
+	hum.stream = stream
+	hum.volume_db = HUM_DB - (4.0 if game else 10.0)
+	hum.pitch_scale = 1.25 if game else 1.7
+	hum.unit_size = 6.0
+	hum.max_distance = 30.0 if game else 16.0
+	hum.autoplay = true
+	root.add_child(hum)
+	# Kept for the shared bookkeeping; never shown for a ball
+	var ring_r := MeshInstance3D.new()
+	ring_r.name = "HealRing"
+	ring_r.visible = false
+	root.add_child(ring_r)
 	return root
 
 
