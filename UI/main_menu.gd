@@ -13,7 +13,12 @@ const LEVELS := {
 	"testworld": "res://Scenes/testworld.tscn",
 	"creative": "res://Scenes/creative.tscn",
 	"campaign": "res://Scenes/campaign.tscn",
+	"glb": "res://Scenes/glb_level.tscn",
 }
+## Blender exports in res://maps/ show up as levels by file name. The
+## campaign's own world is not a deathmatch map.
+const MAPS_DIR := "res://maps"
+const NOT_LEVELS := ["campaign"]
 const MODES := ["slayer", "reversetag", "creative", "fortwars", "campaign"]
 const MODE_NAMES := ["Slayer", "Reverse Tag", "Creative", "Fortwars", "Campaign"]
 # Per-axis map size, mirroring the server's GRID_SIZES (pixels are 4 m)
@@ -151,6 +156,23 @@ func _refresh_status() -> void:
 	_join_btn.text = "JOIN GAME" if live else "START GAME"
 
 
+## Every .glb in res://maps/ that isn't the campaign world, by base name.
+static func _glb_maps() -> Array:
+	var out: Array = []
+	var dir := DirAccess.open(MAPS_DIR)
+	if dir == null:
+		return out
+	for f in dir.get_files():
+		# Exported projects list the .import stubs, not the sources
+		var fname := str(f).trim_suffix(".import")
+		if fname.ends_with(".glb"):
+			var base := fname.get_basename()
+			if not (base in NOT_LEVELS) and not (base in out):
+				out.append(base)
+	out.sort()
+	return out
+
+
 func _join() -> void:
 	if not Net.is_socket_connected() and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		return
@@ -164,6 +186,9 @@ func _join() -> void:
 	if (campaign or Settings.level == "creative") \
 			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		Net.emit_event("requestStart")
+		return
+	if str(Settings.level).begins_with("glb:"):
+		get_tree().change_scene_to_file(LEVELS["glb"])
 		return
 	get_tree().change_scene_to_file(LEVELS.get(Settings.level, LEVELS["creative"]))
 
@@ -296,10 +321,14 @@ func _build_ui() -> void:
 	settings_col.add_child(level_row)
 	var level_opt := OptionButton.new()
 	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var level_keys: Array = ["creative", "testworld"]
 	level_opt.add_item("Canyon World")
 	level_opt.add_item("Testworld")
-	level_opt.select(1 if Settings.level == "testworld" else 0)
-	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")
+	for map_name in _glb_maps():
+		level_keys.append("glb:" + map_name)
+		level_opt.add_item("Map: " + map_name.capitalize())
+	level_opt.select(maxi(0, level_keys.find(str(Settings.level))))
+	level_opt.item_selected.connect(func(i: int): Settings.level = str(level_keys[i]))
 	level_row.add_child(level_opt)
 	var map_gear := Button.new()
 	map_gear.text = "⚙"

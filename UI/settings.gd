@@ -26,7 +26,7 @@ var camera_zoom := 4.5         # chain length, local only (camera_rig.gd)
 ## ray moves the camera's GOAL and the camera eases toward it, so a wall
 ## appearing or vanishing glides instead of snapping. Local only.
 var camera_mode := "spring"
-var level := "creative"        # "creative" (default) | "testworld"
+var level := "creative"        # "creative" (default) | "testworld" | "glb:<name>" for res://maps/<name>.glb
 ## How the window opens. "maximized" fills the screen but keeps its border and
 ## title bar, which is what you want while building something and reading a
 ## second window beside it; "fullscreen" takes the display exclusively.
