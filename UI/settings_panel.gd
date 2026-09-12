@@ -1,16 +1,18 @@
 extends VBoxContainer
 
-## The gamemode's settings, shared by the lobby gear and the Build-mode gear
+## The gamemode's settings, shared by the lobby gear and the Creative-mode gear
 ## in the escape menu. Everything here is server-authoritative except the
 ## starting weapon, which is per-player: controls emit updateGameSetting and
 ## the panel re-reads whatever the server broadcasts back.
 ##
-## The server refuses these once a game is live unless the mode is Build.
+## The server refuses these once a game is live unless the mode is Creative
+## (the mode itself is frozen everywhere once a round is in motion).
 
 const Style := preload("res://UI/ui_style.gd")
 const Player := preload("res://Player/player.gd")
 const CameraRig := preload("res://Player/camera_rig.gd")
 const TOGGLES := [
+	["pvp", "PvP"],
 	["infiniteAmmo", "Infinite ammo"],
 	["selfAssign", "Creative (spawn items)"],
 	["pedestals", "Item pedestals"],
@@ -50,11 +52,25 @@ var _zoom: HSlider
 var _zoom_readout: Label
 
 
-## Mid-game outside Build mode: only the tuning sliders stay usable — the
+## Per-mode numbers: key, label, which modes show it, min, max, step, and the
+## factor between what the box shows and what the server stores (minutes vs
+## milliseconds for the build clock).
+const NUMBERS := [
+	["tagLimit", "Tag limit", ["reversetag", "creative"], 50, 5000, 50, 1.0],
+	["teamLimit", "Team score", ["fortwars"], 100, 10000, 100, 1.0],
+	["buildMs", "Build min", ["fortwars"], 1, 60, 1, 60000.0],
+]
+var _numbers: Dictionary = {}   # key -> SpinBox
+var _number_rows: Dictionary = {}
+
+
+## Mid-game outside Creative: only the tuning sliders stay usable — the
 ## server refuses everything else, so gray it out instead of lying.
 func set_tuning_only(on: bool) -> void:
 	for key in _checks:
 		_checks[key].disabled = on
+	for key in _numbers:
+		(_numbers[key] as SpinBox).editable = not on
 	if _weapon_btn:
 		_weapon_btn.disabled = on
 
@@ -69,6 +85,28 @@ func _ready() -> void:
 			Net.emit_event("updateGameSetting", {"key": entry[0], "value": on}))
 		add_child(check)
 		_checks[entry[0]] = check
+
+	for entry in NUMBERS:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		var lbl := Label.new()
+		lbl.text = entry[1]
+		lbl.custom_minimum_size = Vector2(90, 0)
+		lbl.add_theme_font_size_override("font_size", 16)
+		row.add_child(lbl)
+		var box := SpinBox.new()
+		box.min_value = float(entry[3])
+		box.max_value = float(entry[4])
+		box.step = float(entry[5])
+		box.focus_mode = Control.FOCUS_CLICK
+		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		box.value_changed.connect(func(v: float):
+			Net.emit_event("updateGameSetting",
+				{"key": entry[0], "value": v * float(entry[6])}))
+		row.add_child(box)
+		add_child(row)
+		_numbers[entry[0]] = box
+		_number_rows[entry[0]] = row
 
 	var weapon := OptionButton.new()
 	_weapon_btn = weapon
@@ -171,6 +209,13 @@ func apply(gs: Variant) -> void:
 		return
 	for key in _checks:
 		_checks[key].set_pressed_no_signal(bool(gs.get(key, false)))
+	var mode := str(gs.get("mode", "slayer"))
+	for entry in NUMBERS:
+		var box: SpinBox = _numbers[entry[0]]
+		(_number_rows[entry[0]] as Control).visible = mode in (entry[2] as Array)
+		var v := float(gs.get(entry[0], box.min_value * float(entry[6]))) / float(entry[6])
+		if not is_equal_approx(box.value, v):
+			box.set_value_no_signal(v)
 	for entry in SLIDERS:
 		# The server speaks in scales; the slider may show its reflection.
 		var scale := clampf(float(gs.get(entry[0], 1.0)),

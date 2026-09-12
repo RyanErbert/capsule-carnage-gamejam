@@ -9,6 +9,8 @@ const FILES := [
 	"res://Player/player.gd", "res://Terrain/voxel_terrain.gd",
 	"res://UI/god_menu.gd", "res://Items/parametrics.gd",
 	"res://Items/parametric/registry.gd", "res://Items/parametric/ops.gd",
+	"res://UI/main_menu.gd", "res://UI/settings_panel.gd", "res://Items/item_controller.gd",
+	"res://Items/weapon_rig.gd", "res://Net/remote_player.gd", "res://Items/generators.gd",
 ]
 
 

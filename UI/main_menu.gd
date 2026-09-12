@@ -3,7 +3,8 @@ extends Control
 ## Main menu / lobby, laid out like the web version's 2x2 lobby (§6.1):
 ## PLAYER | GAMEMODE on top, MAP | PLAYERS below, JOIN underneath. Gamemode
 ## settings live behind the gear and are server-authoritative — the server
-## freezes them once a game is running (except in Build mode).
+## freezes them once a game is running (except in Creative, where everything
+## but the mode itself stays live).
 ##
 ## While a game is live the background is a top-down view of the map being
 ## played, with everyone's position on it.
@@ -12,8 +13,8 @@ const LEVELS := {
 	"testworld": "res://Scenes/testworld.tscn",
 	"creative": "res://Scenes/creative.tscn",
 }
-const MODES := ["slayer", "sandbox", "build"]
-const MODE_NAMES := ["Slayer", "Sandbox", "Build"]
+const MODES := ["slayer", "reversetag", "creative", "fortwars", "campaign"]
+const MODE_NAMES := ["Slayer", "Reverse Tag", "Creative", "Fortwars", "Campaign"]
 # Per-axis map size, mirroring the server's GRID_SIZES (pixels are 4 m)
 const GRID_SIZES := [24, 32, 40, 48, 56, 64, 80, 96]
 # Generator passes, mirroring server/mapgen.js SCHEMES
@@ -290,7 +291,7 @@ func _build_ui() -> void:
 	settings_col.add_child(level_row)
 	var level_opt := OptionButton.new()
 	level_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	level_opt.add_item("Canyon Sandbox")
+	level_opt.add_item("Canyon World")
 	level_opt.add_item("Testworld")
 	level_opt.select(1 if Settings.level == "testworld" else 0)
 	level_opt.item_selected.connect(func(i: int): Settings.level = "testworld" if i == 1 else "creative")

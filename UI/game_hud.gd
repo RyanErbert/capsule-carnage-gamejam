@@ -37,6 +37,7 @@ var _settings_box: PanelContainer
 var _gear_btn: Button
 var _health_label: Label
 var _death_label: Label
+var _game_over := false        # the round is decided; the banner owns the label
 var _last_hp := -1
 var _chat_history: Array = []   # bbcode rows, oldest first
 var _chat_scroll: PanelContainer
@@ -289,6 +290,13 @@ func _on_net_event(event: String, data: Variant) -> void:
 					_refresh(sync_node.scores)
 		"gameEnded":
 			_add_system_row("Game ended.")
+		"gameOver":
+			# Somebody WON: the result sits centre-screen until the wipe lands
+			if data is Dictionary and _death_label:
+				_death_label.text = str(data.get("text", "GAME OVER"))
+				_death_label.add_theme_color_override("font_color", Color("#ffd54a"))
+				_death_label.visible = true
+				_game_over = true
 		"gameSettings":
 			# (the settings panel wires itself to this event)
 			_refresh_inventory(_last_inventory)  # ammo display may flip to ∞
@@ -658,9 +666,9 @@ func _build_esc_menu() -> void:
 func _toggle_esc_menu(open: bool) -> void:
 	_esc_menu.visible = open
 	# The tuning sliders work live in every mode; the rest of the settings
-	# only unlock in Build mode, so gray them out elsewhere.
-	var buildable := str(Net.game_settings.get("mode", "slayer")) == "build"
-	(_settings_box.get_child(0) as Node).set_tuning_only(not buildable)
+	# only unlock in Creative, so gray them out elsewhere.
+	var creative := str(Net.game_settings.get("mode", "slayer")) == "creative"
+	(_settings_box.get_child(0) as Node).set_tuning_only(not creative)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
 
 
@@ -716,6 +724,9 @@ func _update_slayer_hud() -> void:
 		return
 	var slayer := bool(Net.game_settings.get("slayer", true))
 	var p: CharacterBody3D = sync_node.player
+	if _game_over:
+		_health_label.visible = slayer and p != null and not p.godmode
+		return
 	if not slayer or p == null or sync_node.self_id == "":
 		_health_label.visible = false
 		_death_label.visible = false
@@ -852,14 +863,14 @@ func _refresh(scores: Dictionary) -> void:
 			music.damage_pulse()
 	_last_hp = my_hp
 	var holder: String = sync_node.holder_id
-	# The oddball "YOU'RE IT" banner belongs to the old sandbox mode
+	# The oddball "YOU'RE IT" banner belongs to Reverse Tag (and Creative)
 	_it_label.visible = holder != "" and holder == sync_node.self_id and not slayer
 
 	_rebuild_scoreboard(scores, holder, slayer)
 
 
 ## Hold-Tab roster: who's here and how many they've put down. Sorted by kills
-## in Slayer (where `scores` is health), by score in the old sandbox mode.
+## where scores are health, by score in Reverse Tag.
 func _rebuild_scoreboard(scores: Dictionary, holder: String, slayer: bool) -> void:
 	if _scoreboard_rows == null:
 		return

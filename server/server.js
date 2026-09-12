@@ -6,6 +6,7 @@ const fs = require('fs');
 const readline = require('readline');
 const mapgen = require('./mapgen');
 const parametrics = require('./parametrics');
+const fortwars = require('./fortwars');
 const { LAYERS, GROUND } = mapgen;
 
 const app = express();
@@ -323,11 +324,28 @@ function gridShape() { return [gridW(), gridH()]; }
 
 // --- Global game settings (server-authoritative, alert on change) ---
 // These belong to the GAMEMODE: they're chosen in the lobby and frozen once a
-// game is live. Build mode is the exception - changing them live is its point.
-const MODES = ['slayer', 'sandbox', 'build'];
+// game is live. Creative is the exception - changing them live is its point,
+// though even Creative cannot swap the MODE under a running game.
+//
+//   slayer     coins are health, die at zero, buried heal cores
+//   reversetag the old oddball: whoever is IT banks a point a second, first to
+//              tagLimit wins; nobody dies and no cores spawn
+//   creative   reversetag rules with every setting live mid-game
+//   fortwars   two teams; grab land, build behind barriers, then fight over
+//              the game ball (fortwars.js)
+//   campaign   co-op in a hand-built world; health rules, no land grab
+const MODES = ['slayer', 'reversetag', 'creative', 'fortwars', 'campaign'];
+// Old clients and saved profiles still say these
+const MODE_ALIASES = { sandbox: 'reversetag', build: 'creative' };
+// Which modes run the health economy (coins are HP, death, corpse drops)
+const HP_MODES = ['slayer', 'fortwars', 'campaign'];
 const gameSettings = {
-  mode: 'slayer',            // 'slayer' | 'sandbox' | 'build'
-  slayer: true,              // derived from mode; coins are health (start 100)
+  mode: 'slayer',
+  slayer: true,              // derived from mode: HP_MODES; coins are health (start 100)
+  pvp: true,                 // players can hurt each other at all
+  tagLimit: 600,             // reversetag: the IT score that ends the round
+  teamLimit: 1000,           // fortwars: team score that ends the round
+  buildMs: 10 * 60 * 1000,   // fortwars: the walled-off build phase
   infiniteAmmo: true,        // default ON per Ryan
   selfAssign: true,          // creative: players may spawn items for themselves
   pedestals: true,           // auto item pedestals when a map generates
@@ -476,6 +494,8 @@ function explosionDamage(pos, excludeId, cause, byId) {
   const droppedCoins = [];
   for (const [id, player] of Object.entries(players)) {
     if (id === excludeId || isDead(id)) continue;
+    // An unowned blast (a mine nobody placed) still counts as someone else's
+    if (!canHurt(byId == null ? '' : byId, id)) continue;
     const dx = player.x - pos.x;
     const dy = player.y - pos.y;
     const dz = player.z - pos.z;
@@ -560,7 +580,8 @@ const CORE_DEPTH = 7;      // meters below the painted surface
 
 function autoPlaceGenerator() {
   activeGenerators.length = 0;
-  if (creativeLayers) {
+  // Reverse Tag has no health to heal: the cores would be furniture.
+  if (creativeLayers && gameSettings.mode !== 'reversetag') {
     const picks = [];
     for (let tries = 0; tries < 800 && picks.length < BIG_CORES; tries++) {
       // Constraints relax if the map is too cramped to satisfy them
@@ -809,6 +830,7 @@ function scatterPedestals() {
 // Ending the game is a FULL wipe: every placed object clears off the field
 // and the painted grid resets, so the next lobby starts from scratch.
 function endGame() {
+  if (gameOverTimer) { clearTimeout(gameOverTimer); gameOverTimer = null; }
   if (endVote) { clearTimeout(endVote.timer); endVote = null; }
   if (startTimer) { clearTimeout(startTimer); startTimer = null; }
   clearStartVote();
@@ -1419,11 +1441,36 @@ function pickRandomHolder() {
 // Score tick — holder gains 1 point per second (old sandbox mode only;
 // in Slayer, scores are health and only coins/generators raise them)
 setInterval(() => {
-  if (!gameSettings.slayer && holderID && players[holderID]) {
+  if (!gameSettings.slayer && holderID && players[holderID] && readyIds.has(holderID)) {
     scores[holderID] = (scores[holderID] || 0) + 1;
     io.emit('scores', scores);
+    if (gameSettings.mode === 'reversetag' && scores[holderID] >= gameSettings.tagLimit) {
+      gameOver(`${nameOf(holderID)} wins`, { winner: holderID });
+    }
   }
 }, 1000);
+
+// A round that has been WON, as opposed to voted away: everyone gets a banner
+// with the result, and the wipe follows a few seconds later.
+const GAME_OVER_MS = 6000;
+let gameOverTimer = null;
+function gameOver(text, extra = {}) {
+  if (gameOverTimer) return;
+  sysMsg(text);
+  io.emit('gameOver', { text, ...extra });
+  gameOverTimer = setTimeout(() => { gameOverTimer = null; endGame(); }, GAME_OVER_MS);
+}
+
+// Whether `byId` is allowed to take health off `targetId`. Self-harm always
+// goes through (the drill, critters, /kill); everything else respects the PvP
+// toggle and, in Fortwars, the team roster and the build-phase truce.
+function canHurt(byId, targetId) {
+  if (!players[targetId]) return false;
+  if (byId === targetId) return true;
+  if (!gameSettings.pvp) return false;
+  if (gameSettings.mode === 'fortwars') return fortwars.canHurt(byId, targetId);
+  return true;
+}
 
 // Server-side inactivity tracking
 const lastActivity = {};
@@ -1595,16 +1642,37 @@ io.on('connection', (socket) => {
     // EXCEPT the physics tuning sliders — those stay live in every mode.
     const TUNABLE = ['speedScale', 'accelScale', 'turnScale', 'boostScale',
       'jumpScale', 'gravityScale'];
-    if (readyIds.size > 0 && gameSettings.mode !== 'build' && !TUNABLE.includes(u.key)) {
+    const live = readyIds.size > 0 || editors.size > 0 || !!claim;
+    if (u.key === 'mode') {
+      // The mode is the round. Nobody swaps it under people mid-game, not
+      // even in Creative.
+      if (live) return;
+      const mode = MODE_ALIASES[u.value] || u.value;
+      if (!MODES.includes(mode)) return;
+      gameSettings.mode = mode;
+      gameSettings.slayer = HP_MODES.includes(mode);
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${nameOf(socket.id)} set the gamemode to ${mode}`);
+      return;
+    }
+    if (live && gameSettings.mode !== 'creative' && !TUNABLE.includes(u.key)) {
       return;
     }
     const who = nameOf(socket.id);
-    if (u.key === 'mode') {
-      if (!MODES.includes(u.value)) return;
-      gameSettings.mode = u.value;
-      gameSettings.slayer = u.value === 'slayer';
+    if (u.key === 'tagLimit' || u.key === 'teamLimit') {
+      const v = Math.round(Number(u.value));
+      if (!Number.isFinite(v) || v < 50 || v > 100000) return;
+      gameSettings[u.key] = v;
       io.emit('gameSettings', gameSettings);
-      sysMsg(`${who} set the gamemode to ${u.value}`);
+      sysMsg(`${who} set the ${u.key === 'tagLimit' ? 'tag' : 'team'} limit to ${v}`);
+      return;
+    }
+    if (u.key === 'buildMs') {
+      const v = Math.round(Number(u.value));
+      if (!Number.isFinite(v) || v < 30000 || v > 60 * 60 * 1000) return;
+      gameSettings.buildMs = v;
+      io.emit('gameSettings', gameSettings);
+      sysMsg(`${who} set the build phase to ${Math.round(v / 60000)} min`);
       return;
     }
     if (u.key === 'gridW' || u.key === 'gridH') {
@@ -2249,6 +2317,7 @@ io.on('connection', (socket) => {
 
   socket.on('machinegunHit', ({ targetId, dir, src }) => {
     if (!players[targetId] || isDead(targetId)) return;
+    if (!canHurt(socket.id, targetId)) return;
     if (scores[targetId] > 0) {
       const pointsLost = Math.min(scores[targetId], 2);
       scores[targetId] -= pointsLost;
@@ -2291,7 +2360,7 @@ io.on('connection', (socket) => {
   // the server does the damage so the flavour and the kill credit line up.
   socket.on('ramPlayer', (d) => {
     if (!d || !players[d.t] || isDead(d.t) || d.t === socket.id) return;
-    if (!gameSettings.slayer || !(scores[d.t] > 0)) return;
+    if (!gameSettings.slayer || !(scores[d.t] > 0) || !canHurt(socket.id, d.t)) return;
     const dmg = Math.min(scores[d.t], Math.max(4, Math.min(35, Math.floor(Number(d.dmg) || 0))));
     scores[d.t] -= dmg;
     creditHit(d.t, socket.id, d.kind === 'drill' ? 'drill' : 'ghost');
