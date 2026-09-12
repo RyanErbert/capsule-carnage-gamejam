@@ -1,0 +1,42 @@
+{
+  "quests": [
+    {
+      "id": "first_steps",
+      "title": "First Steps",
+      "giver": "warden",
+      "kind": "reach",
+      "target": "Checkpoint_Summit",
+      "count": 1,
+      "reward": 25,
+      "text": "Climb the pillars behind the plaza and stand on the summit stone."
+    },
+    {
+      "id": "scavenger",
+      "title": "Scavenger",
+      "giver": "warden",
+      "kind": "crates",
+      "count": 3,
+      "reward": 40,
+      "text": "Crack open three loot crates out in the field."
+    },
+    {
+      "id": "pocket_money",
+      "title": "Pocket Money",
+      "giver": "warden",
+      "kind": "coins",
+      "count": 50,
+      "reward": 30,
+      "text": "Bank fifty coins, by whatever means."
+    },
+    {
+      "id": "hermits_errand",
+      "title": "The Hermit's Errand",
+      "giver": "hermit",
+      "kind": "reach",
+      "target": "Checkpoint_Hollow",
+      "count": 1,
+      "reward": 60,
+      "text": "Find the hollow at the far edge of the field."
+    }
+  ]
+}

@@ -12,6 +12,7 @@ extends Control
 const LEVELS := {
 	"testworld": "res://Scenes/testworld.tscn",
 	"creative": "res://Scenes/creative.tscn",
+	"campaign": "res://Scenes/campaign.tscn",
 }
 const MODES := ["slayer", "reversetag", "creative", "fortwars", "campaign"]
 const MODE_NAMES := ["Slayer", "Reverse Tag", "Creative", "Fortwars", "Campaign"]
@@ -86,6 +87,8 @@ func _on_net_event(event: String, data: Variant) -> void:
 				_join_btn.disabled = true
 		"enterEditor":
 			get_tree().change_scene_to_file(LEVELS["creative"])
+		"enterCampaign":
+			get_tree().change_scene_to_file(LEVELS["campaign"])
 
 
 func _apply_game_settings(gs: Variant) -> void:
@@ -155,8 +158,10 @@ func _join() -> void:
 		Settings.player_name = _name_edit.text.strip_edges().left(16)
 	# STARTING a creative session goes through the server's shared countdown so
 	# every lobby lands in the editor together. Joining one in motion is direct.
-	# The server makes the same call itself and answers with 'enterEditor'.
-	if Settings.level == "creative" \
+	# The server makes the same call itself and answers with 'enterEditor' --
+	# or 'enterCampaign', which has no editor to land in.
+	var campaign := str(Net.game_settings.get("mode", "slayer")) == "campaign"
+	if (campaign or Settings.level == "creative") \
 			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		Net.emit_event("requestStart")
 		return

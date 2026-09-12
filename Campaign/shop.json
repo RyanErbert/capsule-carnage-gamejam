@@ -1,0 +1,10 @@
+{
+  "prices": {
+    "machinegun": 20,
+    "rocket": 35,
+    "mines": 15,
+    "grapple": 25,
+    "terragun": 40,
+    "vampire": 60
+  }
+}

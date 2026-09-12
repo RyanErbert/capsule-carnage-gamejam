@@ -1,0 +1,22 @@
+{
+  "name": "Marrow",
+  "color": "#c58aff",
+  "start": "hi",
+  "nodes": {
+    "hi": {
+      "text": "Guns, tools, the odd curiosity. Coins only. No refunds, no questions about where the coins came from.",
+      "choices": [
+        { "text": "Show me your wares.", "action": "shop" },
+        { "text": "What's the vampire gun?", "next": "vampire" },
+        { "text": "Just looking." }
+      ]
+    },
+    "vampire": {
+      "text": "Point it at someone, hold the trigger, and what's theirs becomes yours, a drop at a time. Runs hot. Ten seconds and it locks up on you for five. Let go before that and it never does.",
+      "choices": [
+        { "text": "Show me your wares.", "action": "shop" },
+        { "text": "Maybe later." }
+      ]
+    }
+  }
+}

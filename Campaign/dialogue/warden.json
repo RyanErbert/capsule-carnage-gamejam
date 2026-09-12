@@ -1,0 +1,22 @@
+{
+  "name": "The Warden",
+  "color": "#7dedb0",
+  "start": "hi",
+  "nodes": {
+    "hi": {
+      "text": "Work on the board, coin for anyone who finishes it. Read it yourself or I can tell you what's fresh.",
+      "choices": [
+        { "text": "Any work?", "action": "quests:warden" },
+        { "text": "How do the quests work?", "next": "how" },
+        { "text": "Not now." }
+      ]
+    },
+    "how": {
+      "text": "Take one off the board and it's yours until it's done. Some want you somewhere, some want crates cracked, one just wants you rich. Finish it and the coins are in your pocket, wherever you are.",
+      "choices": [
+        { "text": "Any work?", "action": "quests:warden" },
+        { "text": "Understood." }
+      ]
+    }
+  }
+}

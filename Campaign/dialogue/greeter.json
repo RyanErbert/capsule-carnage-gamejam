@@ -1,0 +1,29 @@
+{
+  "name": "Pip",
+  "color": "#ffb347",
+  "start": "hi",
+  "nodes": {
+    "hi": {
+      "text": "New face! Welcome to the plaza. Roll anywhere you like, nobody here bites. Well. The rats do.",
+      "choices": [
+        { "text": "Where am I?", "next": "where" },
+        { "text": "What is there to do?", "next": "todo" },
+        { "text": "Later." }
+      ]
+    },
+    "where": {
+      "text": "The plaza. Shop's to the west under the red canopy, the quest board is east with the Warden. North, the pillars climb to the summit stone. East past the trees is the field, and past that, the hollow.",
+      "choices": [
+        { "text": "What is there to do?", "next": "todo" },
+        { "text": "Thanks." }
+      ]
+    },
+    "todo": {
+      "text": "Read the board. The Warden pays coins for errands, and the merchant takes coins for guns. Crates out in the field have both in them, if you can get them open before your friends do.",
+      "choices": [
+        { "text": "Where am I again?", "next": "where" },
+        { "text": "Got it." }
+      ]
+    }
+  }
+}

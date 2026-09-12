@@ -1,0 +1,35 @@
+{
+  "name": "Old Sorrel",
+  "color": "#b9ac95",
+  "start": "hi",
+  "nodes": {
+    "hi": {
+      "text": "Hm. You came a long way for a field. Most don't bother.",
+      "choices": [
+        { "text": "What's in the hollow?", "next": "hollow" },
+        { "text": "Do you need anything?", "next": "errand" },
+        { "text": "Just passing." }
+      ]
+    },
+    "hollow": {
+      "text": "Rock, mostly. And quiet. Stand in the middle of it sometime and you'll see what I mean.",
+      "choices": [
+        { "text": "Do you need anything?", "next": "errand" },
+        { "text": "Maybe I will." }
+      ]
+    },
+    "errand": {
+      "text": "Walk into the hollow for me. All the way to the middle. My knees don't do rock anymore, and I like knowing someone's been.",
+      "choices": [
+        { "text": "I'll do it.", "action": "quest_accept:hermits_errand", "next": "thanks" },
+        { "text": "Not today." }
+      ]
+    },
+    "thanks": {
+      "text": "Good. Mind the gap on the east side, the rocks are loose.",
+      "choices": [
+        { "text": "Will do." }
+      ]
+    }
+  }
+}
