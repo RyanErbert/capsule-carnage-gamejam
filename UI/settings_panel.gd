@@ -209,7 +209,7 @@ func apply(gs: Variant) -> void:
 		return
 	for key in _checks:
 		_checks[key].set_pressed_no_signal(bool(gs.get(key, false)))
-	var mode := str(gs.get("mode", "slayer"))
+	var mode := str(gs.get("mode", "deathmatch"))
 	for entry in NUMBERS:
 		var box: SpinBox = _numbers[entry[0]]
 		(_number_rows[entry[0]] as Control).visible = mode in (entry[2] as Array)

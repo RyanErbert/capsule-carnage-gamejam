@@ -19,8 +19,8 @@ const LEVELS := {
 ## campaign's own world is not a deathmatch map.
 const MAPS_DIR := "res://maps"
 const NOT_LEVELS := ["campaign"]
-const MODES := ["slayer", "reversetag", "creative", "fortwars", "campaign"]
-const MODE_NAMES := ["Slayer", "Reverse Tag", "Creative", "Fortwars", "Campaign"]
+const MODES := ["deathmatch", "reversetag", "creative", "fortwars", "campaign"]
+const MODE_NAMES := ["Deathmatch", "Reverse Tag", "Creative", "Fortwars", "Campaign"]
 # Per-axis map size, mirroring the server's GRID_SIZES (pixels are 4 m)
 const GRID_SIZES := [24, 32, 40, 48, 56, 64, 80, 96]
 # Generator passes, mirroring server/mapgen.js SCHEMES
@@ -102,8 +102,8 @@ func _apply_game_settings(gs: Variant) -> void:
 	if not gs is Dictionary:
 		return
 	if _gamemode_opt:
-		_gamemode_opt.select(maxi(0, MODES.find(str(gs.get("mode", "slayer")))))
-	_refresh_levels(str(gs.get("mode", "slayer")))
+		_gamemode_opt.select(maxi(0, MODES.find(str(gs.get("mode", "deathmatch")))))
+	_refresh_levels(str(gs.get("mode", "deathmatch")))
 	if _w_opt:
 		_w_opt.select(maxi(0, GRID_SIZES.find(int(gs.get("gridW", 32)))))
 	if _h_opt:
@@ -215,7 +215,7 @@ func _join() -> void:
 	# every lobby lands in the editor together. Joining one in motion is direct.
 	# The server makes the same call itself and answers with 'enterEditor' --
 	# or 'enterCampaign', which has no editor to land in.
-	var campaign := str(Net.game_settings.get("mode", "slayer")) == "campaign"
+	var campaign := str(Net.game_settings.get("mode", "deathmatch")) == "campaign"
 	if (campaign or Settings.level == "campaign" or Settings.level == "creative") \
 			and OS.get_environment("FRIENDSLOP_AUTOJOIN") != "1":
 		Net.emit_event("requestStart")
@@ -338,7 +338,7 @@ func _build_ui() -> void:
 	_gamemode_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for n in MODE_NAMES:
 		_gamemode_opt.add_item(n)
-	_gamemode_opt.select(maxi(0, MODES.find(str(Net.game_settings.get("mode", "slayer")))))
+	_gamemode_opt.select(maxi(0, MODES.find(str(Net.game_settings.get("mode", "deathmatch")))))
 	_gamemode_opt.item_selected.connect(func(i: int):
 		Net.emit_event("updateGameSetting", {"key": "mode", "value": MODES[i]}))
 	mode_row.add_child(_gamemode_opt)
@@ -358,7 +358,7 @@ func _build_ui() -> void:
 		if i >= 0 and i < _level_keys.size():
 			Settings.level = str(_level_keys[i]))
 	level_row.add_child(_level_opt)
-	_refresh_levels(str(Net.game_settings.get("mode", "slayer")))
+	_refresh_levels(str(Net.game_settings.get("mode", "deathmatch")))
 	var map_gear := Button.new()
 	map_gear.text = "⚙"
 	map_gear.focus_mode = Control.FOCUS_NONE

@@ -51,9 +51,9 @@ function until(sock, ev, pred, ms = 4000) {
   ok('pvp toggles', gs.pvp === false);
 
   // --- Slayer, pvp off: a hit does nothing; pvp on: it bites ---------------
-  a.emit('updateGameSetting', { key: 'mode', value: 'slayer' });
-  gs = await until(a, 'gameSettings', g => g.mode === 'slayer');
-  ok('slayer is a health mode', gs.slayer === true);
+  a.emit('updateGameSetting', { key: 'mode', value: 'deathmatch' });
+  gs = await until(a, 'gameSettings', g => g.mode === 'deathmatch');
+  ok('deathmatch is a health mode', gs.slayer === true);
   a.emit('ready', { name: 'ryan' });
   await once(a, 'currentPlayers');
   b.emit('ready', { name: 'tim' });
@@ -66,7 +66,7 @@ function until(sock, ev, pred, ms = 4000) {
   a.emit('updateGameSetting', { key: 'mode', value: 'creative' });
   await sleep(300);
   let swapped = false;
-  a.once('gameSettings', g => { swapped = g.mode !== 'slayer'; });
+  a.once('gameSettings', g => { swapped = g.mode !== 'deathmatch'; });
   await sleep(200);
   ok('mode frozen while a round is live', !swapped);
 
@@ -93,6 +93,10 @@ function until(sock, ev, pred, ms = 4000) {
   ok('pvp on: the hit bites', scores[bId] === 98 && scores[aId] === 100);
 
   // --- Vampire: one point crosses per tick, rate limited ---------------------
+  // Spawns are scattered over ~100 m and the beam reaches 48: stand close.
+  a.emit('playerMoved', { x: 0, y: 5, z: 0 });
+  b.emit('playerMoved', { x: 6, y: 5, z: 0 });
+  await sleep(150);
   a.emit('vampireTick', { t: bId });
   scores = await until(a, 'scores', s => s[bId] === 97, 3000);
   ok('vampire moves a point across', scores[bId] === 97 && scores[aId] === 101);

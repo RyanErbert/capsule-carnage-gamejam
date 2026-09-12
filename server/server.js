@@ -328,20 +328,21 @@ function gridShape() { return [gridW(), gridH()]; }
 // game is live. Creative is the exception - changing them live is its point,
 // though even Creative cannot swap the MODE under a running game.
 //
-//   slayer     coins are health, die at zero, buried heal cores
+//   deathmatch coins are health, die at zero, buried heal cores (was Slayer)
 //   reversetag the old oddball: whoever is IT banks a point a second, first to
 //              tagLimit wins; nobody dies and no cores spawn
 //   creative   reversetag rules with every setting live mid-game
 //   fortwars   two teams; grab land, build behind barriers, then fight over
 //              the game ball (fortwars.js)
 //   campaign   co-op in a hand-built world; health rules, no land grab
-const MODES = ['slayer', 'reversetag', 'creative', 'fortwars', 'campaign'];
+const MODES = ['deathmatch', 'reversetag', 'creative', 'fortwars', 'campaign'];
 // Old clients and saved profiles still say these
-const MODE_ALIASES = { sandbox: 'reversetag', build: 'creative' };
-// Which modes run the health economy (coins are HP, death, corpse drops)
-const HP_MODES = ['slayer', 'fortwars', 'campaign'];
+const MODE_ALIASES = { sandbox: 'reversetag', build: 'creative', slayer: 'deathmatch' };
+// Which modes run the health economy (coins are HP, death, corpse drops).
+// The flag keeps its old name, `slayer`, because every client reads it.
+const HP_MODES = ['deathmatch', 'fortwars', 'campaign'];
 const gameSettings = {
-  mode: 'slayer',
+  mode: 'deathmatch',
   slayer: true,              // derived from mode: HP_MODES; coins are health (start 100)
   pvp: true,                 // players can hurt each other at all
   tagLimit: 600,             // reversetag: the IT score that ends the round

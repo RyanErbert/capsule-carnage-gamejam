@@ -703,7 +703,7 @@ func _toggle_esc_menu(open: bool) -> void:
 	_esc_menu.visible = open
 	# The tuning sliders work live in every mode; the rest of the settings
 	# only unlock in Creative, so gray them out elsewhere.
-	var creative := str(Net.game_settings.get("mode", "slayer")) == "creative"
+	var creative := str(Net.game_settings.get("mode", "deathmatch")) == "creative"
 	(_settings_box.get_child(0) as Node).set_tuning_only(not creative)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if open else Input.MOUSE_MODE_CAPTURED
 

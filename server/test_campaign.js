@@ -31,7 +31,7 @@ function until(sock, ev, pred, ms = 4000) {
   await once(b, 'connect');
   a.emit('leaveGame'); b.emit('leaveGame');
   await sleep(200);
-  let gs = await new Promise(res => { a.emit('updateGameSetting', { key: 'mode', value: 'slayer' }); a.once('gameSettings', res); });
+  let gs = await new Promise(res => { a.emit('updateGameSetting', { key: 'mode', value: 'deathmatch' }); a.once('gameSettings', res); });
   a.emit('updateGameSetting', { key: 'mode', value: 'campaign' });
   gs = await until(a, 'gameSettings', g => g.mode === 'campaign');
   ok('campaign is a health mode', gs.slayer === true);
