@@ -16,7 +16,7 @@ const FILES := [
 	"res://Scenes/campaign.gd", "res://Campaign/interactor.gd", "res://Campaign/npc.gd",
 	"res://Campaign/dialogue_box.gd", "res://Campaign/shop_panel.gd", "res://Campaign/quest_panel.gd",
 	"res://Campaign/loot_crate.gd", "res://Campaign/checkpoint.gd", "res://Campaign/quest_board.gd",
-	"res://Scenes/glb_level.gd", "res://Campaign/glb_world.gd",
+	"res://Scenes/glb_level.gd", "res://Campaign/glb_world.gd", "res://Campaign/lava.gd",
 ]
 
 

@@ -31,9 +31,11 @@ const Crate := preload("res://Campaign/loot_crate.gd")
 const Checkpoint := preload("res://Campaign/checkpoint.gd")
 const QuestBoard := preload("res://Campaign/quest_board.gd")
 const Interactor := preload("res://Campaign/interactor.gd")
+const Lava := preload("res://Campaign/lava.gd")
 
 var player: CharacterBody3D
 var _spawn := Vector3(0, 2, 0)
+var _respawn := Vector3.INF     # last checkpoint touched; INF = the spawn
 var _markers: Array = []   # Node3D, by name
 
 
@@ -67,6 +69,7 @@ func _ready() -> void:
 		if (m as Node3D).name.begins_with("NPC_"):
 			has_npcs = true
 			break
+	_place_lava(world)
 	if has_npcs:
 		_place_from_markers()
 	else:
@@ -124,6 +127,42 @@ static func _all(n: Node) -> Array:
 	for c in n.get_children():
 		out.append_array(_all(c))
 	return out
+
+
+## Lava surfaces: meshes named Lava* without a -col suffix. Each gets a
+## watcher that sends a dipped ball back to its last checkpoint.
+func _place_lava(world: Node3D) -> void:
+	for mi in _meshes(world):
+		var n: String = (mi as MeshInstance3D).name
+		if n.begins_with("Lava") and not n.ends_with("-col"):
+			var lava := Lava.new()
+			lava.mesh = mi
+			lava.player = player
+			add_child(lava)
+
+
+## Where a burnt or fallen player comes back: the last checkpoint, else spawn.
+func respawn_pos() -> Vector3:
+	return _respawn if _respawn != Vector3.INF else _spawn
+
+
+## A checkpoint ring was stood on (Campaign/checkpoint.gd tells us).
+func checkpoint_reached(at: Vector3) -> void:
+	_respawn = at + Vector3(0, 1.0, 0)
+
+
+## Into the lava: a flash and back to the checkpoint. Not a death; no coins
+## are lost, and the quest to reach the summit stays on.
+func burn(at: Vector3) -> void:
+	if player == null:
+		return
+	Sfx.bomb(at)
+	var proj: Node = get_node_or_null("WorldProjectiles")
+	if proj and proj.has_method("_explosion_vfx"):
+		proj._explosion_vfx(at, false)
+	player.global_position = respawn_pos()
+	player.velocity = Vector3.ZERO
+	player.launched(0.3)
 
 
 func _collect_markers(root: Node) -> void:
@@ -221,6 +260,7 @@ func _spawn_gameplay() -> void:
 	player = PlayerScene.instantiate()
 	player.name = "player"
 	player.spawn_points = [_spawn]
+	player.respawn_provider = respawn_pos
 	player.position = _spawn
 	add_child(player)
 
@@ -267,9 +307,9 @@ func _spawn_gameplay() -> void:
 
 
 func _physics_process(_delta: float) -> void:
-	# Off the edge of the world: back to the spawn, no death
+	# Off the edge of the world: back to the last checkpoint, no death
 	if player and not player.dead and player.global_position.y < KILL_Y:
-		player.global_position = _spawn
+		player.global_position = respawn_pos()
 		player.velocity = Vector3.ZERO
 
 

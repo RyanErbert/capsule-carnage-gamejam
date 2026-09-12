@@ -43,3 +43,7 @@ func _process(delta: float) -> void:
 	if Vector2(d.x, d.z).length() < RADIUS and absf(d.y) < 3.0:
 		_cd = REPORT_EVERY
 		Net.emit_event("questReach", target)
+		# ...and this is where you come back to if the lava gets you
+		var scene: Node = get_parent()
+		if scene and scene.has_method("checkpoint_reached"):
+			scene.checkpoint_reached(global_position)
